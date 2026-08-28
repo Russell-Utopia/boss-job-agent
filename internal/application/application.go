@@ -143,6 +143,56 @@ func (a *Application) StartupState(ctx context.Context) (StartupState, error) {
 	return state, nil
 }
 
+// JobsState returns only the state needed by the global job workspace. Its
+// availability does not depend on assessment policy or outreach settings.
+func (a *Application) JobsState(ctx context.Context) (StartupState, error) {
+	resume, err := a.currentResume(ctx)
+	if err != nil {
+		return StartupState{}, err
+	}
+	return StartupState{
+		CurrentResume: resume,
+		Actions: FirstUseActions{
+			StartDiscovery: discoveryAvailability(resume),
+		},
+	}, nil
+}
+
+func (a *Application) AssessmentsState(ctx context.Context) (StartupState, error) {
+	policy, err := a.activePolicy(ctx)
+	if err != nil {
+		return StartupState{}, err
+	}
+	automation, err := a.automationSettings(ctx)
+	if err != nil {
+		return StartupState{}, err
+	}
+	return StartupState{ActivePolicy: policy, Automation: automation}, nil
+}
+
+func (a *Application) OutreachState(ctx context.Context) (StartupState, error) {
+	automation, err := a.automationSettings(ctx)
+	if err != nil {
+		return StartupState{}, err
+	}
+	simulation, real := outreachAvailability(automation)
+	return StartupState{
+		Automation: automation,
+		Actions: FirstUseActions{
+			QueueSimulationOutreach: simulation,
+			QueueRealOutreach:       real,
+		},
+	}, nil
+}
+
+func (a *Application) ResumeState(ctx context.Context) (StartupState, error) {
+	resume, err := a.currentResume(ctx)
+	if err != nil {
+		return StartupState{}, err
+	}
+	return StartupState{CurrentResume: resume}, nil
+}
+
 func (a *Application) StartDiscovery(ctx context.Context) error {
 	resume, err := a.currentResume(ctx)
 	if err != nil {

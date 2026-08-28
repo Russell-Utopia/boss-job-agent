@@ -195,6 +195,38 @@ func TestWebRestoresSavedPolicyAndAutomationSettings(t *testing.T) {
 	})
 }
 
+func TestWebPagesDoNotDependOnUnrelatedDownstreamState(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "boss-job-agent.db")
+	app, err := application.Open(context.Background(), application.Config{DatabasePath: path})
+	if err != nil {
+		t.Fatalf("open application: %v", err)
+	}
+	t.Cleanup(func() { _ = app.Close() })
+	server := httptest.NewServer(New(app))
+	t.Cleanup(server.Close)
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open fixture database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`DELETE FROM assessment_policy_versions`); err != nil {
+		t.Fatalf("remove unrelated policy: %v", err)
+	}
+
+	assertPageStatus(t, server.URL+"/jobs", http.StatusOK)
+	assertPageStatus(t, server.URL+"/outreach", http.StatusOK)
+	assertPageStatus(t, server.URL+"/resume", http.StatusOK)
+
+	if _, err := db.Exec(`DELETE FROM automation_settings`); err != nil {
+		t.Fatalf("remove unrelated automation settings: %v", err)
+	}
+	assertPageStatus(t, server.URL+"/jobs", http.StatusOK)
+	assertPageStatus(t, server.URL+"/resume", http.StatusOK)
+}
+
 func assertPageContains(t *testing.T, url string, wants []string) {
 	t.Helper()
 	response, err := http.Get(url)
@@ -210,5 +242,17 @@ func assertPageContains(t *testing.T, url string, wants []string) {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("page does not contain %q", want)
 		}
+	}
+}
+
+func assertPageStatus(t *testing.T, url string, want int) {
+	t.Helper()
+	response, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("get page: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != want {
+		t.Errorf("page status = %d, want %d", response.StatusCode, want)
 	}
 }

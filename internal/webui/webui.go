@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"html/template"
@@ -32,16 +33,18 @@ type pageData struct {
 	State     application.StartupState
 }
 
+type stateQuery func(context.Context) (application.StartupState, error)
+
 func New(app *application.Application) http.Handler {
 	h := &handler{app: app}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/jobs", http.StatusSeeOther)
 	})
-	mux.HandleFunc("GET /jobs", h.renderPage("jobs", "岗位工作台"))
-	mux.HandleFunc("GET /assessments", h.renderPage("assessments", "岗位鉴定"))
-	mux.HandleFunc("GET /outreach", h.renderPage("outreach", "首次沟通"))
-	mux.HandleFunc("GET /resume", h.renderPage("resume", "在线简历"))
+	mux.HandleFunc("GET /jobs", h.renderPage("jobs", "岗位工作台", h.app.JobsState))
+	mux.HandleFunc("GET /assessments", h.renderPage("assessments", "岗位鉴定", h.app.AssessmentsState))
+	mux.HandleFunc("GET /outreach", h.renderPage("outreach", "首次沟通", h.app.OutreachState))
+	mux.HandleFunc("GET /resume", h.renderPage("resume", "在线简历", h.app.ResumeState))
 	mux.HandleFunc("GET /assets/app.css", serveCSS)
 	mux.HandleFunc("GET /api/startup-state", h.startupState)
 	mux.HandleFunc("POST /api/discovery-runs", h.startDiscovery)
@@ -50,9 +53,9 @@ func New(app *application.Application) http.Handler {
 	return mux
 }
 
-func (h *handler) renderPage(page, title string) http.HandlerFunc {
+func (h *handler) renderPage(page, title string, query stateQuery) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		state, err := h.app.StartupState(r.Context())
+		state, err := query(r.Context())
 		if err != nil {
 			http.Error(w, "无法读取当前业务状态", http.StatusInternalServerError)
 			return
