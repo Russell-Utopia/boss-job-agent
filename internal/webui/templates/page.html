@@ -56,7 +56,7 @@
     <section class="settings-grid">
       <article class="card">
         <p class="eyebrow">当前正式策略</p>
-        <h2>默认策略 v{{.State.ActivePolicy.Version}}</h2>
+        <h2>{{.State.ActivePolicy.Name}}</h2>
         <ol class="rules">{{range .State.ActivePolicy.Rules}}<li>{{.}}</li>{{end}}</ol>
       </article>
       <article class="card compact">
@@ -74,7 +74,7 @@
       <article class="card compact">
         <dl>
           <div><dt>自动首次沟通</dt><dd>{{enabledText .State.Automation.AutomaticOutreachEnabled}}</dd></div>
-          <div><dt>默认模式</dt><dd>Simulation</dd></div>
+          <div><dt>默认模式</dt><dd>{{.State.Automation.AutomaticOutreachModeText}}</dd></div>
           <div><dt>固定招呼语</dt><dd>{{if .State.Automation.OutreachGreeting}}{{.State.Automation.OutreachGreeting}}{{else}}未配置{{end}}</dd></div>
           <div><dt>真实发送时间</dt><dd>{{.State.Automation.OutreachTimeDescription}}</dd></div>
         </dl>

@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync/atomic"
-	"time"
 
 	schema "github.com/Russell-Utopia/boss-job-agent/docs"
 	_ "modernc.org/sqlite"
@@ -19,11 +18,8 @@ const schemaVersion = 1
 
 var memoryDatabaseID atomic.Uint64
 
-const defaultPolicyJSON = `{"rules":["只依据本次实际采用的在线简历和 JD，不猜测未提供的经历","有明确且重要的不匹配证据时判为不适合","有明确匹配证据时判为适合","信息不足或证据冲突时需要人工确认"]}`
-
-// Open opens one local SQLite database, applies the v1 schema on first use, and
-// creates the immutable default policy and singleton safe automation settings.
-func Open(ctx context.Context, path string, now time.Time) (*sql.DB, error) {
+// Open opens one local SQLite database and applies the v1 schema on first use.
+func Open(ctx context.Context, path string) (*sql.DB, error) {
 	dsn, err := dataSourceName(path)
 	if err != nil {
 		return nil, err
@@ -39,7 +35,7 @@ func Open(ctx context.Context, path string, now time.Time) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
-	if err := migrate(ctx, db, now.UnixMilli()); err != nil {
+	if err := migrate(ctx, db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -75,7 +71,7 @@ func dataSourceName(path string) (string, error) {
 	return u.String(), nil
 }
 
-func migrate(ctx context.Context, db *sql.DB, nowMillis int64) error {
+func migrate(ctx context.Context, db *sql.DB) error {
 	var version int
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
@@ -107,27 +103,6 @@ func migrate(ctx context.Context, db *sql.DB, nowMillis int64) error {
 
 	if _, err := tx.ExecContext(ctx, schema.SQLite); err != nil {
 		return fmt.Errorf("apply v1 schema: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO assessment_policy_versions (
-			version_no, rules_json, is_active, change_note, created_at
-		) VALUES (1, ?, 1, '系统默认策略', ?)
-	`, defaultPolicyJSON, nowMillis); err != nil {
-		return fmt.Errorf("create default assessment policy: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO automation_settings (
-			id,
-			automatic_assessment_enabled,
-			assessment_processing_limit,
-			automatic_outreach_enabled,
-			automatic_outreach_mode,
-			outreach_greeting_text,
-			outreach_time_windows_json,
-			updated_at
-		) VALUES (1, 0, 5, 0, 'simulation', NULL, '[]', ?)
-	`, nowMillis); err != nil {
-		return fmt.Errorf("create safe automation settings: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
 		return fmt.Errorf("record schema version: %w", err)

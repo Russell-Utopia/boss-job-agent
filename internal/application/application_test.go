@@ -113,6 +113,32 @@ func TestFirstUseActionsAreRejectedWithUserFacingReasons(t *testing.T) {
 	}
 }
 
+func TestStartDiscoveryDoesNotDependOnDownstreamPolicyOrAutomationSettings(t *testing.T) {
+	t.Parallel()
+
+	app, err := Open(context.Background(), Config{DatabasePath: ":memory:"})
+	if err != nil {
+		t.Fatalf("open application: %v", err)
+	}
+	t.Cleanup(func() { _ = app.Close() })
+
+	if _, err := app.db.Exec(`DELETE FROM assessment_policy_versions`); err != nil {
+		t.Fatalf("remove policy fixture: %v", err)
+	}
+	if _, err := app.db.Exec(`DELETE FROM automation_settings`); err != nil {
+		t.Fatalf("remove automation fixture: %v", err)
+	}
+
+	err = app.StartDiscovery(context.Background())
+	rejection, ok := AsRejection(err)
+	if !ok {
+		t.Fatalf("start discovery error = %v, want a business rejection", err)
+	}
+	if rejection.Code != "online_resume_required" {
+		t.Errorf("rejection code = %q, want online_resume_required", rejection.Code)
+	}
+}
+
 func assertUnavailableAction(t *testing.T, action ActionAvailability, code, reason string) {
 	t.Helper()
 	if action.Allowed {

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Russell-Utopia/boss-job-agent/internal/advice"
+	"github.com/Russell-Utopia/boss-job-agent/internal/automationsettings"
 	storage "github.com/Russell-Utopia/boss-job-agent/internal/sqlite"
 )
 
@@ -41,6 +43,7 @@ type OnlineResumeVersion struct {
 
 type AssessmentPolicy struct {
 	Version int      `json:"version"`
+	Name    string   `json:"name"`
 	Rules   []string `json:"rules"`
 }
 
@@ -49,6 +52,7 @@ type AutomationSettings struct {
 	AssessmentProcessingLimit  int                  `json:"assessmentProcessingLimit"`
 	AutomaticOutreachEnabled   bool                 `json:"automaticOutreachEnabled"`
 	AutomaticOutreachMode      OutreachMode         `json:"automaticOutreachMode"`
+	AutomaticOutreachModeText  string               `json:"automaticOutreachModeText"`
 	OutreachGreeting           *string              `json:"outreachGreeting"`
 	OutreachTimeWindows        []OutreachTimeWindow `json:"outreachTimeWindows"`
 	OutreachTimeDescription    string               `json:"outreachTimeDescription"`
@@ -97,8 +101,17 @@ func Open(ctx context.Context, config Config) (*Application, error) {
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	db, err := storage.Open(ctx, config.DatabasePath, config.Now())
+	nowMillis := config.Now().UnixMilli()
+	db, err := storage.Open(ctx, config.DatabasePath)
 	if err != nil {
+		return nil, err
+	}
+	if err := advice.EnsureDefaultPolicy(ctx, db, nowMillis); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := automationsettings.EnsureSafeDefaults(ctx, db, nowMillis); err != nil {
+		db.Close()
 		return nil, err
 	}
 	return &Application{db: db}, nil
@@ -131,27 +144,29 @@ func (a *Application) StartupState(ctx context.Context) (StartupState, error) {
 }
 
 func (a *Application) StartDiscovery(ctx context.Context) error {
-	state, err := a.StartupState(ctx)
+	resume, err := a.currentResume(ctx)
 	if err != nil {
 		return err
 	}
-	return rejectUnavailable(state.Actions.StartDiscovery)
+	return rejectUnavailable(discoveryAvailability(resume))
 }
 
 func (a *Application) QueueSimulationOutreach(ctx context.Context, _ []int64) error {
-	state, err := a.StartupState(ctx)
+	automation, err := a.automationSettings(ctx)
 	if err != nil {
 		return err
 	}
-	return rejectUnavailable(state.Actions.QueueSimulationOutreach)
+	simulation, _ := outreachAvailability(automation)
+	return rejectUnavailable(simulation)
 }
 
 func (a *Application) QueueRealOutreach(ctx context.Context, _ []int64, _ RealOutreachConfirmation) error {
-	state, err := a.StartupState(ctx)
+	automation, err := a.automationSettings(ctx)
 	if err != nil {
 		return err
 	}
-	return rejectUnavailable(state.Actions.QueueRealOutreach)
+	_, real := outreachAvailability(automation)
+	return rejectUnavailable(real)
 }
 
 func rejectUnavailable(action ActionAvailability) error {
@@ -162,11 +177,29 @@ func rejectUnavailable(action ActionAvailability) error {
 }
 
 func firstUseActions(state StartupState) FirstUseActions {
+	simulation, real := outreachAvailability(state.Automation)
+	return FirstUseActions{
+		StartDiscovery:          discoveryAvailability(state.CurrentResume),
+		QueueSimulationOutreach: simulation,
+		QueueRealOutreach:       real,
+	}
+}
+
+func discoveryAvailability(resume *OnlineResumeVersion) ActionAvailability {
+	if resume == nil {
+		return unavailable(
+			"online_resume_required",
+			"请先刷新在线简历，再开始岗位发现",
+		)
+	}
+	return unavailable(
+		"discovery_unavailable",
+		"当前版本尚未开放岗位发现",
+	)
+}
+
+func outreachAvailability(automation AutomationSettings) (ActionAvailability, ActionAvailability) {
 	actions := FirstUseActions{
-		StartDiscovery: unavailable(
-			"discovery_unavailable",
-			"当前版本尚未开放岗位发现",
-		),
 		QueueSimulationOutreach: unavailable(
 			"outreach_unavailable",
 			"当前没有可加入模拟队列的岗位",
@@ -176,13 +209,7 @@ func firstUseActions(state StartupState) FirstUseActions {
 			"当前没有可加入真实发送队列的岗位",
 		),
 	}
-	if state.CurrentResume == nil {
-		actions.StartDiscovery = unavailable(
-			"online_resume_required",
-			"请先刷新在线简历，再开始岗位发现",
-		)
-	}
-	if state.Automation.OutreachGreeting == nil {
+	if automation.OutreachGreeting == nil {
 		actions.QueueSimulationOutreach = unavailable(
 			"outreach_greeting_required",
 			"请先配置固定招呼语，再加入模拟队列",
@@ -192,7 +219,7 @@ func firstUseActions(state StartupState) FirstUseActions {
 			"请先配置固定招呼语，再加入真实发送队列",
 		)
 	}
-	return actions
+	return actions.QueueSimulationOutreach, actions.QueueRealOutreach
 }
 
 func unavailable(code, reason string) ActionAvailability {
@@ -222,11 +249,12 @@ func (a *Application) currentResume(ctx context.Context) (*OnlineResumeVersion, 
 func (a *Application) activePolicy(ctx context.Context) (AssessmentPolicy, error) {
 	var version int
 	var rulesJSON string
+	var changeNote sql.NullString
 	if err := a.db.QueryRowContext(ctx, `
-		SELECT version_no, rules_json
+		SELECT version_no, rules_json, change_note
 		FROM assessment_policy_versions
 		WHERE is_active = 1
-	`).Scan(&version, &rulesJSON); err != nil {
+	`).Scan(&version, &rulesJSON, &changeNote); err != nil {
 		return AssessmentPolicy{}, fmt.Errorf("query active assessment policy: %w", err)
 	}
 	var document struct {
@@ -235,7 +263,11 @@ func (a *Application) activePolicy(ctx context.Context) (AssessmentPolicy, error
 	if err := json.Unmarshal([]byte(rulesJSON), &document); err != nil {
 		return AssessmentPolicy{}, fmt.Errorf("decode active assessment policy: %w", err)
 	}
-	return AssessmentPolicy{Version: version, Rules: document.Rules}, nil
+	name := fmt.Sprintf("策略 v%d", version)
+	if version == 1 && changeNote.String == "系统默认策略" {
+		name = "默认策略 v1"
+	}
+	return AssessmentPolicy{Version: version, Name: name, Rules: document.Rules}, nil
 }
 
 func (a *Application) automationSettings(ctx context.Context) (AutomationSettings, error) {
@@ -279,11 +311,17 @@ func (a *Application) automationSettings(ctx context.Context) (AutomationSetting
 		timeDescription = "按已配置时间段发送"
 	}
 
+	modeText := "Simulation"
+	if OutreachMode(mode) == OutreachModeReal {
+		modeText = "Real"
+	}
+
 	return AutomationSettings{
 		AutomaticAssessmentEnabled: automaticAssessment == 1,
 		AssessmentProcessingLimit:  processingLimit,
 		AutomaticOutreachEnabled:   automaticOutreach == 1,
 		AutomaticOutreachMode:      OutreachMode(mode),
+		AutomaticOutreachModeText:  modeText,
 		OutreachGreeting:           greetingValue,
 		OutreachTimeWindows:        windows,
 		OutreachTimeDescription:    timeDescription,

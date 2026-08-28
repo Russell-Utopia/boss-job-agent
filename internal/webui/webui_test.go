@@ -2,10 +2,12 @@ package webui
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -120,5 +122,93 @@ func TestWebCommandsReturnBusinessRejections(t *testing.T) {
 				t.Error("rejection reason is empty")
 			}
 		})
+	}
+}
+
+func TestWebRestoresSavedPolicyAndAutomationSettings(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "boss-job-agent.db")
+	first, err := application.Open(context.Background(), application.Config{DatabasePath: path})
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first application: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open fixture database: %v", err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin fixture transaction: %v", err)
+	}
+	if _, err := tx.Exec(`UPDATE assessment_policy_versions SET is_active = 0 WHERE version_no = 1`); err != nil {
+		t.Fatalf("deactivate default policy: %v", err)
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO assessment_policy_versions (
+			version_no, rules_json, is_active, change_note, created_at
+		) VALUES (2, '{"rules":["用户保存的策略"]}', 1, '用户采用', 2000)
+	`); err != nil {
+		t.Fatalf("insert saved policy: %v", err)
+	}
+	if _, err := tx.Exec(`
+		UPDATE automation_settings
+		SET automatic_assessment_enabled = 1,
+			assessment_processing_limit = 12,
+			automatic_outreach_enabled = 1,
+			automatic_outreach_mode = 'real',
+			outreach_greeting_text = '您好，想和您聊聊这个岗位',
+			outreach_time_windows_json = '[{"start":"10:00","end":"12:00"}]',
+			updated_at = 2000
+		WHERE id = 1
+	`); err != nil {
+		t.Fatalf("save custom settings: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit fixture transaction: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fixture database: %v", err)
+	}
+
+	restarted, err := application.Open(context.Background(), application.Config{DatabasePath: path})
+	if err != nil {
+		t.Fatalf("restart application: %v", err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	server := httptest.NewServer(New(restarted))
+	t.Cleanup(server.Close)
+
+	assertPageContains(t, server.URL+"/assessments", []string{
+		"<h2>策略 v2</h2>",
+		"<dd>已开启</dd>",
+		"<dd>12</dd>",
+	})
+	assertPageContains(t, server.URL+"/outreach", []string{
+		"<dd>Real</dd>",
+		"<dd>您好，想和您聊聊这个岗位</dd>",
+		"<dd>按已配置时间段发送</dd>",
+	})
+}
+
+func assertPageContains(t *testing.T, url string, wants []string) {
+	t.Helper()
+	response, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("get page: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read page: %v", err)
+	}
+	for _, want := range wants {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("page does not contain %q", want)
+		}
 	}
 }
