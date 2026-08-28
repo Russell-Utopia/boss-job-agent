@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>BOSS Job Agent · THROWAWAY WEB PROTOTYPE</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body data-prototype="true">
+    <!-- THROWAWAY PROTOTYPE: one consolidated Web information architecture. -->
+    <noscript>这个可丢弃原型需要浏览器启用 JavaScript。</noscript>
+    <div id="app" aria-live="polite"></div>
+
+    <dialog id="start-discovery-dialog" class="dialog medium-dialog">
+      <div class="dialog-head">
+        <div><span class="eyebrow">岗位发现</span><h2>创建并开始新的岗位发现</h2></div>
+        <button class="icon-button" data-action="close-dialog" aria-label="关闭">×</button>
+      </div>
+      <div class="start-summary">
+        <div><span>求职资料</span><strong id="start-resume-version"></strong><p id="start-resume-saved"></p></div>
+        <div><span>搜索范围</span><strong>后端开发 × 在线简历中的 6 个目标城市</strong><p>岗位名称保持在线简历原文，共 6 个搜索范围。</p></div>
+      </div>
+      <div id="start-discovery-notices" class="notice-list"></div>
+      <p class="plain-note">本次在线简历版本只决定搜索范围。开始后岗位会先保存到全局岗位列表；再次发现已有岗位且 JD 判断内容未变时继续复用原结论，不会自动重新鉴定。自动设置或岗位页的手工操作再决定是否安排鉴定和首次沟通。</p>
+      <div class="dialog-actions">
+        <button class="button ghost" data-action="close-dialog">取消</button>
+        <button id="start-discovery-submit" class="button primary" data-action="confirm-start-discovery">创建并开始</button>
+      </div>
+    </dialog>
+
+    <dialog id="assessment-confirm-dialog" class="dialog medium-dialog">
+      <span class="eyebrow">重新鉴定确认</span>
+      <h2>安排选中岗位重新鉴定</h2>
+      <div class="confirm-facts">
+        <div><span>本批岗位</span><strong id="assessment-confirm-count"></strong></div>
+        <div><span>确认后的状态</span><p>待鉴定，表示已经安排但尚未开始</p></div>
+      </div>
+      <p class="plain-note">这里不选择或冻结简历、策略版本和 JD。真正开始鉴定时，使用数据库中最后一次由用户手工保存的在线简历版本、届时当前策略和岗位 JD；鉴定过程不会访问 BOSS，已经开始的鉴定也不会被后续设置修改。</p>
+      <div class="dialog-actions">
+        <button class="button ghost" data-action="close-dialog">取消</button>
+        <button class="button primary" data-action="confirm-assessment-queue">确认安排鉴定</button>
+      </div>
+    </dialog>
+
+    <dialog id="job-detail-dialog" class="dialog medium-dialog">
+      <div class="dialog-head">
+        <div><span class="eyebrow">岗位详情</span><h2 id="job-detail-title"></h2><p id="job-detail-company"></p></div>
+        <button class="icon-button" data-action="close-dialog" aria-label="关闭">×</button>
+      </div>
+      <div class="confirm-facts">
+        <div><span>鉴定状态</span><strong id="job-detail-assessment-status"></strong></div>
+        <div><span>本次鉴定实际依据</span><p id="job-detail-assessment-usage"></p></div>
+        <div><span>Agent 输入</span><p id="job-detail-agent-input"></p></div>
+        <div><span>首次沟通</span><p id="job-detail-outreach"></p></div>
+      </div>
+      <p class="plain-note">等待开始时不会提前确定策略或在线简历。只有鉴定执行中或已完成，才会展示本次实际使用的信息；界面不提供历史版本选择器，也不展示内部编号。</p>
+      <div class="dialog-actions"><button class="button primary" data-action="close-dialog">知道了</button></div>
+    </dialog>
+
+    <dialog id="end-discovery-dialog" class="dialog small-dialog">
+      <span class="eyebrow danger">提前结束</span>
+      <h2>结束当前岗位发现运行？</h2>
+      <p>当前检查点会保留为结束记录，但这个运行不能再继续；结束后才能创建新的岗位发现运行。</p>
+      <label class="field-stack"><span>结束原因</span><input id="end-reason" value="本次不再继续搜索" /></label>
+      <div class="dialog-actions">
+        <button class="button ghost" data-action="close-dialog">取消</button>
+        <button class="button danger-button" data-action="confirm-end-discovery">确认提前结束</button>
+      </div>
+    </dialog>
+
+    <dialog id="manual-real-dialog" class="dialog medium-dialog">
+      <span class="eyebrow danger">手工真实发送授权</span>
+      <h2>确认安排真实发送</h2>
+      <div class="confirm-facts">
+        <div><span>本批可安排岗位</span><strong id="manual-real-count"></strong></div>
+        <div><span>完整固定招呼语</span><p id="manual-real-greeting"></p></div>
+        <div><span>发送时间</span><p id="manual-real-windows"></p></div>
+      </div>
+      <p class="plain-note">只授权本批选中岗位，不会开启或修改全局自动首次沟通；确认后仍遵守相同时间窗。</p>
+      <div class="dialog-actions">
+        <button class="button ghost" data-action="close-dialog">取消</button>
+        <button class="button danger-button" data-action="confirm-manual-real">只授权本批岗位</button>
+      </div>
+    </dialog>
+
+    <dialog id="batch-result-dialog" class="dialog medium-dialog">
+      <span class="eyebrow">提交时二次校验</span>
+      <h2 id="batch-result-title">操作结果</h2>
+      <p id="batch-result-summary" class="result-summary"></p>
+      <div id="batch-result-reasons"></div>
+      <p class="plain-note">结果只在当前界面显示，不建立批次表或批次历史。</p>
+      <div class="dialog-actions"><button class="button primary" data-action="close-dialog">知道了</button></div>
+    </dialog>
+
+    <dialog id="review-dialog" class="dialog review-dialog">
+      <div class="review-dialog-header">
+        <div><span class="eyebrow">逐个人工复核</span><div class="review-progress" id="review-progress"></div><h2 id="review-title"></h2><p id="review-company"></p></div>
+        <span id="review-platform-status" class="module-status"></span>
+      </div>
+      <div class="review-layout">
+        <section class="review-jd-pane">
+          <div class="review-section-heading"><span>当前 JD 快照</span><strong>这是本次人工结论所依据的内容</strong></div>
+          <div class="jd-section"><h3>工作职责</h3><ul id="review-responsibilities"></ul></div>
+          <div class="jd-section"><h3>任职要求</h3><ul id="review-requirements"></ul></div>
+        </section>
+        <aside class="review-decision-pane">
+          <div class="review-section-heading"><span>判断辅助</span><strong>AI 结论不会替你做最终决定</strong></div>
+          <div class="review-evidence"><span>AI 鉴定结论</span><strong id="review-ai-verdict"></strong></div>
+          <div class="review-evidence"><span>AI 鉴定理由</span><p id="review-reason"></p></div>
+          <div class="review-evidence"><span>本次 AI 实际依据</span><p id="review-assessment-usage"></p></div>
+          <div class="review-evidence"><span>当前人工结论</span><p id="review-human-verdict"></p></div>
+          <p class="plain-note">请以左侧当前 JD 为准。人工结论只针对当前 JD，保存后优先于 AI；以后 JD 变化时会转为“人工结论待复核”。</p>
+        </aside>
+      </div>
+      <div class="dialog-actions split-actions review-actions">
+        <button class="button ghost" data-action="review-skip">暂时跳过</button>
+        <div><button class="button secondary" data-action="review-unsuitable">人工判为不适合</button><button class="button primary" data-action="review-suitable">人工判为适合</button></div>
+      </div>
+    </dialog>
+
+    <dialog id="policy-candidate-dialog" class="dialog comparison-dialog">
+      <span class="eyebrow">THROWAWAY · 完整策略候选稿</span>
+      <div class="heading-with-help"><h2>根据当前策略与人工标注生成新策略</h2><span class="help-icon" tabindex="0" role="note" aria-label="查看候选稿说明" data-tooltip="候选稿只存在于当前页面会话；取消、离开或重新打开后无法恢复。重新生成会使用届时的策略和人工标注。">?</span></div>
+      <div class="policy-candidate-meta">
+        <span>生成依据：<strong id="policy-candidate-count"></strong>有效人工标注</span>
+        <span id="policy-candidate-label-split"></span>
+        <span id="policy-candidate-input-help" class="help-icon" tabindex="0" role="note" aria-label="查看学习数据边界">?</span>
+      </div>
+      <section class="policy-diff-section">
+        <div class="policy-diff-head">
+          <div><strong>策略文本差异</strong><span id="policy-diff-version"></span></div>
+          <div class="diff-legend"><span class="removed">− 删除</span><span class="added">+ 新增</span><span class="unchanged">未变化</span></div>
+        </div>
+        <div id="policy-text-diff" class="policy-text-diff" tabindex="-1" aria-label="当前策略与候选策略逐行差异"></div>
+      </section>
+      <details class="policy-candidate-editor">
+        <summary>编辑候选策略全文</summary>
+        <label><span>采用时将保存下面这份完整文本</span><textarea id="policy-candidate-full-text" class="policy-candidate-text" rows="12"></textarea></label>
+      </details>
+      <div class="dialog-actions">
+        <button class="button ghost" data-action="request-discard-policy-suggestion">取消</button>
+        <button class="button secondary" data-action="request-regenerate-policy-suggestion">重新生成</button>
+        <button id="activate-policy-version-button" class="button primary" data-action="activate-policy-version">采用策略</button>
+      </div>
+    </dialog>
+
+    <dialog id="policy-suggestion-loss-dialog" class="dialog small-dialog danger-confirm-dialog">
+      <span class="eyebrow danger">临时候选稿将永久丢失</span>
+      <h2 id="policy-suggestion-loss-title">确认丢弃未采用内容？</h2>
+      <p id="policy-suggestion-loss-message" class="result-summary"></p>
+      <p>确认后无法恢复；当前正式策略不会改变。</p>
+      <div class="dialog-actions">
+        <button class="button ghost" data-action="keep-policy-suggestion">保留并返回</button>
+        <button class="button danger-button" data-action="confirm-policy-suggestion-loss">确认永久丢失</button>
+      </div>
+    </dialog>
+
+    <dialog id="impact-dialog" class="dialog small-dialog">
+      <span class="eyebrow danger">切换为自动真实沟通</span>
+      <h2>确认模式影响</h2>
+      <p id="impact-exact-copy" class="result-summary"></p>
+      <p>模拟中的岗位不会中途转为真实；完成模拟后才会重新检查资格。</p>
+      <div class="dialog-actions">
+        <button class="button ghost" data-action="cancel-real-switch">取消</button>
+        <button class="button danger-button" data-action="confirm-real-switch">确认保存</button>
+      </div>
+    </dialog>
+
+    <dialog id="time-window-editor-dialog" class="dialog small-dialog time-window-dialog">
+      <div class="dialog-head">
+        <div><span class="eyebrow">真实发送时间</span><h2 id="time-window-editor-title">添加发送时间窗</h2></div>
+        <button class="icon-button" data-action="close-dialog" aria-label="关闭">×</button>
+      </div>
+      <div class="preset-window-list" aria-label="常用时间窗">
+        <button data-time-window-preset="morning"><strong>上午</strong><span>09:00–12:00</span></button>
+        <button data-time-window-preset="afternoon"><strong>下午</strong><span>14:00–18:00</span></button>
+        <button data-time-window-preset="evening"><strong>晚间</strong><span>19:00–21:00</span></button>
+      </div>
+      <div class="custom-window-picker">
+        <label class="field-stack"><span>开始时间</span><select id="time-window-start"></select></label>
+        <span>至</span>
+        <label class="field-stack"><span>结束时间</span><select id="time-window-end"></select></label>
+      </div>
+      <div class="dialog-actions">
+        <button class="button ghost" data-action="close-dialog">取消</button>
+        <button class="button primary" data-action="save-time-window">保存时间窗</button>
+      </div>
+    </dialog>
+
+    <div id="toast" class="toast" role="status"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

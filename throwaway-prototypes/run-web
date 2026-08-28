@@ -1,0 +1,5 @@
+#!/bin/sh
+# THROWAWAY PROTOTYPE launcher. Localhost only; no persistence or BOSS integration.
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec python3 "$SCRIPT_DIR/web_server.py"
