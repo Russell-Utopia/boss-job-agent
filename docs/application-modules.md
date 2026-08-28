@@ -1,0 +1,178 @@
+# v1 后台模块与接口
+
+本文只约定实现前的模块 seam、状态所有权和调用语义，不规定 Go 包结构，也不展开内部函数。
+
+## 运行结构
+
+一个常驻后台进程启动岗位发现、岗位鉴定和首次沟通三个执行模块。三个模块不在内存中互相传递任务，SQLite 中的当前业务状态、在线简历版本和自动化设置是进程重启后仍可恢复的衔接点；MVP Web 只调用下面的业务接口和只读查询，不直接访问 SQLite。具体信息架构、文案和验收场景见 [MVP Web 交互规格](./web-mvp.md)。
+
+## 状态所有权
+
+| 模块 | 唯一可写状态 | 可以读取 | 不负责 |
+| --- | --- | --- | --- |
+| `OnlineResumeVersions` 在线简历版本模块 | `online_resume_versions` | 求职者显式刷新时读取 BOSS 在线简历 | 自动刷新、搜索岗位、选择鉴定策略、修改历史版本 |
+| `SearchService` 岗位发现模块 | `discovery_runs` | 当前已保存的在线简历版本、全局岗位处理结果 | 刷新在线简历、选择鉴定策略、直接更新 `platform_jobs`、等待鉴定或发送收口 |
+| `JobPool` 全局岗位模块 | `platform_jobs` | 显式提交的在线简历版本和策略版本 | 浏览 BOSS、调用 Pi、运行 Worker |
+| `AutomationSettings` 自动化设置模块 | `automation_settings` | 当前全局岗位数量只读视图 | 拥有岗位状态、运行 Worker、修改已经入队的动作 |
+| `AdviceService` 岗位鉴定模块 | `assessment_policy_versions`、本实例受管 Pi 的临时标记文件 | `JobPool` 领取的鉴定输入、当前自动化设置 | 直接更新 `platform_jobs`、决定搜索和发送循环 |
+| `PostService` 首次沟通模块 | 不单独拥有业务表；只通过 `JobPool` 确认发送结果 | `JobPool` 领取的发送或对账输入、当前自动化设置 | 直接更新 `platform_jobs`、回复招聘者、发送简历 |
+| Web | 无 | 岗位发现运行和全局岗位只读视图 | SQL、Worker 生命周期、直接设置任何状态 |
+
+`PostService` 没有专属业务表，但仍是必要的深模块：它封装发送前复查、真实外部动作、成功证据识别、`possibly_contacted` 对账和浏览器错误分类。删除它会让这些有副作用的规则散落到 Worker、界面或 `JobPool` 中。
+
+`AutomationSettings` 不是第四个执行模块或 Worker。它只集中校验并保存一行实例级设置；删除它会让 Web、`AdviceService` 和 `PostService` 分别理解时间窗、模式切换和开关语义。
+
+`OnlineResumeVersions` 也不是执行模块或第二份求职资料。只有求职者在设置中显式点击刷新时，它才读取一次 BOSS 在线简历并保存新的不可变版本；发现和鉴定过程只读取已经保存的当前版本，不发起刷新。`SearchService` 为搜索运行记录实际采用的版本，`AdviceService` 在真正开始鉴定时记录实际采用的版本，二者不通过对方的运行记录取得输入。
+
+## 最小业务接口
+
+以下是调用者需要理解的完整业务接口。参数类型表示业务数据，不允许调用者提交目标状态字符串。
+
+### `OnlineResumeVersions`
+
+```text
+RefreshFromBoss(ctx) -> ResumeRefreshResult
+GetCurrent(ctx) -> OnlineResumeVersion?
+```
+
+`RefreshFromBoss` 只能响应求职者的显式操作，不能由岗位发现、鉴定 Worker、定时器或后台启动自动调用。读取失败不得创建版本，也不得改变最后一次可靠的当前版本；内容与当前版本相同就返回“内容未变化”，内容变化时才新增递增版本并在同一事务中设为当前。刷新期间如果存在使用 v1 的未结束发现运行，新产生的 v2 只成为全局当前版本，不得回写该运行；Web 必须提示“当前发现继续使用 v1，v2 将用于下一次发现和尚未开始的鉴定”。界面展示版本号、保存时间和刷新结果，不展示内部数据库 ID。
+
+### `SearchService`
+
+```text
+Start(ctx) -> DiscoveryRunID
+Continue(ctx, runID)
+Pause(ctx, runID, reason)
+EndEarly(ctx, runID, reason)
+Run(ctx)                         // 只由后台进程启动
+```
+
+`Start` 在存在未结束运行时拒绝创建；它只通过 `OnlineResumeVersions.GetCurrent` 取得用户已保存的当前在线简历版本，并把版本 ID 记录到本次发现运行，不访问 BOSS 刷新简历，也不读取或记录岗位鉴定策略。版本一旦记录就不可修改；`Continue` 和 `Run` 始终读取该运行记录的同一版本，而不是重新读取全局当前版本，因此一轮发现的全部搜索范围只会使用一个版本。要用新刷新的版本重新初筛，求职者必须先让旧运行完成或执行 `EndEarly`，再执行 `Start` 创建新运行。尚无在线简历版本时拒绝开始并提示求职者先到设置中手动刷新。开始搜索不要求自动岗位鉴定或自动首次沟通已经开启，也不要求已经配置固定招呼语。自动岗位鉴定关闭时，新发现且没有有效 AI 结论的岗位由 `JobPool.Observe` 保存为 `assessment_status=not_queued`，等待以后开启自动入队或由求职者手工批量选择。`Continue` 用于暂停或失败后的同一运行，并开启新的无人干预重试周期。`Pause` 和 `EndEarly` 使当前 Worker 的后续旧写入失效。`Run` 只推进搜索检查点，并把每个可靠岗位观察提交给 `JobPool.Observe`。
+
+### `JobPool`
+
+```text
+Observe(ctx, runID, observation) -> JobView
+Review(ctx, decisions)
+QueueAssessments(ctx, jobIDs) -> BatchActionResult
+QueueSimulation(ctx, jobIDs) -> BatchActionResult
+QueueRealOutreach(ctx, jobIDs, confirmation) -> BatchActionResult
+RetryFailures(ctx, flow, jobIDs) -> BatchActionResult
+
+AdmitAssessments(ctx, limit) -> admittedCount
+ClaimAssessments(ctx, worker, resumeVersionID, policyVersionID, evaluatorVersion, limit) -> AssessmentWork[]
+FinishAssessments(ctx, outcomes)
+AdmitOutreach(ctx, request, limit) -> admittedCount
+ClaimOutreach(ctx, worker, claimMode, limit) -> OutreachWork[]
+FinishOutreach(ctx, outcomes)
+
+GetActiveDiscovery(ctx) -> DiscoveryRunView?
+ListJobs(ctx, filter, intendedAction) -> JobView[]
+GetJob(ctx, jobID, intendedAction) -> JobView
+```
+
+`Observe` 只按稳定 `platform_job_id` 原子处理平台岗位去重、JD 更新、平台开放状态、因 JD 变化导致的鉴定失效、人工结论待复核以及撤回尚未领取的发送请求；它不读取当前策略，也不因发现运行采用的在线简历版本而选择鉴定依据。同一公司重新发布相同或相似 JD 但产生新 `platform_job_id` 时，`Observe` 创建独立平台岗位，不按公司名、岗位名或 `jd_hash` 合并，也不复制旧岗位的 AI 结论、人工结论或沟通状态。同一 `platform_job_id` 的 JD 判断内容变化时，未沟通岗位清除旧 AI 结论及其输入依据，保留旧人工结论并使其待复核；已经 `contacted` 的岗位不再进入鉴定或发送流程，继续保留当时的 AI 与人工结论供查看。刷新简历、修改策略，或者从新运行再次观察到同一 `platform_job_id` 且 JD 未变化的岗位，都不会让它改写历史岗位的鉴定或沟通状态；重复观察只更新同一条平台岗位的当前可靠事实和最近发现时间。`Review` 原子处理人工结论和当前发送资格。`QueueAssessments` 同时用于首次鉴定和重新鉴定，只把符合条件的选中岗位改为 `pending`；排队时不选择在线简历或策略，也不记录内部版本号。已经 `contacted` 的岗位不会再次进入鉴定或发送队列，已有 AI 和人工结论继续保留展示。
+
+手工首次沟通使用两个明确命令，不提供含糊的通用“加入发送队列”：`QueueSimulation` 只创建 `simulation` 工作；`QueueRealOutreach` 只创建 `real` 工作，并要求携带求职者对本批岗位数量、当前固定招呼语和发送时间窗的明确确认。两个命令都重新校验岗位确实适合且可沟通，并把当前招呼语和本轮模式冻结到岗位。它们只处理本次选中的岗位，不修改 `automation_settings` 中的自动首次沟通开关或默认模式。
+
+`JobView` 根据 `intendedAction` 返回该岗位当前是否可以被选择，以及不可选择时的用户可见原因；“加入或重新加入鉴定队列”“加入模拟队列”和“加入真实发送队列”分别计算，Web 不复制资格规则。界面进入某个批量操作后，只允许勾选当前可执行的岗位；已入队、正在处理、已沟通、已关闭或不满足该操作条件的岗位禁用复选框并直接展示原因。
+
+提交时 `JobPool` 仍逐项重新校验，防止页面展示后岗位状态已经变化。共享输入本身无效时整批拒绝，例如首次沟通尚未配置固定招呼语；共享输入有效时返回 `BatchActionResult`，说明实际成功数量，以及因提交瞬间状态变化而跳过的岗位和原因。重复提交已入队岗位不会产生第二份工作。该返回结果只用于当前交互，不建立批次表或批次历史；岗位当前状态仍只写入 `platform_jobs`。
+
+两个 `Admit` 方法只把当前符合条件但尚未入队的岗位加入对应队列；自动开关关闭时执行模块不调用它们，手工批量命令仍可直接入队。`AdmitOutreach` 使用岗位当前判断，不要求 AI 结论所用的简历和策略等于后来保存的当前版本；开启自动首次沟通就是求职者允许这些仍然有效的既有结论继续产生新发送工作。`ClaimAssessments` 才显式接收当前已保存的在线简历版本 ID、启用策略版本 ID 和鉴定器版本，并在同一事务中把 `pending` 改为 `processing`、记录当前 JD 哈希、递增尝试编号并建立租约。到期可重试的 `failed` 鉴定也由该方法直接重新领取：实际输入未变化就延续失败次数，输入变化则开始新的失败周期。发送领取继续按自己的模式和时间窗处理。两个 `Finish` 方法使用岗位 ID、尝试编号和结果证据拒绝迟到写入。`RetryFailures` 只接受明确 `failed` 的鉴定或发送，不能把 `possibly_contacted` 直接改回待发送。查询返回只读视图，不返回可持久化实体或数据库句柄。
+
+### `AdviceService`
+
+```text
+Run(ctx)                         // 只由后台进程启动
+Confirm(ctx, confirmationBatch) // Pi 的唯一业务回调入口
+GeneratePolicyDraft(ctx) -> PolicyDraft
+CreatePolicyVersion(ctx, rules, changeNote) -> PolicyVersionID
+```
+
+`Run` 在自动岗位鉴定开启时先通过 `JobPool.AdmitAssessments` 接收新工作；这一步只形成 `pending`。无论开关是否开启，它在每次准备领取工作时都只读取数据库中当前已保存的在线简历版本、用户设置中当前启用的策略版本和当前鉴定器版本，再显式传给 `JobPool.ClaimAssessments`，整个过程不得访问 BOSS 刷新简历。领取事务把岗位改为 `processing` 并记录实际采用的简历版本、策略和 JD；返回的 `AssessmentWork` 包含完整简历和完整策略，Agent 不只接收内部 ID，也不读取岗位发现运行。每次领取数量不得让当前 `processing` 岗位超过“同时鉴定岗位上限”；调低上限不取消已领取工作，只阻止新的领取。`Confirm` 校验回调协议后，把每项结果交给 `JobPool.FinishAssessments`。策略或在线简历当前版本变化会被尚未开始的 `pending` 岗位采用，已经 `processing` 的岗位继续使用自己实际记录的版本；在新发现运行中再次出现但 JD 未变化的历史岗位也继续保留原结论和发送资格，不会仅因重新发现而进入 `pending`。
+
+新实例初始化时，`AdviceService` 同时创建并启用默认第 1 版策略。默认版要求鉴定器只依据本次实际采用的在线简历和当前 JD：明确且重要的不匹配判为 `unsuitable`，明确匹配判为 `suitable`，信息不足或证据冲突判为 `needs_user_confirmation`。它与用户后来设置的策略版本使用同一张表、同一套版本规则，不存在只藏在代码里的“无策略兜底”。初始化完成后没有当前启用策略属于数据异常，不能开始新的鉴定执行，但不影响岗位发现或形成 `pending` 队列。
+
+人工复核只在平台岗位上积累标注，不自动调用模型或修改策略。只有求职者认为样本已经足够并明确执行一次 `GeneratePolicyDraft` 时，`AdviceService` 才读取调用开始时的当前策略，以及所有当时仍基于当前 JD 的人工“适合”和“不适合”结论，发起一次模型调用并生成一份完整、可直接采用的新策略；是否存在 AI 结论、AI 使用哪个旧策略或是否与人一致，都不影响人工标注进入输入。调用前界面明确提示“本次候选稿只依据此刻的当前策略和有效人工复核生成，关闭后无法恢复；以后重新生成会重新采用届时的信息并再次调用模型”。返回的 `PolicyDraft` 同时说明生成时间、实际采用的策略版本和有效人工标注数量，但只保留在当前界面内存中，不写入 SQLite，也不在页面重开或后台重启后恢复。
+
+求职者可以在当前界面查看和修改候选稿；确认采用时，界面把候选稿的当前完整内容交给 `CreatePolicyVersion`，由它新增并启用不可变策略版本。求职者主动关闭、取消、离开当前页面或要求重新生成时，界面必须先显眼提示“关闭后本次候选稿永久消失，再次取得建议需要重新调用模型”；确认后直接丢弃内存内容，不调用后台删除接口。浏览器崩溃、界面进程退出或后台重启无法弹出确认时，候选稿同样丢失。下一次 `GeneratePolicyDraft` 始终重新读取届时的当前策略与有效人工复核，不复用旧文本，也不存在候选稿新旧输入归属问题。`CreatePolicyVersion` 也继续用于求职者从头保存自己编辑的完整策略。
+
+### `PostService`
+
+```text
+Run(ctx)                         // 只由后台进程启动
+```
+
+`Run` 在自动首次沟通开启时通过 `JobPool.AdmitOutreach` 把全局符合条件的岗位按当前配置模式加入发送队列；关闭只停止新增自动入队，已经入队的工作继续保留。每次入队冻结这一轮的 `simulation` 或 `real` 模式，修改全局配置不会把在途模拟突然变成真实发送。`Run` 可以随时领取 `possibly_contacted` 对账工作；没有配置首次沟通时间窗时可以随时领取真实发送，配置后只有当前位于任一时间窗内才领取。浏览器动作结束后只提交结果和证据给 `JobPool.FinishOutreach`。发送入队、批量重试和人工操作都经 `JobPool`，不为 `PostService` 增加重复入口。
+
+### `AutomationSettings`
+
+```text
+Get(ctx) -> AutomationSettingsView
+ConfigureAssessment(ctx, enabled, processingLimit)
+PreviewOutreachChange(ctx, enabled, mode) -> OutreachChangeImpact
+ConfigureOutreach(ctx, enabled, mode, greetingText, timeWindows)
+```
+
+设置模块只暴露两组业务配置和一个真实发送影响预览，不提供通用键值写入接口。它校验鉴定上限、固定招呼语和首次沟通时间窗，并只更新 `automation_settings` 的单行记录；`AdviceService` 和 `PostService` 读取当前设置决定是否自动入队或能否领取真实发送。`PreviewOutreachChange` 统一计算当前可以进入真实队列的岗位数，以及仍在模拟、暂时不能进入的岗位数，Web 不得复制这套筛选规则。配置变化如何唤醒后台循环属于模块内部实现，不要求界面管理 Worker。
+
+应用第一次创建 `automation_settings` 时使用安全默认值：自动岗位鉴定关闭、同时鉴定岗位上限为 5、自动首次沟通关闭、默认模式为 `simulation`、固定招呼语尚未配置、发送时间不受限制。这些默认值只用于第一次初始化；之后每次启动都读取用户上次保存的同一行，不能重新覆盖设置。
+
+## 模块运行配置
+
+- 设置页提供独立的“刷新在线简历”操作，并显示当前在线简历版本号和保存时间。只有这项显式操作可以访问 BOSS 更新版本；发现、鉴定、界面重开和后台重启都不得自动刷新。刷新失败保留旧版本并展示错误，内容未变化时不增加版本号。如果未结束的发现运行使用 v1，而刷新得到 v2，界面同时显示“当前已保存 v2；本轮发现仍使用 v1”；不提供把本轮切到 v2 的操作。
+- 开始岗位发现时，Web 展示当前下游自动化设置，但只作提示，不把开关状态当作发现前提。例如自动岗位鉴定关闭时明确提示“新发现岗位将只保存，暂不进行 AI 鉴定”；自动首次沟通关闭或固定招呼语尚未配置时，也只说明合适岗位暂不会自动进入沟通队列。岗位发现要求已有一个用户手动刷新的在线简历版本；当前鉴定策略即使异常缺失，也只阻止 `pending` 岗位真正开始鉴定，不阻止发现或排队。
+- 自动岗位鉴定是“新工作入队开关”，不是模块电源开关。关闭时，新的无有效结论岗位保持未入队；已有 `pending`、`processing` 和尚在自动重试周期内的工作继续完成。手工批量鉴定不受该开关限制。
+- 同时鉴定岗位上限统计 `assessment_status=processing` 的岗位数。设置值必须是正整数，首次默认 5，但 5 不是最大值。v1 只有一个在途 Pi 请求，该请求最多领取当前空闲名额数量的岗位，因此调用批量大小自然受同一个上限约束。
+- 自动首次沟通也是“新工作入队开关”。关闭时不再自动加入新的岗位；已经 `pending` 的岗位以及手工批量加入的岗位继续等待发送。
+- `simulation` 和 `real` 是每一轮首次沟通工作的执行模式，不是两个互斥的岗位终态。模式在入队时冻结；一轮模拟完成后岗位记为 `simulated`，之后仍可重新以 `real` 模式入队。
+- 自动化设置保存一条当前固定招呼语；自动或手工把岗位加入首次沟通队列时，都把当时的完整文本复制到岗位上。之后修改全局招呼语只影响新入队岗位，不改变已有 `pending`、`processing` 或已完成记录；尚未配置招呼语时既不能加入模拟队列，也不能加入真实发送队列。
+- 手工批量操作明确显示为“加入模拟队列”和“加入真实发送队列”。真实发送确认页展示本批可入队岗位数量、将冻结的完整招呼语和当前发送时间限制；未设置时间窗时明确显示“全天可发送”。确认只授权本批岗位，不会顺便开启或修改自动首次沟通。
+- 首次沟通时间窗按 `Asia/Shanghai` 解释；未设置任何时间窗表示全天允许开始真实发送。设置后允许多个每日重复且互不重叠的半开区间，例如 `[10:00, 12:00)`、`[14:00, 16:00)`；区间结束后不再领取新发送，已经进入 `processing` 的动作继续收尾。手工和自动加入的真实发送遵守相同规则，`possibly_contacted` 对账全天允许。
+- 模块运行配置保存在 SQLite 的单行 `automation_settings` 中，后台重启后直接恢复。它属于整个本地实例，不放进 `discovery_runs`，也不把整套设置复制到每个 `platform_jobs`；岗位真正开始鉴定时只记录本次实际采用的在线简历版本、JD 和策略版本，沟通入队时只记录本轮模式和招呼语。
+
+## 两个岗位状态机的衔接
+
+队列是 `platform_jobs` 上的持久化状态，不是把全部 JD 一次性推给外部程序：
+
+```text
+鉴定：not_queued → pending → processing → suitable / unsuitable / needs_user_confirmation
+模拟轮次：not_queued → pending(simulation) → processing(simulation) → simulated
+真实轮次：not_queued / simulated → pending(real) → processing(real) → contacted / possibly_contacted / failed
+```
+
+开启自动岗位鉴定时，`AdviceService` 可以在一次短事务中把当前所有符合条件的 `not_queued` 改为 `pending`；此时不选择简历或策略，只形成可见、可恢复的等待队列。准备调用 Agent 时，它才读取当前已保存的在线简历版本和用户设置策略，最多领取“同时鉴定岗位上限”数量的 `pending` 为 `processing`，记录实际采用的版本，并在一个 Pi 请求中发送完整简历、完整策略和这些岗位的 JD；这里不访问 BOSS，也不会把全部等待岗位一次性推给 Pi。
+
+同理，开启自动首次沟通时显示的 N 是开启确认这一刻，当前满足沟通资格且能进入目标模式的岗位数量：目标为 `simulation` 时只计算尚未模拟的 `not_queued`；目标为 `real` 时计算 `not_queued` 和已经 `simulated` 但尚未真实沟通的岗位。`pending(simulation)` 和 `processing(simulation)` 都不计入这个 N，也不会被切换操作直接改成真实发送。
+
+从 `simulation` 切换到自动 `real` 时，确认界面分开显示：“当前 X 个岗位会进入真实发送队列；另有 Y 个岗位仍在模拟，本次不会进入”。确认后只把 X 个岗位改为 `pending(real)`。Y 个岗位保持原来的模拟模式并先完成为 `simulated`；如果届时自动真实沟通仍然开启，它们再逐个重新检查资格并自动进入真实发送队列。界面还要明确说明这一后续行为，不能让“本次未进入”被误解为“以后永远不会进入”。
+
+`PostService` 再按模式和时间窗逐个把 `pending` 领取为 `processing`。任何一轮已经以 `simulation` 入队或执行的工作都不会因设置变化中途变成 `real`。
+
+鉴定状态 `suitable` 是鉴定状态机的成功终态之一，只构成沟通入队条件，不直接等于 `outreach_status=pending`。只有 `PostService` 的自动入队规则正在开启，或者求职者执行手工批量加入，`JobPool` 才会把沟通状态从 `not_queued` 改为 `pending`；因此鉴定和沟通状态机保持独立，只通过沟通资格规则关联。
+
+关闭自动首次沟通只阻止之后的合适岗位自动入队，不修改已有 `pending` 和 `processing`：待发送岗位继续按时间窗发送，执行中的岗位继续收尾。v1 不再增加单独的“暂停发送”概念。
+
+`simulated` 只防止相同岗位在没有新指令时被自动反复模拟，不会阻止以后真实发送。只有取得 BOSS 证据后的 `contacted` 才表示“这个岗位已经真实沟通过，以后不再重复打招呼”；从 `simulated` 重新进入 `pending(real)` 前，`JobPool` 仍要重新检查岗位开放状态和当前有效的人机结论。
+
+## 事务与外部动作
+
+`JobPool` 的所有方法都必须支持三个执行模块并发调用，并只执行短 SQLite 事务。Pi 调用和浏览器操作绝不能包在数据库事务里，统一采用以下顺序：
+
+```text
+Claim：校验资格、递增尝试号、写 processing 和租约并提交
+  ↓
+Execute：在事务外调用 Pi 或浏览器
+  ↓
+Finish：用岗位 ID + 尝试号校验当前状态，原子写入结果或失败
+```
+
+如果进程在 `Execute` 中断，租约恢复规则负责产生 `failed` 或 `possibly_contacted`；如果旧执行在新尝试开始后才返回，`Finish` 必须拒绝它。`JobPool` 本身不调用 Pi 或浏览器，因此外部副作用和平台岗位状态机可以分别测试。
+
+## 外部依赖 seam
+
+- `JobPool` 直接使用真实 SQLite 事务；测试使用内存 SQLite 和同一份 DDL，不为了 mock 数据库再暴露 Repository。
+- `SearchService` 与 `PostService` 依赖可替换的浏览器执行接口，生产使用 Kimi WebBridge 适配器，测试使用内存适配器。
+- `AdviceService` 依赖 Pi RPC 执行接口，生产使用受管 Pi 适配器，测试使用内存适配器。
+- 时间和随机退避由可注入接口提供，使租约、重试和恢复可以确定性测试；这些内部 seam 不暴露给 Web。

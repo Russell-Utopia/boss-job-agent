@@ -1,0 +1,27 @@
+.DS_Store
+
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+
+# Local runtime data and browser state
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+/logs/
+/runtime/
+/sessions/
+/browser-profile/
+*.storage-state.json
+
+# Agent-local planning scratch
+/.scratch/
+
+# Language/runtime caches
+__pycache__/
+*.py[cod]
