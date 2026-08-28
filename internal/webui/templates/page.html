@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.PageTitle}} · BOSS Job Agent</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/jobs" aria-label="BOSS Job Agent 首页">
+      <span class="brand-mark">B</span>
+      <span>BOSS Job Agent</span>
+    </a>
+    <nav aria-label="主要导航">
+      <a href="/jobs" {{if eq .Page "jobs"}}class="active" aria-current="page"{{end}}>岗位</a>
+      <a href="/assessments" {{if eq .Page "assessments"}}class="active" aria-current="page"{{end}}>岗位鉴定</a>
+      <a href="/outreach" {{if eq .Page "outreach"}}class="active" aria-current="page"{{end}}>首次沟通</a>
+      <a href="/resume" {{if eq .Page "resume"}}class="active" aria-current="page"{{end}}>在线简历</a>
+    </nav>
+    <div class="runtime">
+      <span class="status-dot" aria-hidden="true"></span>
+      本地后台运行中
+    </div>
+  </aside>
+
+  <main>
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">本地个人实例</p>
+        <h1>{{.PageTitle}}</h1>
+      </div>
+      <span class="safe-badge">安全模式</span>
+    </header>
+
+    {{if eq .Page "jobs"}}
+    <section class="card hero-card">
+      <div>
+        <p class="eyebrow">全局岗位池</p>
+        <h2>尚无岗位</h2>
+        <p class="muted">刷新并保存在线简历后，才能开始第一次岗位发现。</p>
+      </div>
+      <div class="action-block">
+        <button type="button" disabled aria-describedby="start-discovery-reason">开始岗位发现</button>
+        <p id="start-discovery-reason" class="reason">{{.State.Actions.StartDiscovery.Reason}}</p>
+      </div>
+    </section>
+    <section class="summary-grid" aria-label="工作流概况">
+      <article class="metric"><span>岗位</span><strong>0 / 0</strong><div class="progress"><i></i></div></article>
+      <article class="metric"><span>岗位鉴定</span><strong>0 / 0</strong><div class="progress"><i></i></div></article>
+      <article class="metric"><span>首次沟通</span><strong>0 / 0</strong><div class="progress"><i></i></div></article>
+    </section>
+    {{end}}
+
+    {{if eq .Page "assessments"}}
+    <section class="settings-grid">
+      <article class="card">
+        <p class="eyebrow">当前正式策略</p>
+        <h2>默认策略 v{{.State.ActivePolicy.Version}}</h2>
+        <ol class="rules">{{range .State.ActivePolicy.Rules}}<li>{{.}}</li>{{end}}</ol>
+      </article>
+      <article class="card compact">
+        <dl>
+          <div><dt>自动岗位鉴定</dt><dd>{{enabledText .State.Automation.AutomaticAssessmentEnabled}}</dd></div>
+          <div><dt>同时鉴定数</dt><dd>{{.State.Automation.AssessmentProcessingLimit}}</dd></div>
+        </dl>
+        <p class="muted">首次启动不会连接 Pi，也不会消耗模型调用。</p>
+      </article>
+    </section>
+    {{end}}
+
+    {{if eq .Page "outreach"}}
+    <section class="settings-grid">
+      <article class="card compact">
+        <dl>
+          <div><dt>自动首次沟通</dt><dd>{{enabledText .State.Automation.AutomaticOutreachEnabled}}</dd></div>
+          <div><dt>默认模式</dt><dd>Simulation</dd></div>
+          <div><dt>固定招呼语</dt><dd>{{if .State.Automation.OutreachGreeting}}{{.State.Automation.OutreachGreeting}}{{else}}未配置{{end}}</dd></div>
+          <div><dt>真实发送时间</dt><dd>{{.State.Automation.OutreachTimeDescription}}</dd></div>
+        </dl>
+      </article>
+      <article class="card">
+        <p class="eyebrow">手工操作</p>
+        <h2>当前没有可沟通岗位</h2>
+        <div class="button-row">
+          <button type="button" disabled>加入模拟队列</button>
+          <button type="button" disabled>加入真实发送队列</button>
+        </div>
+        <p class="reason">{{.State.Actions.QueueSimulationOutreach.Reason}}</p>
+        <p class="reason">{{.State.Actions.QueueRealOutreach.Reason}}</p>
+      </article>
+    </section>
+    {{end}}
+
+    {{if eq .Page "resume"}}
+    <section class="card hero-card">
+      <div>
+        <p class="eyebrow">唯一求职资料源</p>
+        <h2>尚无在线简历版本</h2>
+        <p class="muted">后台启动不会自动访问 BOSS。在线简历只能由你的显式刷新操作创建。</p>
+      </div>
+      <div class="action-block">
+        <button type="button" disabled aria-describedby="refresh-resume-reason">刷新在线简历</button>
+        <p id="refresh-resume-reason" class="reason">BOSS 读取能力尚未接入</p>
+      </div>
+    </section>
+    {{end}}
+  </main>
+</body>
+</html>
