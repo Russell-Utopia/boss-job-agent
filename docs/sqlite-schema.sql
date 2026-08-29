@@ -16,6 +16,8 @@
 -- 唯一例外是没有实体身份的单行 automation_settings，固定使用 id=1。
 -- 所有时间都使用 Unix 毫秒，由 Go 程序写入。
 -- JSON 字段只保存结构化业务数据，不保存电话、微信等无关敏感信息。
+-- 技术错误、暂停原因和提前结束原因写入持久化结构化运行日志，
+-- 以 trace_id、业务实体标识和尝试号检索，不在业务表中重复保存错误文本。
 
 PRAGMA foreign_keys = ON;
 
@@ -155,15 +157,11 @@ CREATE TABLE discovery_runs (
                 'preparing',   -- 正在读取并记录用于搜索的在线简历
                 'running',     -- 后端 Worker 正在推进搜索
                 'paused',      -- 求职者主动暂停，可恢复同一运行
-                'failed',      -- 发现流程明确失败，错误保存在 status_reason
+                'failed',      -- 发现流程明确失败
                 'completed',   -- 所有搜索范围都取得明确耗尽证据
                 'ended_early'  -- 至少一个搜索范围尚未确认耗尽
             )
         ),
-
-    -- 暂停、失败或提前结束的用户可见原因。
-    -- failed 时直接保存本次发现错误，例如“BOSS 登录失效”或“页面读取超时”。
-    status_reason TEXT,
 
     -- 该岗位发现运行生命周期内已经开始过多少次执行尝试。
     -- 每次开始或恢复执行时递增且永不归零，用于定位当前执行和拒绝旧 Worker 写入。
@@ -177,7 +175,7 @@ CREATE TABLE discovery_runs (
 
     -- failed 后最早允许自动重试的时间；为空表示必须由求职者处理或已达重试上限。
     -- v1 默认一个无人干预周期总共最多尝试三次（含首次），上限由程序配置而非 DDL 写死。
-    -- 自动重试开始时清空本字段、清空 status_reason，并递增 attempt_no，但不清零连续失败次数。
+    -- 自动重试开始时清空本字段并递增 attempt_no，但不清零连续失败次数。
     retry_at INTEGER,
 
     -- 当前拥有该运行的发现 Worker；只有 running 状态保存。
@@ -246,7 +244,7 @@ CREATE TABLE discovery_runs (
         )
     ),
 
-    -- 只有终态保存结束时间；提前结束必须说明原因。
+    -- 只有终态保存结束时间。
     CHECK (
         (
             status IN ('completed', 'ended_early')
@@ -256,19 +254,6 @@ CREATE TABLE discovery_runs (
         (
             status NOT IN ('completed', 'ended_early')
             AND finished_at IS NULL
-        )
-    ),
-
-    -- 暂停、失败和提前结束必须说明原因；其他状态不能遗留旧原因。
-    CHECK (
-        (
-            status IN ('paused', 'failed', 'ended_early')
-            AND status_reason IS NOT NULL
-        )
-        OR
-        (
-            status NOT IN ('paused', 'failed', 'ended_early')
-            AND status_reason IS NULL
         )
     ),
 
@@ -374,7 +359,7 @@ CREATE TABLE platform_jobs (
     platform_closed_reason TEXT,
 
     -- 最近一次取得可靠平台岗位状态证据的时间。
-    -- 检查失败不会更新本字段，而是写入对应发现或发送操作的错误。
+    -- 检查失败不会更新本字段，技术细节只写结构化运行日志。
     platform_status_checked_at INTEGER NOT NULL,
 
     -- -------------------- 当前 AI 鉴定 --------------------
@@ -395,7 +380,7 @@ CREATE TABLE platform_jobs (
                 'suitable',                 -- AI 建议适合
                 'unsuitable',               -- AI 建议不适合
                 'needs_user_confirmation',  -- AI 无法可靠判断
-                'failed'                    -- 当前鉴定明确失败，原因保存在 assessment_last_error
+                'failed'                    -- 当前鉴定明确失败
             )
         ),
 
@@ -436,9 +421,6 @@ CREATE TABLE platform_jobs (
             assessment_evidence_json IS NULL
             OR json_valid(assessment_evidence_json)
         ),
-
-    -- 最近一次鉴定执行或 MCP 校验失败原因。
-    assessment_last_error TEXT,
 
     -- 鉴定失败后最早允许自动重试的时间；为空表示必须人工处理或已达上限。
     -- v1 默认一个无人干预周期总共最多尝试三次（含首次），上限由程序配置。
@@ -483,7 +465,7 @@ CREATE TABLE platform_jobs (
                 'contacted',       -- 已确认真实沟通，以后不再重复打招呼
                 'simulated',       -- 本轮模拟完成；仍可重新以 real 模式入队
                 'possibly_contacted', -- 可能已沟通，对账前禁止重试
-                'failed'              -- 明确没有沟通成功，原因保存在 outreach_last_error
+                'failed'              -- 明确没有沟通成功
             )
         ),
 
@@ -512,9 +494,6 @@ CREATE TABLE platform_jobs (
 
     -- 最近一次开始操作 BOSS 的时间。
     outreach_last_attempt_at INTEGER,
-
-    -- 最近一次明确失败或可能已沟通的发送错误。
-    outreach_last_error TEXT,
 
     -- 明确发送失败后最早允许自动重试的时间；为空表示必须人工处理或已达上限。
     -- v1 默认一个无人干预周期总共最多尝试三次（含首次），上限由程序配置。
@@ -606,7 +585,7 @@ CREATE TABLE platform_jobs (
         )
     ),
 
-    -- 未入队或待鉴定表示没有当前 AI 结论，因此不能残留旧结论、旧依据或旧错误；
+    -- 未入队或待鉴定表示没有当前 AI 结论，因此不能残留旧结论或旧依据；
     -- 一旦开始执行、失败或形成结论，在线简历版本、JD 哈希和策略版本必须同时存在。
     CHECK (
         (
@@ -617,7 +596,6 @@ CREATE TABLE platform_jobs (
             AND evaluator_version IS NULL
             AND assessment_reason IS NULL
             AND assessment_evidence_json IS NULL
-            AND assessment_last_error IS NULL
             AND assessment_retry_at IS NULL
             AND assessed_at IS NULL
         )
@@ -634,12 +612,6 @@ CREATE TABLE platform_jobs (
     CHECK (
         assessment_status NOT IN ('processing', 'failed')
         OR evaluator_version IS NOT NULL
-    ),
-
-    -- 明确鉴定失败必须保存错误信息，便于恢复和排查。
-    CHECK (
-        assessment_status <> 'failed'
-        OR assessment_last_error IS NOT NULL
     ),
 
     -- 连续鉴定失败次数不能超过生命周期尝试数；failed 至少对应一次失败。
@@ -723,14 +695,11 @@ CREATE TABLE platform_jobs (
         OR outreach_mode = 'real'
     ),
 
-    -- 明确发送失败或可能已沟通时必须保存发生了什么；
-    -- 两者的区别是 failed 可以按规则重试，possibly_contacted 必须先对账。
+    -- 明确发送失败或可能已沟通都必须记录尝试时间；技术错误只写运行日志。
+    -- failed 可以按规则重试，possibly_contacted 必须先对账。
     CHECK (
         outreach_status NOT IN ('failed', 'possibly_contacted')
-        OR (
-            outreach_last_attempt_at IS NOT NULL
-            AND outreach_last_error IS NOT NULL
-        )
+        OR outreach_last_attempt_at IS NOT NULL
     ),
 
     -- 连续发送失败次数不能超过生命周期尝试数；failed 至少对应一次明确失败。

@@ -6,6 +6,8 @@
 
 一个常驻后台进程启动岗位发现、岗位鉴定和首次沟通三个执行模块。三个模块不在内存中互相传递任务，SQLite 中的当前业务状态、在线简历版本和自动化设置是进程重启后仍可恢复的衔接点；MVP Web 只调用下面的业务接口和只读查询，不直接访问 SQLite。具体信息架构、文案和验收场景见 [MVP Web 交互规格](./web-mvp.md)。
 
+三个执行模块采用相同但不共享泛型框架的执行形状：`Run` 在启动时立即执行一轮内部 `runSchedulingCycle(ctx, now)`，之后用一分钟周期继续执行；每轮只读取一次本机 `time.Now()` 并把该值传给本轮状态判断。周期扫描同时处理普通可领取工作、已到重试时间的失败工作和过期租约，最终都进入各模块原有的领取路径。v1 接受最多约一个扫描周期加本轮执行时间的调度延迟，不为单个工作建立精确定时器，也不定义 `Clock`、`Retry`、通用 `Worker` 或通用调度器接口。测试直接以固定 `now` 调用单轮逻辑，不等待真实时间。
+
 ## 状态所有权
 
 | 模块 | 唯一可写状态 | 可以读取 | 不负责 |
@@ -42,8 +44,8 @@ GetCurrent(ctx) -> OnlineResumeVersion?
 ```text
 Start(ctx) -> DiscoveryRunID
 Continue(ctx, runID)
-Pause(ctx, runID, reason)
-EndEarly(ctx, runID, reason)
+Pause(ctx, runID)
+EndEarly(ctx, runID)
 Run(ctx)                         // 只由后台进程启动
 ```
 
@@ -57,7 +59,8 @@ Review(ctx, decisions)
 QueueAssessments(ctx, jobIDs) -> BatchActionResult
 QueueSimulation(ctx, jobIDs) -> BatchActionResult
 QueueRealOutreach(ctx, jobIDs, confirmation) -> BatchActionResult
-RetryFailures(ctx, flow, jobIDs) -> BatchActionResult
+RetryAssessmentFailures(ctx, jobIDs) -> BatchActionResult
+RetryOutreachFailures(ctx, jobIDs) -> BatchActionResult
 
 AdmitAssessments(ctx, limit) -> admittedCount
 ClaimAssessments(ctx, worker, resumeVersionID, policyVersionID, evaluatorVersion, limit) -> AssessmentWork[]
@@ -79,18 +82,18 @@ GetJob(ctx, jobID, intendedAction) -> JobView
 
 提交时 `JobPool` 仍逐项重新校验，防止页面展示后岗位状态已经变化。共享输入本身无效时整批拒绝，例如首次沟通尚未配置固定招呼语；共享输入有效时返回 `BatchActionResult`，说明实际成功数量，以及因提交瞬间状态变化而跳过的岗位和原因。重复提交已入队岗位不会产生第二份工作。该返回结果只用于当前交互，不建立批次表或批次历史；岗位当前状态仍只写入 `platform_jobs`。
 
-两个 `Admit` 方法只把当前符合条件但尚未入队的岗位加入对应队列；自动开关关闭时执行模块不调用它们，手工批量命令仍可直接入队。`AdmitOutreach` 使用岗位当前判断，不要求 AI 结论所用的简历和策略等于后来保存的当前版本；开启自动首次沟通就是求职者允许这些仍然有效的既有结论继续产生新发送工作。`ClaimAssessments` 才显式接收当前已保存的在线简历版本 ID、启用策略版本 ID 和鉴定器版本，并在同一事务中把 `pending` 改为 `processing`、记录当前 JD 哈希、递增尝试编号并建立租约。到期可重试的 `failed` 鉴定也由该方法直接重新领取：实际输入未变化就延续失败次数，输入变化则开始新的失败周期。发送领取继续按自己的模式和时间窗处理。两个 `Finish` 方法使用岗位 ID、尝试编号和结果证据拒绝迟到写入。`RetryFailures` 只接受明确 `failed` 的鉴定或发送，不能把 `possibly_contacted` 直接改回待发送。查询返回只读视图，不返回可持久化实体或数据库句柄。
+两个 `Admit` 方法只把当前符合条件但尚未入队的岗位加入对应队列；自动开关关闭时执行模块不调用它们，手工批量命令仍可直接入队。`AdmitOutreach` 使用岗位当前判断，不要求 AI 结论所用的简历和策略等于后来保存的当前版本；开启自动首次沟通就是求职者允许这些仍然有效的既有结论继续产生新发送工作。`ClaimAssessments` 才显式接收当前已保存的在线简历版本 ID、启用策略版本 ID 和鉴定器版本，并在同一事务中把 `pending` 改为 `processing`、记录当前 JD 哈希、递增尝试编号并建立租约。到期可重试的 `failed` 鉴定也由该方法直接重新领取：实际输入未变化就延续失败次数，输入变化则开始新的失败周期。发送领取继续按自己的模式和时间窗处理。两个 `Finish` 方法使用岗位 ID、尝试编号和结果证据拒绝迟到写入。两种人工重试命令只接受各自流程中明确的 `failed`；`RetryOutreachFailures` 不能把 `possibly_contacted` 直接改回待发送。查询返回只读视图，不返回可持久化实体或数据库句柄。
 
 ### `AdviceService`
 
 ```text
 Run(ctx)                         // 只由后台进程启动
-Confirm(ctx, confirmationBatch) // Pi 的唯一业务回调入口
+Confirm(ctx, confirmationBatch) -> ConfirmationReceipt // Pi 的唯一业务回调入口
 GeneratePolicyDraft(ctx) -> PolicyDraft
 CreatePolicyVersion(ctx, rules, changeNote) -> PolicyVersionID
 ```
 
-`Run` 在自动岗位鉴定开启时先通过 `JobPool.AdmitAssessments` 接收新工作；这一步只形成 `pending`。无论开关是否开启，它在每次准备领取工作时都只读取数据库中当前已保存的在线简历版本、用户设置中当前启用的策略版本和当前鉴定器版本，再显式传给 `JobPool.ClaimAssessments`，整个过程不得访问 BOSS 刷新简历。领取事务把岗位改为 `processing` 并记录实际采用的简历版本、策略和 JD；返回的 `AssessmentWork` 包含完整简历和完整策略，Agent 不只接收内部 ID，也不读取岗位发现运行。每次领取数量不得让当前 `processing` 岗位超过“同时鉴定岗位上限”；调低上限不取消已领取工作，只阻止新的领取。`Confirm` 校验回调协议后，把每项结果交给 `JobPool.FinishAssessments`。策略或在线简历当前版本变化会被尚未开始的 `pending` 岗位采用，已经 `processing` 的岗位继续使用自己实际记录的版本；在新发现运行中再次出现但 JD 未变化的历史岗位也继续保留原结论和发送资格，不会仅因重新发现而进入 `pending`。
+`Run` 在自动岗位鉴定开启时先通过 `JobPool.AdmitAssessments` 接收新工作；这一步只形成 `pending`。无论开关是否开启，它在每次准备领取工作时都只读取数据库中当前已保存的在线简历版本、用户设置中当前启用的策略版本和当前鉴定器版本，再显式传给 `JobPool.ClaimAssessments`，整个过程不得访问 BOSS 刷新简历。领取事务把岗位改为 `processing` 并记录实际采用的简历版本、策略和 JD；返回的 `AssessmentWork` 包含完整简历和完整策略，Agent 不只接收内部 ID，也不读取岗位发现运行。每次领取数量不得让当前 `processing` 岗位超过“同时鉴定岗位上限”；调低上限不取消已领取工作，只阻止新的领取。`Confirm` 校验回调协议后，把每项结果交给 `JobPool.FinishAssessments`，并在 `ConfirmationReceipt` 中逐项返回已接受、格式无效或尝试号过期，单项失败不遮蔽同批其他结果。策略或在线简历当前版本变化会被尚未开始的 `pending` 岗位采用，已经 `processing` 的岗位继续使用自己实际记录的版本；在新发现运行中再次出现但 JD 未变化的历史岗位也继续保留原结论和发送资格，不会仅因重新发现而进入 `pending`。
 
 新实例初始化时，`AdviceService` 同时创建并启用默认第 1 版策略。默认版要求鉴定器只依据本次实际采用的在线简历和当前 JD：明确且重要的不匹配判为 `unsuitable`，明确匹配判为 `suitable`，信息不足或证据冲突判为 `needs_user_confirmation`。它与用户后来设置的策略版本使用同一张表、同一套版本规则，不存在只藏在代码里的“无策略兜底”。初始化完成后没有当前启用策略属于数据异常，不能开始新的鉴定执行，但不影响岗位发现或形成 `pending` 队列。
 
@@ -170,9 +173,69 @@ Finish：用岗位 ID + 尝试号校验当前状态，原子写入结果或失�
 
 如果进程在 `Execute` 中断，租约恢复规则负责产生 `failed` 或 `possibly_contacted`；如果旧执行在新尝试开始后才返回，`Finish` 必须拒绝它。`JobPool` 本身不调用 Pi 或浏览器，因此外部副作用和平台岗位状态机可以分别测试。
 
+每个执行模块长期管理自己的 Worker，工作只作为参数传入 Worker：岗位失败、完成或等待重试时，Worker 释放的是当前工作占用，而不是自己的外部资源。岗位发现 Worker 长期持有自己的 BOSS 发现 Adapter 与 session；首次沟通 Worker 长期持有同时满足发送与只读对账接口的 BOSS Adapter 与 session；岗位鉴定 Worker 长期持有自己的 Pi Adapter 与受管进程。v1 各有一个 Worker；未来增加 Worker 时，每个新增 Worker 都拥有独立 Adapter 实例及独立 session 或 Pi 进程，工作不与原 Worker 建立亲和关系，而是通过 SQLite 租约原子领取。
+
 ## 外部依赖 seam
 
-- `JobPool` 直接使用真实 SQLite 事务；测试使用内存 SQLite 和同一份 DDL，不为了 mock 数据库再暴露 Repository。
-- `SearchService` 与 `PostService` 依赖可替换的浏览器执行接口，生产使用 Kimi WebBridge 适配器，测试使用内存适配器。
-- `AdviceService` 依赖 Pi RPC 执行接口，生产使用受管 Pi 适配器，测试使用内存适配器。
-- 时间和随机退避由可注入接口提供，使租约、重试和恢复可以确定性测试；这些内部 seam 不暴露给 Web。
+外部接口由调用模块在自己的包内定义，参数和返回值只使用本项目业务类型，不暴露 Kimi WebBridge、Pi RPC、MCP 或其他外部 SDK 类型。每次调用只执行一次外部尝试；Adapter 不循环重试、不休眠，也不拥有业务状态、租约或重试次数。
+
+### `OnlineResume`
+
+由 `OnlineResumeVersions` 定义并调用：
+
+```go
+type OnlineResume interface {
+    Read(context.Context) (ResumeContent, error)
+}
+```
+
+`Read` 一次返回完整的求职条件、工作经历、项目经历、教育经历和技能；任一必需部分读取或校验失败时整次失败，不返回可保存的部分简历。生产 Adapter 使用 BOSS session，内存 Adapter 返回固定完整简历或指定错误；接口不暴露 session。
+
+### `JobDiscovery`
+
+由 `SearchService` 定义并调用：
+
+```go
+type JobDiscovery interface {
+    FetchPage(context.Context, SearchRange, int) (DiscoveryPage, error)
+}
+```
+
+第三个参数是从 1 开始的页码。`DiscoveryPage` 包含本页完整的可靠岗位观察和 `HasMore`；任一岗位缺少稳定平台岗位标识、完整 JD 或可靠平台岗位状态时整页失败，调用者不推进检查点。生产 Adapter 使用发现 Worker 独占的 BOSS session，内存 Adapter 按页返回固定结果或指定错误。
+
+### `SendFirstContact` 与 `CheckContactStatus`
+
+两者都由 `PostService` 定义并调用；同一个首次沟通 Worker 的生产 Adapter 同时满足这两个小接口并共用该 Worker 独占的 BOSS session：
+
+```go
+type SendFirstContact interface {
+    Send(context.Context, FirstContactRequest) (FirstContactResult, error)
+}
+
+type CheckContactStatus interface {
+    Check(context.Context, PlatformJobRef) (ContactStatus, error)
+}
+```
+
+`Check` 只读，只有取得可靠证据时才返回“已沟通”或“未沟通”；读取失败返回错误，不把“未知”写成平台岗位状态。模拟发送绝不调用 `Send`。真实发送必须先调用 `Check` 复查；`Send` 的 `FirstContactResult` 无论是否同时返回错误，都必须把外部影响分为“已确认发送”“已确认没有产生发送”和“可能已经产生发送”三类，最后一类必须进入对账而不能自动重发。生产 Adapter 操作 BOSS；内存 Adapter 可以分别模拟三种外部影响和只读对账结果。
+
+### `AssessmentSubmitter`
+
+由 `AdviceService` 定义并调用：
+
+```go
+type AssessmentSubmitter interface {
+    Submit(context.Context, AssessmentRequest) error
+    Close(context.Context) error
+}
+```
+
+`Submit` 只表示一次完整请求已经提交给 Pi，不同步返回 AI 鉴定结论；结论只能经 `AdviceService.Confirm` 回传。一次请求携带完整简历、完整策略和一组完整岗位输入，每项都带平台岗位本地主键与鉴定尝试号；不同请求使用隔离会话。`Close` 只能关闭该 Adapter 可验证归属的受管 Pi 进程。生产 Adapter 管理 Pi RPC 子进程，内存 Adapter 记录提交内容并显式触发确认回调。
+
+### 错误、日志与重试
+
+外部 Adapter 的错误必须让所属执行模块能够区分临时失败、登录失效、验证码、平台限制、响应或协议无效；首次沟通另外使用上述三态结果表达外部影响，不能用通用错误码推测是否已经发送。各模块可以保留更细的内部错误，但不定义跨模块公共错误包。
+
+每次外部尝试都写入持久化结构化运行日志，至少包含 `trace_id`、执行流程、操作名、运行或平台岗位标识、尝试号、稳定错误分类和底层错误链；同一业务动作的相关日志使用同一 `trace_id`，也可通过实体标识与尝试号独立检索。技术错误文本、暂停原因和提前结束原因不写入业务表；业务表只保存恢复所需的状态、尝试次数、连续失败次数、`retry_at`、租约以及真实业务证据。
+
+三个执行模块各自根据自己的错误分类和外部影响计算是否重试及下次 `retry_at`，不共享通用 `Retry` Interface 或 Backoff Adapter。`runSchedulingCycle` 周期查询当前可执行工作；普通工作与到期重试在领取后走相同 Worker 路径。`JobPool` 直接使用真实 SQLite 事务，测试使用内存 SQLite 和同一份 DDL，不为了 mock 数据库再暴露 Repository。
