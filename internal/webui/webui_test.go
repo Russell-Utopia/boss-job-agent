@@ -36,7 +36,7 @@ func TestFirstUseWebProvidesFourStableEntriesAndSafeState(t *testing.T) {
 	}{
 		{path: "/jobs", want: []string{"岗位工作台", "尚无岗位", "请先刷新在线简历，再开始岗位发现", "disabled"}},
 		{path: "/assessments", want: []string{"岗位鉴定", "默认策略 v1", "自动岗位鉴定", "已关闭", "同时鉴定数", "5"}},
-		{path: "/outreach", want: []string{"首次沟通", "自动首次沟通", "已关闭", "Simulation", "未配置", "全天可发送", "请先配置固定招呼语"}},
+		{path: "/outreach", want: []string{"打招呼", "自动打招呼", "已关闭", "Simulation", "未配置", "全天可打招呼", "请先配置固定招呼语"}},
 		{path: "/resume", want: []string{"在线简历", "尚无在线简历版本"}},
 	}
 
@@ -191,7 +191,7 @@ func TestWebRestoresSavedPolicyAndAutomationSettings(t *testing.T) {
 	assertPageContains(t, server.URL+"/outreach", []string{
 		"<dd>Real</dd>",
 		"<dd>您好，想和您聊聊这个岗位</dd>",
-		"<dd>按已配置时间段发送</dd>",
+		"<dd>按已配置时间段打招呼</dd>",
 	})
 }
 

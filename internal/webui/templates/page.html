@@ -15,7 +15,7 @@
     <nav aria-label="主要导航">
       <a href="/jobs" {{if eq .Page "jobs"}}class="active" aria-current="page"{{end}}>岗位</a>
       <a href="/assessments" {{if eq .Page "assessments"}}class="active" aria-current="page"{{end}}>岗位鉴定</a>
-      <a href="/outreach" {{if eq .Page "outreach"}}class="active" aria-current="page"{{end}}>首次沟通</a>
+      <a href="/outreach" {{if eq .Page "outreach"}}class="active" aria-current="page"{{end}}>打招呼</a>
       <a href="/resume" {{if eq .Page "resume"}}class="active" aria-current="page"{{end}}>在线简历</a>
     </nav>
     <div class="runtime">
@@ -48,7 +48,7 @@
     <section class="summary-grid" aria-label="工作流概况">
       <article class="metric"><span>岗位</span><strong>0 / 0</strong><div class="progress"><i></i></div></article>
       <article class="metric"><span>岗位鉴定</span><strong>0 / 0</strong><div class="progress"><i></i></div></article>
-      <article class="metric"><span>首次沟通</span><strong>0 / 0</strong><div class="progress"><i></i></div></article>
+      <article class="metric"><span>打招呼</span><strong>0 / 0</strong><div class="progress"><i></i></div></article>
     </section>
     {{end}}
 
@@ -73,18 +73,18 @@
     <section class="settings-grid">
       <article class="card compact">
         <dl>
-          <div><dt>自动首次沟通</dt><dd>{{enabledText .State.Automation.AutomaticOutreachEnabled}}</dd></div>
+          <div><dt>自动打招呼</dt><dd>{{enabledText .State.Automation.AutomaticOutreachEnabled}}</dd></div>
           <div><dt>默认模式</dt><dd>{{.State.Automation.AutomaticOutreachModeText}}</dd></div>
           <div><dt>固定招呼语</dt><dd>{{if .State.Automation.OutreachGreeting}}{{.State.Automation.OutreachGreeting}}{{else}}未配置{{end}}</dd></div>
-          <div><dt>真实发送时间</dt><dd>{{.State.Automation.OutreachTimeDescription}}</dd></div>
+          <div><dt>真实打招呼时间</dt><dd>{{.State.Automation.OutreachTimeDescription}}</dd></div>
         </dl>
       </article>
       <article class="card">
         <p class="eyebrow">手工操作</p>
-        <h2>当前没有可沟通岗位</h2>
+        <h2>当前没有可打招呼岗位</h2>
         <div class="button-row">
-          <button type="button" disabled>加入模拟队列</button>
-          <button type="button" disabled>加入真实发送队列</button>
+          <button type="button" disabled>模拟打招呼</button>
+          <button type="button" disabled>真实打招呼</button>
         </div>
         <p class="reason">{{.State.Actions.QueueSimulationOutreach.Reason}}</p>
         <p class="reason">{{.State.Actions.QueueRealOutreach.Reason}}</p>

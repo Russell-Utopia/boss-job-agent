@@ -43,7 +43,7 @@ func New(app *application.Application) http.Handler {
 	})
 	mux.HandleFunc("GET /jobs", h.renderPage("jobs", "岗位工作台", h.app.JobsState))
 	mux.HandleFunc("GET /assessments", h.renderPage("assessments", "岗位鉴定", h.app.AssessmentsState))
-	mux.HandleFunc("GET /outreach", h.renderPage("outreach", "首次沟通", h.app.OutreachState))
+	mux.HandleFunc("GET /outreach", h.renderPage("outreach", "打招呼", h.app.OutreachState))
 	mux.HandleFunc("GET /resume", h.renderPage("resume", "在线简历", h.app.ResumeState))
 	mux.HandleFunc("GET /assets/app.css", serveCSS)
 	mux.HandleFunc("GET /api/startup-state", h.startupState)

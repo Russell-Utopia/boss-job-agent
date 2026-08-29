@@ -5,7 +5,7 @@
 --   1. online_resume_versions      用户手动刷新取得的不可变在线简历版本
 --   2. assessment_policy_versions  已经由求职者确认保存的不可变岗位鉴定策略版本
 --   3. discovery_runs              用户可见、可暂停和恢复的岗位发现运行
---   4. platform_jobs               全局岗位池及鉴定、人工复核和首次沟通状态
+--   4. platform_jobs               全局岗位池及鉴定、人工复核和首次打招呼状态
 --   5. automation_settings         整个本地实例当前采用的自动化设置
 --
 -- 不建立 task_jobs：岗位不属于某次发现运行，运行与岗位之间的历史关联
@@ -150,7 +150,7 @@ CREATE TABLE discovery_runs (
     next_page INTEGER
         CHECK (next_page IS NULL OR next_page > 0),
 
-    -- 发现运行状态；它只描述岗位搜索，不等待全局鉴定或发送队列收口。
+    -- 发现运行状态；它只描述岗位搜索，不等待全局鉴定或打招呼队列收口。
     status TEXT NOT NULL DEFAULT 'preparing'
         CHECK (
             status IN (
@@ -275,7 +275,7 @@ CREATE TABLE discovery_runs (
 
 -- v1 同时最多只有一个准备中、运行中、暂停中或失败待处理的岗位发现运行。
 -- 用户必须继续它，或明确提前结束后才能创建新运行。
--- completed/ended_early 不受此限制；全局鉴定或发送队列仍有工作时也可新建。
+-- completed/ended_early 不受此限制；全局鉴定或打招呼队列仍有工作时也可新建。
 CREATE UNIQUE INDEX idx_discovery_runs_one_unfinished
     ON discovery_runs((1))
     WHERE status IN ('preparing', 'running', 'paused', 'failed');
@@ -299,12 +299,12 @@ END;
 --
 -- 一行代表 BOSS 上一个稳定 platform_job_id。
 -- 同一公司重新发布相同或相似 JD 但产生新 platform_job_id 时，必须新增一行；
--- 不按公司名、岗位名或 jd_hash 合并，也不从旧行复制鉴定、人工结论或沟通状态。
--- 当前 JD、平台岗位状态、AI 鉴定、人工结论和首次沟通都只保存在本行。
+-- 不按公司名、岗位名或 jd_hash 合并，也不从旧行复制鉴定、人工结论或打招呼状态。
+-- 当前 JD、平台岗位状态、AI 鉴定、人工结论和首次打招呼都只保存在本行。
 -- 多次岗位发现运行只插入或更新这一行，不产生运行与岗位关联记录。
 -- platform_status=open、outreach_status<>contacted 且 assessment_status=pending
 -- 共同构成全局鉴定逻辑队列；同一平台岗位不会因再次发现产生第二份工作。
--- outreach_status=pending 构成全局发送逻辑队列。
+-- outreach_status=pending 构成全局打招呼逻辑队列。
 -- ============================================================
 CREATE TABLE platform_jobs (
     -- SQLite 自动生成的本地主键。
@@ -330,8 +330,8 @@ CREATE TABLE platform_jobs (
     salary_text TEXT,
 
     -- 最近一次从 BOSS 读取的完整结构化 JD。
-    -- 新 JD 覆盖本字段。未沟通岗位的旧 AI 结论随判断内容变化而清除；
-    -- 旧人工结论继续用自己的哈希标明原始依据，已沟通岗位则保留原 AI 与人工结论供查看。
+    -- 新 JD 覆盖本字段。未打招呼岗位的旧 AI 结论随判断内容变化而清除；
+    -- 旧人工结论继续用自己的哈希标明原始依据，已打招呼岗位则保留原 AI 与人工结论供查看。
     jd_json TEXT NOT NULL
         CHECK (json_valid(jd_json)),
 
@@ -344,9 +344,9 @@ CREATE TABLE platform_jobs (
 
     -- -------------------- 平台岗位状态 --------------------
 
-    -- BOSS 最近一次可靠证据是否允许对该岗位执行新的 AI 鉴定或首次沟通。
+    -- BOSS 最近一次可靠证据是否允许对该岗位执行新的 AI 鉴定或首次打招呼。
     -- 状态变化不改变 jd_hash，也不删除已有 AI 或人工结论。
-    -- 页面读取失败属于发现或发送操作错误，不产生第三种平台岗位状态。
+    -- 页面读取失败属于发现或打招呼操作错误，不产生第三种平台岗位状态。
     platform_status TEXT NOT NULL
         CHECK (
             platform_status IN (
@@ -364,13 +364,13 @@ CREATE TABLE platform_jobs (
 
     -- -------------------- 当前 AI 鉴定 --------------------
 
-    -- 当前 AI 鉴定状态；只有平台岗位可沟通且尚未确认已沟通时，
+    -- 当前 AI 鉴定状态；只有平台岗位可沟通且尚未确认已打招呼时，
     -- pending 才进入全局鉴定逻辑队列。
     -- 自动鉴定关闭时，新出现或失效的鉴定先停留在 not_queued；
     -- 已经是 pending/processing 的工作继续消费，不被开关撤回。
     -- 当前在线简历或策略后来变化，不会自动使已有成功结论失效；
-    -- 结论继续保留实际采用的版本，直到新鉴定覆盖；未沟通岗位的 JD 变化会清除旧结论，
-    -- 已沟通岗位则保留当时结论供查看。
+    -- 结论继续保留实际采用的版本，直到新鉴定覆盖；未打招呼岗位的 JD 变化会清除旧结论，
+    -- 已打招呼岗位则保留当时结论供查看。
     assessment_status TEXT NOT NULL DEFAULT 'not_queued'
         CHECK (
             assessment_status IN (
@@ -451,21 +451,21 @@ CREATE TABLE platform_jobs (
     -- 当前人工结论的可选说明。
     human_review_note TEXT,
 
-    -- -------------------- 全局首次沟通 --------------------
+    -- -------------------- 全局首次打招呼 --------------------
 
-    -- 平台岗位当前首次沟通状态，同时构成全局发送逻辑队列。
-    -- 正常发送取得 BOSS 成功证据后直接进入 contacted；possibly_contacted
+    -- 平台岗位当前首次打招呼状态，同时构成全局打招呼逻辑队列。
+    -- 正常打招呼取得 BOSS 成功证据后直接进入 contacted；possibly_contacted
     -- 只表示外部动作可能发生、但确认或本地落库窗口中断。
     outreach_status TEXT NOT NULL DEFAULT 'not_queued'
         CHECK (
             outreach_status IN (
-                'not_queued',      -- 尚未请求发送
+                'not_queued',      -- 尚未请求打招呼
                 'pending',         -- 等待 PostService 领取
                 'processing',      -- 正在操作 BOSS
-                'contacted',       -- 已确认真实沟通，以后不再重复打招呼
+                'contacted',       -- 已确认真实打招呼，以后不再重复打招呼
                 'simulated',       -- 本轮模拟完成；仍可重新以 real 模式入队
-                'possibly_contacted', -- 可能已沟通，对账前禁止重试
-                'failed'              -- 明确没有沟通成功
+                'possibly_contacted', -- 可能已打招呼，对账前禁止重试
+                'failed'              -- 明确没有打招呼成功
             )
         ),
 
@@ -479,14 +479,14 @@ CREATE TABLE platform_jobs (
         ),
 
     -- 本次已入队或已执行动作使用的固定招呼语。
-    -- 在入队时冻结，保证恢复后发送内容不变。
+    -- 在入队时冻结，保证恢复后招呼内容不变。
     outreach_greeting_text TEXT,
 
-    -- 该平台岗位生命周期内已经开始过多少次首次沟通尝试；只递增、不归零。
+    -- 该平台岗位生命周期内已经开始过多少次首次打招呼尝试；只递增、不归零。
     outreach_attempt_no INTEGER NOT NULL DEFAULT 0
         CHECK (outreach_attempt_no >= 0),
 
-    -- 当前无人干预执行周期内，能够确认没有沟通成功的连续失败次数。
+    -- 当前无人干预执行周期内，能够确认没有打招呼成功的连续失败次数。
     -- 自动重试不会归零；确认成功、模拟完成或求职者显式重新开始后归零。
     -- possibly_contacted 尚未确认失败，不在对账得出 failed 前递增本字段。
     outreach_consecutive_failure_count INTEGER NOT NULL DEFAULT 0
@@ -495,12 +495,12 @@ CREATE TABLE platform_jobs (
     -- 最近一次开始操作 BOSS 的时间。
     outreach_last_attempt_at INTEGER,
 
-    -- 明确发送失败后最早允许自动重试的时间；为空表示必须人工处理或已达上限。
+    -- 明确打招呼失败后最早允许自动重试的时间；为空表示必须人工处理或已达上限。
     -- v1 默认一个无人干预周期总共最多尝试三次（含首次），上限由程序配置。
     -- 调度器到时将 failed 改回 pending 并清空本字段，但不清零连续失败次数。
     outreach_retry_at INTEGER,
 
-    -- 最近一次用于确认成功、失败或可能已沟通的页面证据。
+    -- 最近一次用于确认成功、失败或可能已打招呼的页面证据。
     outreach_evidence_json TEXT
         CHECK (
             outreach_evidence_json IS NULL
@@ -508,14 +508,14 @@ CREATE TABLE platform_jobs (
         ),
 
     -- contacted 状态的来源。
-    -- agent 表示本程序确认发送成功；boss_existing 表示 BOSS 原本已沟通。
+    -- agent 表示本程序确认打招呼成功；boss_existing 表示 BOSS 原本已沟通。
     contact_source TEXT
         CHECK (
             contact_source IS NULL
             OR contact_source IN ('agent', 'boss_existing')
         ),
 
-    -- 确认岗位已沟通的时间。
+    -- 确认岗位已打招呼的时间。
     contacted_at INTEGER,
 
     -- -------------------- 两个全局队列共用的领取控制 --------------------
@@ -538,7 +538,7 @@ CREATE TABLE platform_jobs (
 
     -- 最近一次从 BOSS 搜索结果或详情中看到该岗位的时间。
     -- 新运行再次发现同一岗位时更新本字段；若 JD 判断内容未变化，
-    -- 不因此改变已有鉴定状态或要求使用新简历版本重新鉴定。
+    -- 不因此改变已有鉴定状态或要求使用新简历版本再次进入鉴定。
     last_seen_at INTEGER NOT NULL,
 
     -- 本行最后更新时间。
@@ -565,7 +565,7 @@ CREATE TABLE platform_jobs (
         )
     ),
 
-    -- 未沟通岗位的成功 AI 结论必须对应当前 JD；已沟通岗位不再参与鉴定或发送，
+    -- 未打招呼岗位的成功 AI 结论必须对应当前 JD；已打招呼岗位不再参与鉴定或打招呼，
     -- 因此 JD 后来变化时允许保留当时结论及其旧哈希供查看。
     -- 所有成功结论都必须说明实际采用的版本、理由和时间。
     CHECK (
@@ -646,9 +646,9 @@ CREATE TABLE platform_jobs (
         )
     ),
 
-    -- 进入待发送时，平台岗位必须明确可沟通且当前判断适合。
+    -- 进入待打招呼时，平台岗位必须明确可沟通且当前判断适合。
     -- 人工结论存在但 JD 哈希不一致时，不回退使用 AI 结论，必须等待重新复核。
-    -- processing 可能已经触发外部动作，不受此静态约束；PostService 在实际发送前重查，
+    -- processing 可能已经触发外部动作，不受此静态约束；PostService 在实际打招呼前重查，
     -- 如果动作已经发生则只能继续记录 contacted、possibly_contacted 或明确失败。
     CHECK (
         outreach_status <> 'pending'
@@ -682,27 +682,27 @@ CREATE TABLE platform_jobs (
         )
     ),
 
-    -- simulated 只是 simulation 模式这一轮的完成结果，不代表真实沟通成功。
+    -- simulated 只是 simulation 模式这一轮的完成结果，不代表真实打招呼成功。
     -- 它之后仍可重新变为 pending，并在真实入队时把模式冻结为 real。
     CHECK (
         outreach_status <> 'simulated'
         OR outreach_mode = 'simulation'
     ),
 
-    -- 只有真实外部动作才可能出现“可能已沟通”；模拟不会产生这个状态。
+    -- 只有真实外部动作才可能出现“可能已打招呼”；模拟不会产生这个状态。
     CHECK (
         outreach_status <> 'possibly_contacted'
         OR outreach_mode = 'real'
     ),
 
-    -- 明确发送失败或可能已沟通都必须记录尝试时间；技术错误只写运行日志。
+    -- 明确打招呼失败或可能已打招呼都必须记录尝试时间；技术错误只写运行日志。
     -- failed 可以按规则重试，possibly_contacted 必须先对账。
     CHECK (
         outreach_status NOT IN ('failed', 'possibly_contacted')
         OR outreach_last_attempt_at IS NOT NULL
     ),
 
-    -- 连续发送失败次数不能超过生命周期尝试数；failed 至少对应一次明确失败。
+    -- 连续打招呼失败次数不能超过生命周期尝试数；failed 至少对应一次明确失败。
     CHECK (
         outreach_consecutive_failure_count <= outreach_attempt_no
         AND (
@@ -711,7 +711,7 @@ CREATE TABLE platform_jobs (
         )
     ),
 
-    -- 只有明确发送失败可以等待自动重试；可能已沟通永远不能设置重试时间。
+    -- 只有明确打招呼失败可以等待自动重试；可能已打招呼永远不能设置重试时间。
     CHECK (
         outreach_status = 'failed'
         OR outreach_retry_at IS NULL
@@ -740,8 +740,8 @@ CREATE TABLE platform_jobs (
         )
     ),
 
-    -- 已确认沟通必须说明时间、来源和 BOSS 页面证据。
-    -- 本程序产生的沟通只能来自 real 模式；BOSS 原本已沟通时没有本轮执行模式。
+    -- 已确认打招呼必须说明时间、来源和 BOSS 页面证据。
+    -- 本程序产生的打招呼只能来自 real 模式；BOSS 原本已沟通时没有本轮执行模式。
     CHECK (
         outreach_status <> 'contacted'
         OR (
@@ -762,7 +762,7 @@ CREATE TABLE platform_jobs (
     )
 );
 
--- AdviceService 的全局鉴定逻辑队列；已关闭或已确认沟通的岗位不会被领取。
+-- AdviceService 的全局鉴定逻辑队列；已关闭或已确认打招呼的岗位不会被领取。
 CREATE INDEX idx_platform_jobs_assessment_queue
     ON platform_jobs(
         platform_status,
@@ -772,11 +772,11 @@ CREATE INDEX idx_platform_jobs_assessment_queue
         first_seen_at
     );
 
--- PostService 的全局发送逻辑队列及可能已沟通对账查询。
+-- PostService 的全局打招呼逻辑队列及可能已打招呼对账查询。
 CREATE INDEX idx_platform_jobs_outreach_queue
     ON platform_jobs(outreach_status, outreach_retry_at, first_seen_at);
 
--- 全局岗位列表按人工结论、AI 结论和沟通状态筛选。
+-- 全局岗位列表按人工结论、AI 结论和打招呼状态筛选。
 CREATE INDEX idx_platform_jobs_review
     ON platform_jobs(human_verdict, assessment_status, outreach_status);
 
@@ -804,7 +804,7 @@ CREATE TABLE automation_settings (
     assessment_processing_limit INTEGER NOT NULL DEFAULT 5
         CHECK (assessment_processing_limit > 0),
 
-    -- 是否把新的合适岗位自动加入首次沟通队列；首次初始化默认关闭。
+    -- 是否把新的合适岗位自动加入首次打招呼队列；首次初始化默认关闭。
     -- 关闭只停止新增自动入队，不撤回已有 pending 或 processing。
     automatic_outreach_enabled INTEGER NOT NULL DEFAULT 0
         CHECK (automatic_outreach_enabled IN (0, 1)),
@@ -814,21 +814,21 @@ CREATE TABLE automation_settings (
     automatic_outreach_mode TEXT NOT NULL DEFAULT 'simulation'
         CHECK (automatic_outreach_mode IN ('simulation', 'real')),
 
-    -- 以后新加入首次沟通队列的岗位使用的当前固定招呼语。
+    -- 以后新加入首次打招呼队列的岗位使用的当前固定招呼语。
     -- 修改本字段只影响之后入队的岗位；入队时实际内容复制到
     -- platform_jobs.outreach_greeting_text，之后不再跟随本字段变化。
-    -- 为空表示尚未配置，因此不能开启自动首次沟通，
-    -- 也不能手工加入模拟队列或真实发送队列。
+    -- 为空表示尚未配置，因此不能开启自动打招呼，
+    -- 也不能手工加入模拟队列或真实打招呼队列。
     outreach_greeting_text TEXT
         CHECK (
             outreach_greeting_text IS NULL
             OR length(trim(outreach_greeting_text)) > 0
         ),
 
-    -- 允许开始真实首次沟通的每日时间窗，按 Asia/Shanghai 解释。
+    -- 允许开始真实首次打招呼的每日时间窗，按 Asia/Shanghai 解释。
     -- 结构示例：[{"start":"10:00","end":"12:00"},{"start":"14:00","end":"16:00"}]。
     -- 设置模块负责校验 HH:MM、同日 start < end、排序且互不重叠。
-    -- 首次初始化为空数组，表示不限制发送时间，任何时间都允许开始真实发送。
+    -- 首次初始化为空数组，表示不限制打招呼时间，任何时间都允许开始真实打招呼。
     outreach_time_windows_json TEXT NOT NULL DEFAULT '[]'
         CHECK (
             json_valid(outreach_time_windows_json)
@@ -838,7 +838,7 @@ CREATE TABLE automation_settings (
     -- 最近一次修改任一自动化设置的时间。
     updated_at INTEGER NOT NULL,
 
-    -- 无论 simulation 还是真实 real，自动入队前都必须知道原本要发送什么。
+    -- 无论 simulation 还是真实 real，自动入队前都必须知道原本要发送什么招呼语。
     CHECK (
         automatic_outreach_enabled = 0
         OR outreach_greeting_text IS NOT NULL
