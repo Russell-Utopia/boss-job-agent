@@ -252,21 +252,21 @@ func outreachAvailability(automation AutomationSettings) (ActionAvailability, Ac
 	actions := FirstUseActions{
 		QueueSimulationOutreach: unavailable(
 			"outreach_unavailable",
-			"当前没有可加入模拟队列的岗位",
+			"当前没有可模拟打招呼的岗位",
 		),
 		QueueRealOutreach: unavailable(
 			"outreach_unavailable",
-			"当前没有可加入真实发送队列的岗位",
+			"当前没有可真实打招呼的岗位",
 		),
 	}
 	if automation.OutreachGreeting == nil {
 		actions.QueueSimulationOutreach = unavailable(
 			"outreach_greeting_required",
-			"请先配置固定招呼语，再加入模拟队列",
+			"请先配置固定招呼语，再模拟打招呼",
 		)
 		actions.QueueRealOutreach = unavailable(
 			"outreach_greeting_required",
-			"请先配置固定招呼语，再加入真实发送队列",
+			"请先配置固定招呼语，再真实打招呼",
 		)
 	}
 	return actions.QueueSimulationOutreach, actions.QueueRealOutreach
@@ -356,9 +356,9 @@ func (a *Application) automationSettings(ctx context.Context) (AutomationSetting
 	if greeting.Valid {
 		greetingValue = &greeting.String
 	}
-	timeDescription := "全天可发送"
+	timeDescription := "全天可打招呼"
 	if len(windows) > 0 {
-		timeDescription = "按已配置时间段发送"
+		timeDescription = "按已配置时间段打招呼"
 	}
 
 	modeText := "Simulation"

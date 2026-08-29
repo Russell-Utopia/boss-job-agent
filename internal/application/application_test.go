@@ -56,8 +56,8 @@ func TestFirstStartupRestoresSafeDefaults(t *testing.T) {
 	if len(state.Automation.OutreachTimeWindows) != 0 {
 		t.Errorf("outreach time windows = %#v, want no restrictions", state.Automation.OutreachTimeWindows)
 	}
-	if state.Automation.OutreachTimeDescription != "全天可发送" {
-		t.Errorf("outreach time description = %q, want 全天可发送", state.Automation.OutreachTimeDescription)
+	if state.Automation.OutreachTimeDescription != "全天可打招呼" {
+		t.Errorf("outreach time description = %q, want 全天可打招呼", state.Automation.OutreachTimeDescription)
 	}
 }
 
@@ -79,8 +79,8 @@ func TestFirstUseActionsAreRejectedWithUserFacingReasons(t *testing.T) {
 		t.Fatalf("query startup state: %v", err)
 	}
 	assertUnavailableAction(t, state.Actions.StartDiscovery, "online_resume_required", "请先刷新在线简历，再开始岗位发现")
-	assertUnavailableAction(t, state.Actions.QueueSimulationOutreach, "outreach_greeting_required", "请先配置固定招呼语，再加入模拟队列")
-	assertUnavailableAction(t, state.Actions.QueueRealOutreach, "outreach_greeting_required", "请先配置固定招呼语，再加入真实发送队列")
+	assertUnavailableAction(t, state.Actions.QueueSimulationOutreach, "outreach_greeting_required", "请先配置固定招呼语，再模拟打招呼")
+	assertUnavailableAction(t, state.Actions.QueueRealOutreach, "outreach_greeting_required", "请先配置固定招呼语，再真实打招呼")
 
 	commands := []struct {
 		name string
