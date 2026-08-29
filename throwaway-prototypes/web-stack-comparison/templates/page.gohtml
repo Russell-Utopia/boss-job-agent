@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Go 服务端页面 · Web 技术栈对比</title>
+  <link rel="stylesheet" href="/prototype/assets/styles.css">
+  <script defer src="/prototype/assets/go-app.js"></script>
+</head>
+<body data-implementation="go-server">
+  <aside class="sidebar">
+    <a class="brand" href="/prototype/go/jobs" data-draft-navigation><span class="brand-mark">B</span><span>BOSS Job Agent</span></a>
+    <p class="prototype-label">技术栈对比原型</p>
+    <nav aria-label="原型导航">
+      <a href="/prototype/go/jobs" data-draft-navigation {{if eq .Page "jobs"}}class="active" aria-current="page"{{end}}>岗位</a>
+      <a href="/prototype/go/assessments" data-draft-navigation {{if eq .Page "assessments"}}class="active" aria-current="page"{{end}}>岗位鉴定</a>
+    </nav>
+    <div class="runtime"><span class="status-dot"></span>共享内存场景</div>
+  </aside>
+
+  <main>
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Go · net/http + html/template</p>
+        <h1>{{if eq .Page "jobs"}}岗位筛选与批量选择{{else}}策略候选稿编辑{{end}}</h1>
+        <p class="lede">同一场景、同一业务结果，只改变表现层实现。</p>
+      </div>
+      <span class="implementation-badge">服务端页面</span>
+    </header>
+
+    {{if eq .Page "jobs"}}
+    <section class="card filter-card">
+      <div class="section-heading">
+        <div><p class="eyebrow">代表性记录</p><h2>筛选平台岗位</h2></div>
+        <span class="count">{{.Jobs.Total}} 条</span>
+      </div>
+      <form class="filters" method="get" action="/prototype/go/jobs" data-filter-form>
+        <label>岗位或公司<input type="search" name="query" value="{{.Jobs.Filters.Query}}" placeholder="例如：Go"></label>
+        <label>平台状态
+          <select name="platformStatus">
+            <option value="">全部</option>
+            <option value="open" {{if eq .Jobs.Filters.PlatformStatus "open"}}selected{{end}}>可沟通</option>
+            <option value="closed" {{if eq .Jobs.Filters.PlatformStatus "closed"}}selected{{end}}>已关闭</option>
+          </select>
+        </label>
+        <label>AI 鉴定
+          <select name="aiConclusion">
+            <option value="">全部</option>
+            <option value="suitable" {{if eq .Jobs.Filters.AIConclusion "suitable"}}selected{{end}}>适合</option>
+            <option value="unsuitable" {{if eq .Jobs.Filters.AIConclusion "unsuitable"}}selected{{end}}>不适合</option>
+            <option value="needs_user_confirmation" {{if eq .Jobs.Filters.AIConclusion "needs_user_confirmation"}}selected{{end}}>需要人工确认</option>
+          </select>
+        </label>
+        <label>人工结论
+          <select name="humanConclusion">
+            <option value="">全部</option>
+            <option value="suitable" {{if eq .Jobs.Filters.HumanConclusion "suitable"}}selected{{end}}>已复核·适合</option>
+            <option value="unsuitable" {{if eq .Jobs.Filters.HumanConclusion "unsuitable"}}selected{{end}}>已复核·不适合</option>
+            <option value="unreviewed" {{if eq .Jobs.Filters.HumanConclusion "unreviewed"}}selected{{end}}>未复核</option>
+            <option value="needs_rereview" {{if eq .Jobs.Filters.HumanConclusion "needs_rereview"}}selected{{end}}>待重新复核</option>
+          </select>
+        </label>
+        <button type="submit">应用筛选</button>
+      </form>
+    </section>
+
+    {{if .BatchResult}}
+    <section class="result-panel" aria-live="polite">
+      <strong>本次提交：{{.BatchResult.AcceptedCount}} 条已加入，{{.BatchResult.SkippedCount}} 条跳过</strong>
+      <ul>{{range .BatchResult.Items}}<li class="{{if .Accepted}}accepted{{else}}skipped{{end}}">{{if .Title}}{{.Title}}{{else}}{{.ID}}{{end}}：{{if .Accepted}}已加入模拟队列{{else}}{{.Reason}}{{end}}</li>{{end}}</ul>
+    </section>
+    {{end}}
+
+    <form method="post" action="/prototype/go/jobs/queue-simulation" data-batch-form>
+      <input type="hidden" name="query" value="{{.Jobs.Filters.Query}}">
+      <input type="hidden" name="platformStatus" value="{{.Jobs.Filters.PlatformStatus}}">
+      <input type="hidden" name="aiConclusion" value="{{.Jobs.Filters.AIConclusion}}">
+      <input type="hidden" name="humanConclusion" value="{{.Jobs.Filters.HumanConclusion}}">
+      <section class="card table-card">
+        <div class="batch-toolbar">
+          <div>
+            <label class="select-all"><input type="checkbox" data-select-all> 全选当前可处理记录</label>
+            <span class="selection-count" data-selection-count>已选择 0 条</span>
+          </div>
+          <button type="submit" data-submit-selection disabled>加入模拟队列</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>选择</th><th>岗位</th><th>平台</th><th>AI 鉴定</th><th>人工结论</th><th>当前判断</th><th>首次沟通</th></tr></thead>
+            <tbody>
+              {{range .Jobs.Jobs}}
+              <tr class="{{if not .QueueSimulation.Allowed}}unavailable{{end}}">
+                <td>
+                  <input type="checkbox" name="jobIds" value="{{.ID}}" data-job-checkbox {{if not .QueueSimulation.Allowed}}disabled{{end}} aria-label="选择 {{.Title}}">
+                </td>
+                <td><strong>{{.Title}}</strong><span>{{.Company}} · {{.City}}</span><small>{{.ID}}</small></td>
+                <td>{{.PlatformStatusText}}</td>
+                <td>{{.AIConclusionText}}</td>
+                <td>{{.HumanConclusionText}}</td>
+                <td>{{.CurrentJudgementText}}</td>
+                <td>
+                  {{.OutreachStatusText}}
+                  {{if not .QueueSimulation.Allowed}}<p class="reason">{{.QueueSimulation.Reason}}</p>{{else if .BecameUnavailableOnSubmit}}<p class="hint">提交时会模拟一次状态变化</p>{{end}}
+                </td>
+              </tr>
+              {{else}}
+              <tr><td colspan="7" class="empty">当前筛选条件下没有平台岗位</td></tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </form>
+    {{end}}
+
+    {{if eq .Page "assessments"}}
+    <section class="policy-grid">
+      <article class="card policy-card">
+        <p class="eyebrow">当前正式策略</p>
+        <h2>{{.Policy.Name}}</h2>
+        <ol>{{range .Policy.Rules}}<li>{{.}}</li>{{end}}</ol>
+        <p class="muted">已有 {{.Policy.HumanReviewCount}} 条仍对应当前 JD 的人工复核记录。</p>
+        <form method="post" action="/prototype/go/assessments/generate">
+          <button type="submit">生成策略候选稿</button>
+        </form>
+      </article>
+
+      <article class="card candidate-card {{if not .Draft}}empty-candidate{{end}}" data-candidate-card>
+        {{if .Draft}}
+        <div class="section-heading"><div><p class="eyebrow">页面会话内存</p><h2>策略候选稿</h2></div><span class="transient-badge">不会保存</span></div>
+        <p class="muted">基于 {{.Draft.BasedOnPolicy}} 和 {{.Draft.HumanReviewCount}} 条有效人工复核生成。编辑不会调用模型。</p>
+        <textarea id="current-policy-text" hidden>{{.Policy.Text}}</textarea>
+        <label class="editor-label">完整候选策略<textarea data-candidate-editor rows="9">{{.Draft.Text}}</textarea></label>
+        <div class="candidate-actions"><button type="button" class="secondary" data-discard-draft>丢弃候选稿</button></div>
+        {{else}}
+        <div class="empty-state"><p class="eyebrow">策略候选稿</p><h2>尚未生成</h2><p>生成后只保留在当前页面；刷新、离开或关闭都会丢失。</p></div>
+        {{end}}
+      </article>
+    </section>
+
+    {{if .Draft}}
+    <section class="card diff-card">
+      <div class="section-heading"><div><p class="eyebrow">浏览器本地计算</p><h2>逐行实时 diff</h2></div><span class="local-badge">0 次额外模型调用</span></div>
+      <div class="diff" data-policy-diff aria-live="polite"></div>
+    </section>
+    {{end}}
+    {{end}}
+  </main>
+
+  <div class="comparison-bar" aria-label="技术栈切换">
+    <span><strong>当前：</strong>Go 服务端页面</span>
+    <a href="/prototype/react/?page={{.Page}}" data-draft-navigation>切换到 React</a>
+    <form method="post" action="/prototype/go/reset" data-reset-form><input type="hidden" name="returnTo" value="/prototype/go/{{.Page}}"><button type="submit" class="secondary">重置共享场景</button></form>
+  </div>
+</body>
+</html>
