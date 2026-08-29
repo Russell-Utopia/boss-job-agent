@@ -8,7 +8,7 @@
 
 首次沟通的自动入队还要区分本轮执行模式：`simulation` 只接收尚未模拟的 `not_queued` 岗位；`real` 同时接收 `not_queued` 和已经完成模拟的 `simulated` 岗位。模式在进入 `pending` 时冻结，配置变化只影响之后的新入队，不修改已经 `pending` 或 `processing` 的轮次。这样模拟可以作为真实发送前的演练，但不会消耗真实沟通资格，也不会把一次已授权的模拟动作静默升级成真实动作。
 
-自动模式从 `simulation` 改为 `real` 时，影响预览必须分别返回“现在可进入真实队列”和“仍在模拟、暂不进入”两个数量。后者只包括 `pending(simulation)` 与 `processing(simulation)`，不能被本次切换改成真实模式；它们先完成模拟，之后若自动真实沟通仍开启，再作为新的 `simulated` 岗位重新检查并入队。该统计和筛选由 `AutomationSettings` 模块统一提供，Web 只展示返回结果和确认交互。
+自动模式从 `simulation` 改为 `real` 时，影响预览必须分别返回“现在可进入真实队列”和“仍在模拟、暂不进入”两个数量。后者只包括 `pending(simulation)` 与 `processing(simulation)`，不能被本次切换改成真实模式；它们先完成模拟，之后若自动真实沟通仍开启，再作为新的 `simulated` 岗位重新检查并入队。该统计和筛选由 `AutomationSettings` 模块统一提供，TUI 与 Web 只展示相同结果和确认交互。
 
 这些实例级开关、鉴定上限、自动沟通模式、当前固定招呼语和真实发送时间窗统一保存在 SQLite 的单行 `automation_settings`，不属于岗位发现运行，也不在每个平台岗位上重复保存。`AutomationSettings` 模块负责校验和修改这一行，两个执行模块只读取；岗位入队时才把当时的模式和完整招呼语冻结到 `platform_jobs`。以后修改全局招呼语不改变已经排队或正在执行的岗位。这样界面或后台重启不会丢失设置，又不会把“以后如何自动入队”与“这个岗位当前执行到哪里”混成同一份状态。
 

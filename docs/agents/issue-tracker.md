@@ -1,47 +1,40 @@
-# Issue tracker: GitHub
+# 工单系统：GitHub
 
-本项目的规格和工程工单保存在私有 GitHub 仓库的 GitHub Issues 中，所有操作使用 `gh` CLI。
+本仓库的工单与规格统一保存在 `Russell-Utopia/boss-job-agent` 的 GitHub Issues 中。所有操作使用 `gh` CLI。
 
-执行 Issue 操作前，从 `git remote -v` 确定目标仓库。如果尚未配置 GitHub remote，应停止操作并提示用户先创建或关联私有仓库，不能猜测仓库地址。
+## 操作约定
 
-## Conventions
+- **创建工单**：运行 `gh issue create --title "..." --body "..."`。多行正文使用 heredoc。
+- **读取工单**：运行 `gh issue view <编号> --comments`，同时读取工单标签。
+- **列出工单**：运行 `gh issue list`，根据任务添加合适的 `--label`、`--state` 和 JSON 字段。
+- **评论工单**：运行 `gh issue comment <编号> --body "..."`。
+- **添加或删除标签**：运行 `gh issue edit <编号> --add-label "..."` 或 `--remove-label "..."`。
+- **关闭工单**：运行 `gh issue close <编号> --comment "..."`。
 
-- 创建：`gh issue create --title "..." --body "..."`
-- 阅读：`gh issue view <number> --comments`
-- 列表：`gh issue list --state open --json number,title,body,labels,comments`
-- 评论：`gh issue comment <number> --body "..."`
-- 添加标签：`gh issue edit <number> --add-label "..."`
-- 删除标签：`gh issue edit <number> --remove-label "..."`
-- 关闭：`gh issue close <number> --comment "..."`
+仓库身份从 `git remote -v` 推断；在本仓库工作目录中运行时，`gh` 会自动识别远端仓库。
 
-多行正文使用 heredoc，读取结果时同时取得正文、评论和标签。
+## 是否将 Pull Request 作为分诊请求入口
 
-## Pull requests as a triage surface
+**否。PR 不作为请求入口。**
 
-**PRs as a request surface: no.**
+GitHub 的 Issue 与 Pull Request 共用编号空间。如果 `#42` 的类型不明确，先运行 `gh pr view 42`，失败后再运行 `gh issue view 42`。
 
-Pull Request 不作为外部需求入口；`triage` 默认只处理 Issues。
+## 当技能要求“发布到工单系统”时
 
-## Skill operations
+创建一个 GitHub Issue。
 
-当技能要求“发布到 issue tracker”时，创建 GitHub Issue。
+## 当技能要求“读取相关工单”时
 
-当技能要求“读取相关 ticket”时，运行：
+运行 `gh issue view <编号> --comments`。
 
-`gh issue view <number> --comments`
+## Wayfinder 操作约定
 
-## Blocking relationships
+Wayfinder 的地图是一个 GitHub Issue，子工单是该地图下的工作项。
 
-优先使用 GitHub 原生 Issue dependencies 表达阻塞关系。若目标仓库暂不支持，则在子 Issue 顶部写入：
-
-`Blocked by: #<number>, #<number>`
-
-只有全部 blocker 关闭后，该 Issue 才可以开始实现。
-
-## Wayfinder operations
-
-- Map：一个带 `wayfinder:map` 标签的 GitHub Issue。
-- Child ticket：优先使用 GitHub sub-issue；不可用时，在 Map 的任务列表中引用，并在子 Issue 顶部写 `Part of #<map-number>`。
-- 类型标签：`wayfinder:research`、`wayfinder:prototype`、`wayfinder:grilling`、`wayfinder:task`。
-- Claim：把 Issue 分配给当前用户。
-- Resolve：先追加答案和上下文链接，再关闭 Issue。
+- **地图**：使用一个带有 `wayfinder:map` 标签的 Issue。
+- **子工单**：优先使用 GitHub 子工单关系；不可用时，在地图正文任务列表中引用子工单，并在子工单正文开头写明 `Part of #<地图编号>`。
+- **子工单类型**：使用 `wayfinder:research`、`wayfinder:prototype`、`wayfinder:grilling` 或 `wayfinder:task` 标签。
+- **阻塞关系**：优先使用 GitHub 原生 Issue 依赖关系；不可用时，在正文开头写明 `Blocked by: #<编号>`。
+- **选择下一项工作**：从地图中按顺序查找没有开放阻塞项、也没有负责人认领的第一个开放子工单。
+- **认领**：运行 `gh issue edit <编号> --add-assignee @me`；这是一次 Wayfinder 会话的首次写操作。
+- **完成**：在子工单中评论结果、关闭子工单，并把上下文链接追加到地图的 Decisions-so-far 中。

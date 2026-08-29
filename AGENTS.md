@@ -1,18 +1,15 @@
-# Repository instructions
+# 仓库 Agent 指南
 
-- 使用中文沟通。
-- 不要立刻写代码。
+## Agent skills（Agent 技能）
 
-## Agent skills
+### Issue tracker（工单系统）
 
-### Issue tracker
+本仓库的工单与规格统一记录在 `Russell-Utopia/boss-job-agent` 的 GitHub Issues 中。具体规则见 `docs/agents/issue-tracker.md`。
 
-本项目使用私有 GitHub 仓库的 GitHub Issues 管理规格和工程工单。详见 `docs/agents/issue-tracker.md`。
+### Triage labels（分诊标签）
 
-### Triage labels
+使用五种标准分诊标签。具体映射见 `docs/agents/triage-labels.md`。
 
-本项目使用默认的五种 triage 标签。详见 `docs/agents/triage-labels.md`。
+### Domain docs（领域文档）
 
-### Domain docs
-
-本项目采用 single-context 领域文档布局。详见 `docs/agents/domain.md`。
+本仓库采用单上下文布局，领域词汇位于根目录 `CONTEXT.md`，架构决策位于 `docs/adr/`。具体读取规则见 `docs/agents/domain.md`。
