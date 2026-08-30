@@ -1,6 +1,8 @@
 module github.com/Russell-Utopia/boss-job-agent
 
-go 1.27.0
+go 1.27
+
+toolchain go1.27.0
 
 require modernc.org/sqlite v1.38.2
 

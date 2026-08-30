@@ -2,7 +2,20 @@
 set -euo pipefail
 
 readonly repository_root="$(cd "$(dirname "$0")/.." && pwd)"
-readonly minimum_coverage="${COVERAGE_MINIMUM:-60.0}"
+readonly repository_minimum_coverage="60.0"
+readonly minimum_coverage="${COVERAGE_MINIMUM:-$repository_minimum_coverage}"
+
+if [[ ! "$minimum_coverage" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
+	printf 'COVERAGE_MINIMUM must be a non-negative number; got %q\n' "$minimum_coverage" >&2
+	exit 1
+fi
+if awk -v requested="$minimum_coverage" -v repository="$repository_minimum_coverage" \
+	'BEGIN { exit !(requested + 0 < repository + 0) }'; then
+	printf 'COVERAGE_MINIMUM %.1f%% cannot be lower than repository minimum %.1f%%\n' \
+		"$minimum_coverage" "$repository_minimum_coverage" >&2
+	exit 1
+fi
+
 temporary_directory="$(mktemp -d)"
 trap 'rm -rf "$temporary_directory"' EXIT
 

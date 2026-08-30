@@ -1,10 +1,11 @@
 include tools/versions.env
 
-export GOTOOLCHAIN := go$(GO_VERSION)
+GO_TOOLCHAIN := $(strip $(shell awk '$$1 == "toolchain" { print $$2 }' go.mod))
+export GOTOOLCHAIN := $(GO_TOOLCHAIN)
 
 GOLANGCI_LINT := .cache/tools/golangci-lint/$(GOLANGCI_LINT_VERSION)/golangci-lint
 
-.PHONY: run check toolchain-check module-boundary-check ci-check fmt-check mod-check lint test coverage race vuln generate-check
+.PHONY: run check toolchain-check quality-gate-contract-check module-boundary-check ci-check fmt-check mod-check lint test coverage race vuln generate-check
 
 run:
 	go run ./cmd/boss-job-agent
@@ -14,6 +15,7 @@ test:
 
 check:
 	$(MAKE) toolchain-check
+	$(MAKE) quality-gate-contract-check
 	$(MAKE) fmt-check
 	$(MAKE) mod-check
 	$(MAKE) module-boundary-check
@@ -27,6 +29,9 @@ check:
 
 toolchain-check:
 	./scripts/check-tool-versions.sh
+
+quality-gate-contract-check: toolchain-check
+	./scripts/check-quality-gate-contracts.sh
 
 module-boundary-check:
 	bash -n scripts/*.sh

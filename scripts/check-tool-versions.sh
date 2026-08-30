@@ -6,14 +6,49 @@ readonly repository_root="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091 # The path is repository-relative and fixed above.
 source "$repository_root/tools/versions.env"
 
-actual_go_version="$(go env GOVERSION)"
-expected_go_version="go${GO_VERSION}"
-if [[ "$actual_go_version" != "$expected_go_version" ]]; then
-	printf 'Go toolchain is %s, want %s\n' "$actual_go_version" "$expected_go_version" >&2
+read_directive() {
+	local file="$1"
+	local directive="$2"
+
+	awk -v directive="$directive" '$1 == directive { print $2 }' "$file"
+}
+
+readonly root_go_version="$(read_directive "$repository_root/go.mod" go)"
+readonly root_toolchain="$(read_directive "$repository_root/go.mod" toolchain)"
+readonly tools_go_version="$(read_directive "$repository_root/tools/go.mod" go)"
+readonly tools_toolchain="$(read_directive "$repository_root/tools/go.mod" toolchain)"
+readonly toolchain_version="${root_toolchain#go}"
+readonly toolchain_language_version="${toolchain_version%.*}"
+
+if [[ ! "$root_go_version" =~ ^[0-9]+\.[0-9]+$ ]]; then
+	printf 'root go.mod must declare one Go language version; got %q\n' "$root_go_version" >&2
+	exit 1
+fi
+if [[ ! "$root_toolchain" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+	printf 'root go.mod must declare one exact Go toolchain; got %q\n' "$root_toolchain" >&2
+	exit 1
+fi
+if [[ "$toolchain_language_version" != "$root_go_version" ]]; then
+	printf 'root go.mod language version is %s but toolchain is %s\n' "$root_go_version" "$root_toolchain" >&2
+	exit 1
+fi
+if [[ "$tools_go_version" != "$root_go_version" ]]; then
+	printf 'tools/go.mod Go version is %s, want %s\n' "${tools_go_version:-missing}" "$root_go_version" >&2
+	exit 1
+fi
+if [[ "$tools_toolchain" != "$root_toolchain" ]]; then
+	printf 'tools/go.mod toolchain is %s, want %s\n' "${tools_toolchain:-missing}" "$root_toolchain" >&2
 	exit 1
 fi
 
-printf 'Go toolchain: %s\n' "$actual_go_version"
+actual_go_version="$(go env GOVERSION)"
+if [[ "$actual_go_version" != "$root_toolchain" ]]; then
+	printf 'Go toolchain is %s, want %s\n' "$actual_go_version" "$root_toolchain" >&2
+	exit 1
+fi
+
+printf 'Go version contract: language %s, toolchain %s (root and tools)\n' "$root_go_version" "$root_toolchain"
+printf 'Go toolchain in use: %s\n' "$actual_go_version"
 
 check_tool_module() {
 	local module_path="$1"
