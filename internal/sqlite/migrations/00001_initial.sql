@@ -1,6 +1,9 @@
--- BOSS Job Agent SQLite 逻辑 DDL 草案
+-- +goose Up
+-- +goose StatementBegin
+
+-- BOSS Job Agent SQLite 初始 schema
 --
--- 本文件用于评审数据模型，不是已经投入使用的 migration。
+-- 本文件是唯一可执行 DDL 权威；发布后只允许新增后续 migration。
 -- v1 只使用五张 SQLite 业务表：
 --   1. online_resume_versions      用户手动刷新取得的不可变在线简历版本
 --   2. assessment_policy_versions  已经由求职者确认保存的不可变岗位鉴定策略版本
@@ -18,8 +21,6 @@
 -- JSON 字段只保存结构化业务数据，不保存电话、微信等无关敏感信息。
 -- 技术错误、暂停原因和提前结束原因写入持久化结构化运行日志，
 -- 以 trace_id、业务实体标识和尝试号检索，不在业务表中重复保存错误文本。
-
-PRAGMA foreign_keys = ON;
 
 -- ============================================================
 -- 1. 在线简历版本
@@ -808,3 +809,5 @@ CREATE TABLE automation_settings (
         OR outreach_greeting_text IS NOT NULL
     )
 );
+
+-- +goose StatementEnd

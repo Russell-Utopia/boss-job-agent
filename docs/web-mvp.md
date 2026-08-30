@@ -1,6 +1,6 @@
 # BOSS Job Agent MVP Web 交互规格
 
-本文是 MVP Web 的实现与验收基线，记录 throwaway 原型已经验证并由求职者确认的用户可见行为。原型代码不是生产实现，也不应被复制成业务状态来源；领域术语以 [`CONTEXT.md`](../CONTEXT.md) 为准，持久化状态以 [`sqlite-schema.sql`](./sqlite-schema.sql) 为准，后台业务命令和状态所有权以 [`application-modules.md`](./application-modules.md) 为准。
+本文是 MVP Web 的实现与验收基线，记录 throwaway 原型已经验证并由求职者确认的用户可见行为。原型代码不是生产实现，也不应被复制成业务状态来源；领域术语以 [`CONTEXT.md`](../CONTEXT.md) 为准，持久化状态以 [`00001_initial.sql`](../internal/sqlite/migrations/00001_initial.sql) 为准，后台业务命令和状态所有权以 [`application-modules.md`](./application-modules.md) 为准。
 
 已验证的原型源码固定保存在远端分支 `prototype/web-mvp` 的 `throwaway-prototypes/` 目录；该分支只作为交互证据，不合并进 `main`，生产实现仍以本文和上述权威文档为准。
 

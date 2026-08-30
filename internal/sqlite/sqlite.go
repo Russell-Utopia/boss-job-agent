@@ -5,21 +5,31 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 
-	schema "github.com/Russell-Utopia/boss-job-agent/docs"
+	"github.com/Russell-Utopia/boss-job-agent/internal/sqlite/internal/sqlitedb"
+	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
-
 var memoryDatabaseID atomic.Uint64
 
-// Open opens one local SQLite database and applies the v1 schema on first use.
+// Open opens one local SQLite database and applies pending migrations. File
+// databases are migrated on a verified candidate; an existing database is
+// replaced only after a read-only upgrade backup has been retained.
 func Open(ctx context.Context, path string) (*sql.DB, error) {
+	migrations, err := fs.Sub(embeddedMigrations, "migrations")
+	if err != nil {
+		return nil, fmt.Errorf("open embedded sqlite migrations: %w", err)
+	}
+	return openWithMigrations(ctx, path, migrations)
+}
+
+func openConnection(ctx context.Context, path string) (*sql.DB, error) {
 	dsn, err := dataSourceName(path)
 	if err != nil {
 		return nil, err
@@ -34,13 +44,6 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 	if err := db.PingContext(ctx); err != nil {
 		return nil, closeDatabaseAfterError(db, fmt.Errorf("ping sqlite: %w", err))
 	}
-	if err := migrate(ctx, db); err != nil {
-		return nil, closeDatabaseAfterError(db, err)
-	}
-	if err := verifyForeignKeys(ctx, db); err != nil {
-		return nil, closeDatabaseAfterError(db, err)
-	}
-
 	return db, nil
 }
 
@@ -68,46 +71,13 @@ func dataSourceName(path string) (string, error) {
 	return u.String(), nil
 }
 
-func migrate(ctx context.Context, db *sql.DB) (migrationErr error) {
-	var version int
-	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-		return fmt.Errorf("read schema version: %w", err)
-	}
-	if version == schemaVersion {
-		return nil
-	}
-	if version != 0 {
-		return fmt.Errorf("unsupported database schema version %d", version)
-	}
-
-	tx, err := db.BeginTx(ctx, nil)
+func migrate(ctx context.Context, db *sql.DB, migrations fs.FS) error {
+	provider, err := goose.NewProvider(goose.DialectSQLite3, db, migrations)
 	if err != nil {
-		return fmt.Errorf("begin schema migration: %w", err)
+		return fmt.Errorf("create sqlite migration provider: %w", err)
 	}
-	defer func() {
-		migrationErr = joinRollbackError(migrationErr, tx.Rollback())
-	}()
-
-	var existingTables int
-	if err := tx.QueryRowContext(ctx, `
-		SELECT count(*)
-		FROM sqlite_master
-		WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-	`).Scan(&existingTables); err != nil {
-		return fmt.Errorf("inspect existing schema: %w", err)
-	}
-	if existingTables != 0 {
-		return errors.New("database has an unversioned business schema")
-	}
-
-	if _, err := tx.ExecContext(ctx, schema.SQLite); err != nil {
-		return fmt.Errorf("apply v1 schema: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
-		return fmt.Errorf("record schema version: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit schema migration: %w", err)
+	if _, err := provider.Up(ctx); err != nil {
+		return fmt.Errorf("apply sqlite migrations: %w", err)
 	}
 	return nil
 }
@@ -119,13 +89,6 @@ func closeDatabaseAfterError(db *sql.DB, cause error) error {
 	return cause
 }
 
-func joinRollbackError(cause, rollbackErr error) error {
-	if rollbackErr == nil || errors.Is(rollbackErr, sql.ErrTxDone) {
-		return cause
-	}
-	return errors.Join(cause, fmt.Errorf("rollback schema migration: %w", rollbackErr))
-}
-
 func verifyForeignKeys(ctx context.Context, db *sql.DB) error {
 	var enabled int
 	if err := db.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&enabled); err != nil {
@@ -135,4 +98,135 @@ func verifyForeignKeys(ctx context.Context, db *sql.DB) error {
 		return errors.New("sqlite foreign keys are disabled")
 	}
 	return nil
+}
+
+func verifyDatabase(ctx context.Context, db *sql.DB, migrations fs.FS) (sqlitedb.CountBusinessRowsRow, error) {
+	pending, err := hasPendingMigrations(ctx, db, migrations)
+	if err != nil {
+		return sqlitedb.CountBusinessRowsRow{}, err
+	}
+	if pending {
+		return sqlitedb.CountBusinessRowsRow{}, errors.New("sqlite database still has pending migrations")
+	}
+	return verifyDatabaseHealth(ctx, db)
+}
+
+func verifyDatabaseHealth(ctx context.Context, db *sql.DB) (sqlitedb.CountBusinessRowsRow, error) {
+	if err := verifyForeignKeys(ctx, db); err != nil {
+		return sqlitedb.CountBusinessRowsRow{}, err
+	}
+	var integrity string
+	if err := db.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity); err != nil {
+		return sqlitedb.CountBusinessRowsRow{}, fmt.Errorf("check sqlite integrity: %w", err)
+	}
+	if integrity != "ok" {
+		return sqlitedb.CountBusinessRowsRow{}, fmt.Errorf("sqlite integrity check returned %q", integrity)
+	}
+	hasViolation, err := hasForeignKeyViolation(ctx, db)
+	if err != nil {
+		return sqlitedb.CountBusinessRowsRow{}, err
+	}
+	if hasViolation {
+		return sqlitedb.CountBusinessRowsRow{}, errors.New("sqlite foreign key check found a violation")
+	}
+	counts, err := sqlitedb.New(db).CountBusinessRows(ctx)
+	if err != nil {
+		return sqlitedb.CountBusinessRowsRow{}, fmt.Errorf("count sqlite business rows: %w", err)
+	}
+	return counts, nil
+}
+
+func hasPendingMigrations(ctx context.Context, db *sql.DB, migrations fs.FS) (bool, error) {
+	provider, err := goose.NewProvider(goose.DialectSQLite3, db, migrations)
+	if err != nil {
+		return false, fmt.Errorf("create sqlite migration provider: %w", err)
+	}
+	var versionTableExists bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM sqlite_schema
+			WHERE type = 'table' AND name = 'goose_db_version'
+		)
+	`).Scan(&versionTableExists); err != nil {
+		return false, fmt.Errorf("inspect sqlite migration metadata: %w", err)
+	}
+	if !versionTableExists {
+		return true, nil
+	}
+
+	applied, err := appliedMigrationVersions(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	sources := provider.ListSources()
+	known := make(map[int64]struct{}, len(sources))
+	for _, source := range sources {
+		known[source.Version] = struct{}{}
+	}
+	for version := range applied {
+		if _, ok := known[version]; !ok {
+			return false, fmt.Errorf("sqlite migration version %d is newer than this application", version)
+		}
+	}
+	for _, source := range sources {
+		if _, ok := applied[source.Version]; !ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func hasForeignKeyViolation(ctx context.Context, db *sql.DB) (_ bool, retErr error) {
+	rows, err := db.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return false, fmt.Errorf("check sqlite foreign keys: %w", err)
+	}
+	defer func() {
+		retErr = joinCloseError(retErr, rows.Close(), "close sqlite foreign key check")
+	}()
+	if rows.Next() {
+		return true, nil
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate sqlite foreign key check: %w", err)
+	}
+	return false, nil
+}
+
+func appliedMigrationVersions(ctx context.Context, db *sql.DB) (_ map[int64]struct{}, retErr error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT version_id
+		FROM goose_db_version
+		WHERE is_applied = 1 AND version_id > 0
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("read applied sqlite migrations: %w", err)
+	}
+	defer func() {
+		retErr = joinCloseError(retErr, rows.Close(), "close applied sqlite migrations")
+	}()
+
+	versions := make(map[int64]struct{})
+	for rows.Next() {
+		var version int64
+		if err := rows.Scan(&version); err != nil {
+			return nil, fmt.Errorf("scan applied sqlite migration: %w", err)
+		}
+		versions[version] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate applied sqlite migrations: %w", err)
+	}
+	return versions, nil
+}
+
+func joinCloseError(cause, closeErr error, operation string) error {
+	return errors.Join(cause, wrapError(closeErr, operation))
+}
+
+func wrapError(err error, operation string) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }

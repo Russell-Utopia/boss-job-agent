@@ -71,4 +71,10 @@ if ! go -C "$repository_root/tools" list tool | grep -Fxq "golang.org/x/vuln/cmd
 fi
 
 printf 'github.com/sqlc-dev/sqlc: v%s (release binary)\n' "$SQLC_VERSION"
-printf 'github.com/pressly/goose/v3: v%s (reserved for the migration slice)\n' "$GOOSE_VERSION"
+
+actual_goose_version="$(go -C "$repository_root" list -m -f '{{.Version}}' github.com/pressly/goose/v3)"
+if [[ "$actual_goose_version" != "v${GOOSE_VERSION}" ]]; then
+	printf 'github.com/pressly/goose/v3 is %s, want v%s\n' "$actual_goose_version" "$GOOSE_VERSION" >&2
+	exit 1
+fi
+printf 'github.com/pressly/goose/v3: %s (runtime migration provider)\n' "$actual_goose_version"
