@@ -32,16 +32,13 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 	db.SetMaxOpenConns(1)
 
 	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("ping sqlite: %w", err)
+		return nil, closeDatabaseAfterError(db, fmt.Errorf("ping sqlite: %w", err))
 	}
 	if err := migrate(ctx, db); err != nil {
-		db.Close()
-		return nil, err
+		return nil, closeDatabaseAfterError(db, err)
 	}
 	if err := verifyForeignKeys(ctx, db); err != nil {
-		db.Close()
-		return nil, err
+		return nil, closeDatabaseAfterError(db, err)
 	}
 
 	return db, nil
@@ -60,7 +57,7 @@ func dataSourceName(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve database path: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o700); err != nil {
 		return "", fmt.Errorf("create database directory: %w", err)
 	}
 
@@ -71,7 +68,7 @@ func dataSourceName(path string) (string, error) {
 	return u.String(), nil
 }
 
-func migrate(ctx context.Context, db *sql.DB) error {
+func migrate(ctx context.Context, db *sql.DB) (migrationErr error) {
 	var version int
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
@@ -87,7 +84,9 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("begin schema migration: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() {
+		migrationErr = joinRollbackError(migrationErr, tx.Rollback())
+	}()
 
 	var existingTables int
 	if err := tx.QueryRowContext(ctx, `
@@ -111,6 +110,20 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("commit schema migration: %w", err)
 	}
 	return nil
+}
+
+func closeDatabaseAfterError(db *sql.DB, cause error) error {
+	if err := db.Close(); err != nil {
+		return errors.Join(cause, fmt.Errorf("close sqlite after failure: %w", err))
+	}
+	return cause
+}
+
+func joinRollbackError(cause, rollbackErr error) error {
+	if rollbackErr == nil || errors.Is(rollbackErr, sql.ErrTxDone) {
+		return cause
+	}
+	return errors.Join(cause, fmt.Errorf("rollback schema migration: %w", rollbackErr))
 }
 
 func verifyForeignKeys(ctx context.Context, db *sql.DB) error {

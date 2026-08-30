@@ -97,14 +97,19 @@ func Open(ctx context.Context, config Config) (*Application, error) {
 		return nil, err
 	}
 	if err := advice.EnsureDefaultPolicy(ctx, db, nowMillis); err != nil {
-		db.Close()
-		return nil, err
+		return nil, closeDatabaseAfterError(db, err)
 	}
 	if err := automationsettings.EnsureSafeDefaults(ctx, db, nowMillis); err != nil {
-		db.Close()
-		return nil, err
+		return nil, closeDatabaseAfterError(db, err)
 	}
 	return &Application{db: db}, nil
+}
+
+func closeDatabaseAfterError(db *sql.DB, cause error) error {
+	if err := db.Close(); err != nil {
+		return errors.Join(cause, fmt.Errorf("close application database: %w", err))
+	}
+	return cause
 }
 
 func (a *Application) Close() error {

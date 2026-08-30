@@ -1,0 +1,40 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - cyclop
+    - errcheck
+    - errorlint
+    - gocognit
+    - gosec
+    - ineffassign
+    - maintidx
+    - noctx
+    - nolintlint
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - unused
+  settings:
+    cyclop:
+      max-complexity: 10
+      package-average: 0.0
+    gocognit:
+      min-complexity: 20
+    maintidx:
+      under: 20
+    nolintlint:
+      allow-unused: false
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    generated: strict
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -15,7 +15,7 @@ func TestV1SchemaHasExactlyFiveBusinessTablesAndEnforcesForeignKeys(t *testing.T
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	rows, err := db.Query(`
+	rows, err := db.QueryContext(t.Context(), `
 		SELECT name
 		FROM sqlite_master
 		WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
@@ -24,7 +24,11 @@ func TestV1SchemaHasExactlyFiveBusinessTablesAndEnforcesForeignKeys(t *testing.T
 	if err != nil {
 		t.Fatalf("list business tables: %v", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			t.Errorf("close table rows: %v", err)
+		}
+	}()
 
 	var tables []string
 	for rows.Next() {
@@ -48,7 +52,7 @@ func TestV1SchemaHasExactlyFiveBusinessTablesAndEnforcesForeignKeys(t *testing.T
 		t.Fatalf("business tables = %#v, want %#v", tables, wantTables)
 	}
 
-	_, err = db.Exec(`
+	_, err = db.ExecContext(t.Context(), `
 		INSERT INTO discovery_runs (
 			resume_version_id, status, attempt_no, consecutive_failure_count,
 			created_at, updated_at

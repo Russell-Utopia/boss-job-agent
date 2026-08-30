@@ -26,3 +26,4 @@
 # Language/runtime caches
 __pycache__/
 *.py[cod]
+/.cache/

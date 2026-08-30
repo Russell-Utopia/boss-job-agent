@@ -22,7 +22,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (runErr error) {
 	address := flag.String("addr", "127.0.0.1:8080", "Web 监听地址")
 	databasePath := flag.String("db", "./var/boss-job-agent.db", "SQLite 文件路径")
 	flag.Parse()
@@ -34,7 +34,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("启动应用: %w", err)
 	}
-	defer app.Close()
+	defer func() {
+		if err := app.Close(); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("关闭应用: %w", err))
+		}
+	}()
 
 	server := &http.Server{
 		Addr:              *address,

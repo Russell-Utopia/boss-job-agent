@@ -29,32 +29,47 @@ func TestFirstStartupRestoresSafeDefaults(t *testing.T) {
 		t.Fatalf("query startup state: %v", err)
 	}
 
-	if state.CurrentResume != nil {
-		t.Fatalf("current resume = %#v, want no online resume version", state.CurrentResume)
+	assertNoCurrentResume(t, state.CurrentResume)
+	assertDefaultPolicy(t, state.ActivePolicy)
+	assertSafeAutomationSettings(t, state.Automation)
+}
+
+func assertNoCurrentResume(t *testing.T, resume *OnlineResumeVersion) {
+	t.Helper()
+	if resume != nil {
+		t.Fatalf("current resume = %#v, want no online resume version", resume)
 	}
-	if state.ActivePolicy.Version != 1 {
-		t.Errorf("active policy version = %d, want 1", state.ActivePolicy.Version)
+}
+
+func assertDefaultPolicy(t *testing.T, policy AssessmentPolicy) {
+	t.Helper()
+	if policy.Version != 1 {
+		t.Errorf("active policy version = %d, want 1", policy.Version)
 	}
-	if got := len(state.ActivePolicy.Rules); got != 4 {
+	if got := len(policy.Rules); got != 4 {
 		t.Errorf("default policy rule count = %d, want 4", got)
 	}
-	if state.Automation.AutomaticAssessmentEnabled {
+}
+
+func assertSafeAutomationSettings(t *testing.T, settings AutomationSettings) {
+	t.Helper()
+	if settings.AutomaticAssessmentEnabled {
 		t.Error("automatic assessment is enabled, want disabled")
 	}
-	if state.Automation.AssessmentProcessingLimit != 5 {
-		t.Errorf("assessment processing limit = %d, want 5", state.Automation.AssessmentProcessingLimit)
+	if settings.AssessmentProcessingLimit != 5 {
+		t.Errorf("assessment processing limit = %d, want 5", settings.AssessmentProcessingLimit)
 	}
-	if state.Automation.AutomaticOutreachEnabled {
+	if settings.AutomaticOutreachEnabled {
 		t.Error("automatic outreach is enabled, want disabled")
 	}
-	if state.Automation.OutreachGreeting != nil {
-		t.Errorf("outreach greeting = %q, want unconfigured", *state.Automation.OutreachGreeting)
+	if settings.OutreachGreeting != nil {
+		t.Errorf("outreach greeting = %q, want unconfigured", *settings.OutreachGreeting)
 	}
-	if len(state.Automation.OutreachTimeWindows) != 0 {
-		t.Errorf("outreach time windows = %#v, want no restrictions", state.Automation.OutreachTimeWindows)
+	if len(settings.OutreachTimeWindows) != 0 {
+		t.Errorf("outreach time windows = %#v, want no restrictions", settings.OutreachTimeWindows)
 	}
-	if state.Automation.OutreachTimeDescription != "全天可打招呼" {
-		t.Errorf("outreach time description = %q, want 全天可打招呼", state.Automation.OutreachTimeDescription)
+	if settings.OutreachTimeDescription != "全天可打招呼" {
+		t.Errorf("outreach time description = %q, want 全天可打招呼", settings.OutreachTimeDescription)
 	}
 }
 
@@ -115,10 +130,10 @@ func TestStartDiscoveryDoesNotDependOnDownstreamPolicyOrAutomationSettings(t *te
 	}
 	t.Cleanup(func() { _ = app.Close() })
 
-	if _, err := app.db.Exec(`DELETE FROM assessment_policy_versions`); err != nil {
+	if _, err := app.db.ExecContext(t.Context(), `DELETE FROM assessment_policy_versions`); err != nil {
 		t.Fatalf("remove policy fixture: %v", err)
 	}
-	if _, err := app.db.Exec(`DELETE FROM automation_settings`); err != nil {
+	if _, err := app.db.ExecContext(t.Context(), `DELETE FROM automation_settings`); err != nil {
 		t.Fatalf("remove automation fixture: %v", err)
 	}
 

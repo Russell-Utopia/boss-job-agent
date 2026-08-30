@@ -2,6 +2,8 @@
 
 这是 GitHub 工单“用复杂交互原型验证 Web 技术栈”的可丢弃证据，不是生产实现。
 
+本目录是独立 Go Module，不属于根应用 Module，也不进入根目录 `make check`。
+
 它只回答一个问题：在相同业务结果、视觉和操作脚本下，Go 服务端页面与 React + TypeScript + Vite 哪一种更适合继续实现 MVP Web。
 
 ## 固定比较范围
