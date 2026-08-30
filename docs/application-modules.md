@@ -1,6 +1,15 @@
 # v1 后台模块与接口
 
-本文只约定实现前的模块 seam、状态所有权和调用语义，不规定 Go 包结构，也不展开内部函数。
+本文约定实现前的模块 seam、状态所有权和调用语义，不重复展开 Go 包结构或内部函数。业务模块在代码中的包名、根类型与装配方式见 [Go 工程架构](./architecture.md)；例如本文的 `JobPool` 在 Go 中实现为 `jobpool` 包的 `Pool` 根类型，构造后通过实例调用 `pool.Observe(...)`，不是 `包.类型.方法` 形式的运行时调用。
+
+| 本文业务简称 | Go 包与根类型 |
+| --- | --- |
+| `OnlineResumeVersions` | `onlineresume.Versions` |
+| `SearchService` | `discovery.Service` |
+| `JobPool` | `jobpool.Pool` |
+| `AdviceService` | `assessment.Service` |
+| `PostService` | `outreach.Service` |
+| `AutomationSettings` | `automationsettings.Settings` |
 
 ## 运行结构
 
@@ -57,7 +66,7 @@ Run(ctx)                         // 只由后台进程启动
 Observe(ctx, runID, observation) -> JobView
 Review(ctx, decisions)
 QueueAssessments(ctx, jobIDs) -> BatchActionResult
-QueueRealOutreach(ctx, jobIDs, confirmation) -> BatchActionResult
+QueueAuthorizedOutreach(ctx, jobIDs, authorization) -> BatchActionResult
 RetryAssessmentFailures(ctx, jobIDs) -> BatchActionResult
 RetryOutreachFailures(ctx, jobIDs) -> BatchActionResult
 
@@ -75,7 +84,7 @@ GetJob(ctx, jobID, intendedAction) -> JobView
 
 `Observe` 原子处理平台岗位去重、JD 更新、平台开放状态、因 JD 变化导致的鉴定失效、人工结论待复核以及撤回尚未领取的打招呼请求；它不读取当前策略，也不因发现运行采用的在线简历版本而选择鉴定依据。刷新简历、修改策略，或者从新运行再次观察到 JD 未变化的岗位，都不会让它改写历史岗位的鉴定或打招呼状态；重复观察只更新同一条平台岗位的当前可靠事实和最近发现时间。`Review` 原子处理人工结论和当前打招呼资格。`QueueAssessments` 只接受缺少当前有效 AI 结论、平台状态允许鉴定且尚未入队的选中岗位，并把它们改为 `pending`；已有成功 AI 结论的岗位不能通过本接口重新鉴定，排队时也不选择在线简历或策略。已经 `contacted` 的岗位不会再次进入鉴定或打招呼队列，已有 AI 和人工结论继续保留展示。
 
-手工首次打招呼只使用 `QueueRealOutreach`，并要求携带求职者对本批岗位数量、当前固定招呼语和打招呼时间窗的明确确认。命令重新校验岗位确实适合且可沟通，并把当前招呼语冻结到岗位。它只处理本次选中的岗位，不修改 `automation_settings` 中的自动打招呼开关。
+`QueueAuthorizedOutreach` 不是 Web 可以直接调用的命令，只接受 `AutomationSettings` 已经根据当前设置校验过的手工授权；它仍逐项重新校验岗位确实适合且可沟通，并把已授权的当前招呼语冻结到岗位。对求职者可见的手工首次打招呼命令是 `AutomationSettings.QueueRealOutreach`：它要求确认本批岗位数量、当前固定招呼语和打招呼时间窗，只处理本次选中的岗位，也不修改 `automation_settings` 中的自动打招呼开关。
 
 `JobView` 根据 `intendedAction` 返回该岗位当前是否可以被选择，以及不可选择时的用户可见原因；“AI 鉴定”和“真实打招呼”分别计算，Web 不复制资格规则。界面进入某个批量操作后，只允许勾选当前可执行的岗位；已入队、正在处理、已打招呼、已关闭或不满足该操作条件的岗位禁用复选框并直接展示原因。
 
@@ -121,9 +130,10 @@ Get(ctx) -> AutomationSettingsView
 ConfigureAssessment(ctx, enabled, processingLimit)
 PreviewOutreachChange(ctx, enabled) -> OutreachChangeImpact
 ConfigureOutreach(ctx, enabled, greetingText, timeWindows)
+QueueRealOutreach(ctx, jobIDs, confirmation) -> BatchActionResult
 ```
 
-设置模块只暴露两组业务配置和一个真实打招呼影响预览，不提供通用键值写入接口。它校验鉴定上限、固定招呼语和打招呼时间窗，并只更新 `automation_settings` 的单行记录；`AdviceService` 和 `PostService` 读取当前设置决定是否自动入队或能否领取真实打招呼。`PreviewOutreachChange` 统一计算当前可以进入真实队列的岗位数，Web 不得复制这套筛选规则。配置变化如何唤醒后台循环属于模块内部实现，不要求界面管理 Worker。
+设置模块只暴露两组业务配置、一个真实打招呼影响预览和一个手工真实打招呼命令，不提供通用键值写入接口。它校验鉴定上限、固定招呼语和打招呼时间窗，并只更新 `automation_settings` 的单行记录；`AdviceService` 和 `PostService` 读取当前设置决定是否自动入队或能否领取真实打招呼。`PreviewOutreachChange` 统一计算当前可以进入真实队列的岗位数，Web 不得复制这套筛选规则。`QueueRealOutreach` 重新读取当前设置、验证页面确认仍与当前岗位数量、完整招呼语和时间窗一致，再调用 `JobPool.QueueAuthorizedOutreach` 交付可信授权；后者重新校验每个岗位并冻结招呼语。配置变化如何唤醒后台循环属于模块内部实现，不要求界面管理 Worker。
 
 应用第一次创建 `automation_settings` 时使用安全默认值：自动岗位鉴定关闭、同时鉴定岗位上限为 5、自动打招呼关闭、固定招呼语尚未配置、打招呼时间不受限制。这些默认值只用于第一次初始化；之后每次启动都读取用户上次保存的同一行，不能重新覆盖设置。
 

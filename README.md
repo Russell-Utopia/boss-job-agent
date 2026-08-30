@@ -20,6 +20,12 @@ go run ./cmd/boss-job-agent -addr 127.0.0.1:8090 -db ./var/local.db
 
 首次启动只初始化五张业务表、默认策略 v1 和一行安全默认设置。它不会访问 BOSS、启动 Pi 或执行任何真实沟通。
 
+## 架构资料
+
+- [Go 工程架构](./docs/architecture.md)：目标目录、依赖方向、应用装配、状态所有权与迁移切片。
+- [v1 后台模块与接口](./docs/application-modules.md)：业务模块 seam 与调用语义。
+- [MVP Web 交互规格](./docs/web-mvp.md)：页面流程、状态展示与用户操作。
+
 ## 验证
 
 ```bash
