@@ -2,9 +2,12 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash"
 	"io/fs"
 	"net/url"
 	"os"
@@ -17,6 +20,11 @@ import (
 )
 
 var memoryDatabaseID atomic.Uint64
+
+type databaseEvidence struct {
+	Counts             sqlitedb.CountBusinessRowsRow
+	KeyDataFingerprint [sha256.Size]byte
+}
 
 // Open opens one local SQLite database and applies pending migrations. File
 // databases are migrated on a verified candidate; an existing database is
@@ -100,40 +108,69 @@ func verifyForeignKeys(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func verifyDatabase(ctx context.Context, db *sql.DB, migrations fs.FS) (sqlitedb.CountBusinessRowsRow, error) {
+func verifyDatabase(ctx context.Context, db *sql.DB, migrations fs.FS) (databaseEvidence, error) {
 	pending, err := hasPendingMigrations(ctx, db, migrations)
 	if err != nil {
-		return sqlitedb.CountBusinessRowsRow{}, err
+		return databaseEvidence{}, err
 	}
 	if pending {
-		return sqlitedb.CountBusinessRowsRow{}, errors.New("sqlite database still has pending migrations")
+		return databaseEvidence{}, errors.New("sqlite database still has pending migrations")
 	}
 	return verifyDatabaseHealth(ctx, db)
 }
 
-func verifyDatabaseHealth(ctx context.Context, db *sql.DB) (sqlitedb.CountBusinessRowsRow, error) {
+func verifyDatabaseHealth(ctx context.Context, db *sql.DB) (databaseEvidence, error) {
 	if err := verifyForeignKeys(ctx, db); err != nil {
-		return sqlitedb.CountBusinessRowsRow{}, err
+		return databaseEvidence{}, err
 	}
 	var integrity string
 	if err := db.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity); err != nil {
-		return sqlitedb.CountBusinessRowsRow{}, fmt.Errorf("check sqlite integrity: %w", err)
+		return databaseEvidence{}, fmt.Errorf("check sqlite integrity: %w", err)
 	}
 	if integrity != "ok" {
-		return sqlitedb.CountBusinessRowsRow{}, fmt.Errorf("sqlite integrity check returned %q", integrity)
+		return databaseEvidence{}, fmt.Errorf("sqlite integrity check returned %q", integrity)
 	}
 	hasViolation, err := hasForeignKeyViolation(ctx, db)
 	if err != nil {
-		return sqlitedb.CountBusinessRowsRow{}, err
+		return databaseEvidence{}, err
 	}
 	if hasViolation {
-		return sqlitedb.CountBusinessRowsRow{}, errors.New("sqlite foreign key check found a violation")
+		return databaseEvidence{}, errors.New("sqlite foreign key check found a violation")
 	}
-	counts, err := sqlitedb.New(db).CountBusinessRows(ctx)
+	queries := sqlitedb.New(db)
+	counts, err := queries.CountBusinessRows(ctx)
 	if err != nil {
-		return sqlitedb.CountBusinessRowsRow{}, fmt.Errorf("count sqlite business rows: %w", err)
+		return databaseEvidence{}, fmt.Errorf("count sqlite business rows: %w", err)
 	}
-	return counts, nil
+	keyData, err := queries.ListKeyBusinessData(ctx)
+	if err != nil {
+		return databaseEvidence{}, fmt.Errorf("read sqlite key business data: %w", err)
+	}
+	return databaseEvidence{
+		Counts:             counts,
+		KeyDataFingerprint: fingerprintKeyBusinessData(keyData),
+	}, nil
+}
+
+func fingerprintKeyBusinessData(rows []sqlitedb.ListKeyBusinessDataRow) [sha256.Size]byte {
+	hasher := sha256.New()
+	for _, row := range rows {
+		writeFingerprintField(hasher, []byte(row.TableName))
+		var rowID [8]byte
+		binary.BigEndian.PutUint64(rowID[:], uint64(row.RowID)) //nolint:gosec // SQLite identifiers are positive.
+		writeFingerprintField(hasher, rowID[:])
+		writeFingerprintField(hasher, []byte(row.RowData))
+	}
+	var fingerprint [sha256.Size]byte
+	copy(fingerprint[:], hasher.Sum(nil))
+	return fingerprint
+}
+
+func writeFingerprintField(hasher hash.Hash, value []byte) {
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(value)))
+	_, _ = hasher.Write(length[:])
+	_, _ = hasher.Write(value)
 }
 
 func hasPendingMigrations(ctx context.Context, db *sql.DB, migrations fs.FS) (bool, error) {

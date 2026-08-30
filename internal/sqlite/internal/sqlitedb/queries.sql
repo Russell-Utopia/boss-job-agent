@@ -5,3 +5,124 @@ SELECT
   (SELECT count(*) FROM discovery_runs) AS discovery_runs,
   (SELECT count(*) FROM platform_jobs) AS platform_jobs,
   (SELECT count(*) FROM automation_settings) AS automation_settings;
+
+-- name: ListKeyBusinessData :many
+SELECT table_name, row_id, row_data
+FROM (
+  SELECT
+    CAST('online_resume_versions' AS TEXT) AS table_name,
+    id AS row_id,
+    CAST(json_object(
+      'version_no', version_no,
+      'resume_json', resume_json,
+      'resume_hash', resume_hash,
+      'is_current', is_current,
+      'created_at', created_at
+    ) AS TEXT) AS row_data
+  FROM online_resume_versions
+
+  UNION ALL
+
+  SELECT
+    CAST('assessment_policy_versions' AS TEXT),
+    id,
+    CAST(json_object(
+      'version_no', version_no,
+      'rules_json', rules_json,
+      'is_active', is_active,
+      'change_note', change_note,
+      'created_at', created_at
+    ) AS TEXT)
+  FROM assessment_policy_versions
+
+  UNION ALL
+
+  SELECT
+    CAST('discovery_runs' AS TEXT),
+    id,
+    CAST(json_object(
+      'name', name,
+      'resume_version_id', resume_version_id,
+      'current_role', current_role,
+      'current_city', current_city,
+      'next_page', next_page,
+      'status', status,
+      'attempt_no', attempt_no,
+      'consecutive_failure_count', consecutive_failure_count,
+      'retry_at', retry_at,
+      'worker_owner', worker_owner,
+      'worker_lease_until', worker_lease_until,
+      'created_at', created_at,
+      'prepared_at', prepared_at,
+      'last_progress_at', last_progress_at,
+      'finished_at', finished_at,
+      'updated_at', updated_at
+    ) AS TEXT)
+  FROM discovery_runs
+
+  UNION ALL
+
+  SELECT
+    CAST('platform_jobs' AS TEXT),
+    id,
+    CAST(json_object(
+      'platform_job_id', platform_job_id,
+      'canonical_url', canonical_url,
+      'job_title', job_title,
+      'company_name', company_name,
+      'city_text', city_text,
+      'salary_text', salary_text,
+      'jd_json', jd_json,
+      'jd_hash', jd_hash,
+      'platform_status', platform_status,
+      'platform_closed_reason', platform_closed_reason,
+      'platform_status_checked_at', platform_status_checked_at,
+      'assessment_status', assessment_status,
+      'assessment_resume_version_id', assessment_resume_version_id,
+      'assessment_jd_hash', assessment_jd_hash,
+      'assessment_policy_version_id', assessment_policy_version_id,
+      'evaluator_version', evaluator_version,
+      'assessment_attempt_no', assessment_attempt_no,
+      'assessment_consecutive_failure_count', assessment_consecutive_failure_count,
+      'assessment_reason', assessment_reason,
+      'assessment_evidence_json', assessment_evidence_json,
+      'assessment_retry_at', assessment_retry_at,
+      'assessed_at', assessed_at,
+      'human_verdict', human_verdict,
+      'human_reviewed_jd_hash', human_reviewed_jd_hash,
+      'human_reviewed_at', human_reviewed_at,
+      'human_review_note', human_review_note,
+      'outreach_status', outreach_status,
+      'outreach_greeting_text', outreach_greeting_text,
+      'outreach_attempt_no', outreach_attempt_no,
+      'outreach_consecutive_failure_count', outreach_consecutive_failure_count,
+      'outreach_last_attempt_at', outreach_last_attempt_at,
+      'outreach_retry_at', outreach_retry_at,
+      'outreach_evidence_json', outreach_evidence_json,
+      'contact_source', contact_source,
+      'contacted_at', contacted_at,
+      'lease_stage', lease_stage,
+      'lease_owner', lease_owner,
+      'lease_until', lease_until,
+      'first_seen_at', first_seen_at,
+      'last_seen_at', last_seen_at,
+      'updated_at', updated_at
+    ) AS TEXT)
+  FROM platform_jobs
+
+  UNION ALL
+
+  SELECT
+    CAST('automation_settings' AS TEXT),
+    id,
+    CAST(json_object(
+      'automatic_assessment_enabled', automatic_assessment_enabled,
+      'assessment_processing_limit', assessment_processing_limit,
+      'automatic_outreach_enabled', automatic_outreach_enabled,
+      'outreach_greeting_text', outreach_greeting_text,
+      'outreach_time_windows_json', outreach_time_windows_json,
+      'updated_at', updated_at
+    ) AS TEXT)
+  FROM automation_settings
+)
+ORDER BY table_name, row_id;

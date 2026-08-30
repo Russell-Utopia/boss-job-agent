@@ -4,13 +4,13 @@ BOSS Job Agent 是运行在求职者 Mac 上的个人求职助手。当前 T01 �
 
 ## 本地启动
 
-需要 Go 1.23 或更高版本。在仓库根目录运行：
+需要仓库固定的 Go 1.27.0 工具链。在仓库根目录运行：
 
 ```bash
 make run
 ```
 
-然后打开 <http://127.0.0.1:8080>。默认数据保存在 `./var/boss-job-agent.db`；也可以显式指定监听地址和数据库路径：
+然后打开 <http://127.0.0.1:8080>。Mac 默认数据库保存在 `~/Library/Application Support/boss-job-agent/data/boss-job-agent.db`，升级前备份保存在同级 `backups/`；开发和测试也可以显式指定监听地址和数据库路径：
 
 ```bash
 go run ./cmd/boss-job-agent -addr 127.0.0.1:8090 -db ./var/local.db

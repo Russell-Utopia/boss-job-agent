@@ -9,8 +9,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-
-	"github.com/Russell-Utopia/boss-job-agent/internal/sqlite/internal/sqlitedb"
 )
 
 func openWithMigrations(ctx context.Context, path string, migrations fs.FS) (*sql.DB, error) {
@@ -54,7 +52,11 @@ func openMigratedDatabase(ctx context.Context, path string, migrations fs.FS) (*
 }
 
 func createDatabase(ctx context.Context, path string, migrations fs.FS) (*sql.DB, error) {
-	candidate, err := reserveCandidatePath(path)
+	candidate, err := reserveUnusedPath(
+		filepath.Dir(path),
+		"."+filepath.Base(path)+".candidate-*",
+		"candidate",
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -89,14 +91,14 @@ func openExistingDatabase(ctx context.Context, path string, migrations fs.FS) (*
 }
 
 func upgradeDatabase(ctx context.Context, path string, live *sql.DB, migrations fs.FS) (*sql.DB, error) {
-	liveCounts, err := sqlitedb.New(live).CountBusinessRows(ctx)
+	liveEvidence, err := verifyDatabaseHealth(ctx, live)
 	if err != nil {
-		return nil, closeDatabaseAfterError(live, fmt.Errorf("count live sqlite business rows: %w", err))
+		return nil, closeDatabaseAfterError(live, fmt.Errorf("verify live sqlite before upgrade: %w", err))
 	}
 	if err := ensureUpgradeSpace(path); err != nil {
 		return nil, closeDatabaseAfterError(live, err)
 	}
-	backup, err := createBackup(ctx, live, path, liveCounts)
+	backup, err := createBackup(ctx, live, path, liveEvidence)
 	if err != nil {
 		return nil, closeDatabaseAfterError(live, err)
 	}
@@ -110,13 +112,13 @@ func upgradeDatabase(ctx context.Context, path string, live *sql.DB, migrations 
 	if err != nil {
 		return nil, closeDatabaseAfterError(live, err)
 	}
-	candidateCounts, err := sqlitedb.New(candidateDB).CountBusinessRows(ctx)
+	candidateEvidence, err := verifyDatabaseHealth(ctx, candidateDB)
 	if err != nil {
-		cause := closeDatabaseAfterError(candidateDB, fmt.Errorf("count candidate sqlite business rows: %w", err))
+		cause := closeDatabaseAfterError(candidateDB, fmt.Errorf("verify candidate sqlite business data: %w", err))
 		return nil, closeDatabaseAfterError(live, cause)
 	}
-	if candidateCounts != liveCounts {
-		cause := closeDatabaseAfterError(candidateDB, errors.New("candidate sqlite migration changed business row counts"))
+	if candidateEvidence != liveEvidence {
+		cause := closeDatabaseAfterError(candidateDB, errors.New("candidate sqlite migration changed key business data"))
 		return nil, closeDatabaseAfterError(live, cause)
 	}
 	if err := checkpointAndClose(ctx, candidateDB, candidate); err != nil {
@@ -132,13 +134,17 @@ func createBackup(
 	ctx context.Context,
 	live *sql.DB,
 	path string,
-	liveCounts sqlitedb.CountBusinessRowsRow,
+	liveEvidence databaseEvidence,
 ) (_ string, retErr error) {
-	directory := filepath.Join(filepath.Dir(path), "backups")
+	directory := backupDirectory(path)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return "", fmt.Errorf("create sqlite backup directory: %w", err)
 	}
-	backup, err := reserveBackupPath(directory, filepath.Base(path))
+	backup, err := reserveUnusedPath(
+		directory,
+		filepath.Base(path)+".*.backup",
+		"backup",
+	)
 	if err != nil {
 		return "", err
 	}
@@ -151,7 +157,7 @@ func createBackup(
 	if _, err := live.ExecContext(ctx, "VACUUM main INTO ?", backup); err != nil {
 		return "", fmt.Errorf("create sqlite upgrade backup: %w", err)
 	}
-	if err := verifyUpgradeBackup(ctx, backup, liveCounts); err != nil {
+	if err := verifyUpgradeBackup(ctx, backup, liveEvidence); err != nil {
 		return "", err
 	}
 	if err := os.Chmod(backup, 0o400); err != nil {
@@ -167,27 +173,10 @@ func createBackup(
 	return backup, nil
 }
 
-func reserveBackupPath(directory, databaseName string) (string, error) {
-	placeholder, err := os.CreateTemp(directory, databaseName+".*.backup")
-	if err != nil {
-		return "", fmt.Errorf("reserve sqlite backup path: %w", err)
-	}
-	backup := placeholder.Name()
-	if err := placeholder.Close(); err != nil {
-		_ = os.Remove(backup)
-		return "", fmt.Errorf("close sqlite backup placeholder: %w", err)
-	}
-	if err := os.Remove(backup); err != nil {
-		_ = os.Remove(backup)
-		return "", fmt.Errorf("prepare sqlite backup path: %w", err)
-	}
-	return backup, nil
-}
-
 func verifyUpgradeBackup(
 	ctx context.Context,
 	backup string,
-	liveCounts sqlitedb.CountBusinessRowsRow,
+	liveEvidence databaseEvidence,
 ) error {
 	if err := syncFile(backup); err != nil {
 		return err
@@ -196,7 +185,7 @@ func verifyUpgradeBackup(
 	if err != nil {
 		return fmt.Errorf("open sqlite upgrade backup: %w", err)
 	}
-	backupCounts, verifyErr := verifyDatabaseHealth(ctx, backupDB)
+	backupEvidence, verifyErr := verifyDatabaseHealth(ctx, backupDB)
 	closeErr := backupDB.Close()
 	if verifyErr != nil || closeErr != nil {
 		return errors.Join(
@@ -204,14 +193,18 @@ func verifyUpgradeBackup(
 			joinCloseError(nil, closeErr, "close verified sqlite upgrade backup"),
 		)
 	}
-	if backupCounts != liveCounts {
-		return errors.New("sqlite upgrade backup changed business row counts")
+	if backupEvidence != liveEvidence {
+		return errors.New("sqlite upgrade backup changed key business data")
 	}
 	return nil
 }
 
 func copyBackupToCandidate(backup, path string) (string, error) {
-	candidate, err := reserveCandidatePath(path)
+	candidate, err := reserveUnusedPath(
+		filepath.Dir(path),
+		"."+filepath.Base(path)+".candidate-*",
+		"candidate",
+	)
 	if err != nil {
 		return "", err
 	}
@@ -222,21 +215,21 @@ func copyBackupToCandidate(backup, path string) (string, error) {
 	return candidate, nil
 }
 
-func reserveCandidatePath(path string) (string, error) {
-	placeholder, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".candidate-*")
+func reserveUnusedPath(directory, pattern, kind string) (string, error) {
+	placeholder, err := os.CreateTemp(directory, pattern)
 	if err != nil {
-		return "", fmt.Errorf("reserve sqlite candidate path: %w", err)
+		return "", fmt.Errorf("reserve sqlite %s path: %w", kind, err)
 	}
-	candidate := placeholder.Name()
+	path := placeholder.Name()
 	if err := placeholder.Close(); err != nil {
-		_ = os.Remove(candidate)
-		return "", fmt.Errorf("close sqlite candidate placeholder: %w", err)
+		_ = os.Remove(path)
+		return "", fmt.Errorf("close sqlite %s placeholder: %w", kind, err)
 	}
-	if err := os.Remove(candidate); err != nil {
-		_ = os.Remove(candidate)
-		return "", fmt.Errorf("prepare sqlite candidate path: %w", err)
+	if err := os.Remove(path); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("prepare sqlite %s path: %w", kind, err)
 	}
-	return candidate, nil
+	return path, nil
 }
 
 func copyFile(source, destination string) (retErr error) {

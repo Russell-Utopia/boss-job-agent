@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Russell-Utopia/boss-job-agent/internal/application"
+	storage "github.com/Russell-Utopia/boss-job-agent/internal/sqlite"
 	"github.com/Russell-Utopia/boss-job-agent/internal/webui"
 )
 
@@ -23,8 +24,12 @@ func main() {
 }
 
 func run() (runErr error) {
+	defaultDatabasePath, err := storage.DefaultPath()
+	if err != nil {
+		return fmt.Errorf("解析默认 SQLite 路径: %w", err)
+	}
 	address := flag.String("addr", "127.0.0.1:8080", "Web 监听地址")
-	databasePath := flag.String("db", "./var/boss-job-agent.db", "SQLite 文件路径")
+	databasePath := flag.String("db", defaultDatabasePath, "SQLite 文件路径")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
