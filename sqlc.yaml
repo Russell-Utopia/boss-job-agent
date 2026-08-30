@@ -8,3 +8,27 @@ sql:
         package: "sqlitedb"
         out: "internal/sqlite/internal/sqlitedb"
         sql_package: "database/sql"
+  - engine: "sqlite"
+    schema: "internal/sqlite/migrations"
+    queries: "internal/onlineresume/internal/sqlitedb/queries.sql"
+    gen:
+      go:
+        package: "sqlitedb"
+        out: "internal/onlineresume/internal/sqlitedb"
+        sql_package: "database/sql"
+  - engine: "sqlite"
+    schema: "internal/sqlite/migrations"
+    queries: "internal/assessment/internal/sqlitedb/queries.sql"
+    gen:
+      go:
+        package: "sqlitedb"
+        out: "internal/assessment/internal/sqlitedb"
+        sql_package: "database/sql"
+  - engine: "sqlite"
+    schema: "internal/sqlite/migrations"
+    queries: "internal/automationsettings/internal/sqlitedb/queries.sql"
+    gen:
+      go:
+        package: "sqlitedb"
+        out: "internal/automationsettings/internal/sqlitedb"
+        sql_package: "database/sql"

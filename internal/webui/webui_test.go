@@ -1,7 +1,6 @@
 package webui
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"io"
@@ -10,24 +9,64 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/Russell-Utopia/boss-job-agent/internal/application"
+	"github.com/Russell-Utopia/boss-job-agent/internal/assessment"
+	"github.com/Russell-Utopia/boss-job-agent/internal/automationsettings"
+	"github.com/Russell-Utopia/boss-job-agent/internal/discovery"
+	"github.com/Russell-Utopia/boss-job-agent/internal/jobpool"
+	"github.com/Russell-Utopia/boss-job-agent/internal/onlineresume"
+	storage "github.com/Russell-Utopia/boss-job-agent/internal/sqlite"
 )
+
+type testWeb struct {
+	Handler http.Handler
+	db      *sql.DB
+}
+
+func openTestWeb(t *testing.T, path string) *testWeb {
+	t.Helper()
+	db, err := storage.Open(t.Context(), path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	pool := jobpool.New()
+	settings := automationsettings.New(db, pool)
+	assessmentService := assessment.New(db)
+	now := time.UnixMilli(1000)
+	if err := assessmentService.EnsureDefaultPolicy(t.Context(), now); err != nil {
+		_ = db.Close()
+		t.Fatalf("ensure default policy: %v", err)
+	}
+	if err := settings.EnsureSafeDefaults(t.Context(), now); err != nil {
+		_ = db.Close()
+		t.Fatalf("ensure safe automation settings: %v", err)
+	}
+	resumeVersions := onlineresume.New(db)
+	return &testWeb{
+		Handler: New(Dependencies{
+			Resume:     resumeVersions,
+			Discovery:  discovery.New(resumeVersions),
+			Assessment: assessmentService,
+			Settings:   settings,
+		}),
+		db: db,
+	}
+}
+
+func closeTestWeb(t *testing.T, runtime *testWeb) {
+	t.Helper()
+	if err := runtime.db.Close(); err != nil {
+		t.Errorf("close test sqlite: %v", err)
+	}
+}
 
 func TestFirstUseWebProvidesFourStableEntriesAndSafeState(t *testing.T) {
 	t.Parallel()
 
-	app, err := application.Open(context.Background(), application.Config{DatabasePath: ":memory:"})
-	if err != nil {
-		t.Fatalf("open application: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := app.Close(); err != nil {
-			t.Errorf("close application: %v", err)
-		}
-	})
-
-	server := httptest.NewServer(New(app))
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	server := httptest.NewServer(runtime.Handler)
 	t.Cleanup(server.Close)
 	client := server.Client()
 
@@ -51,12 +90,9 @@ func TestFirstUseWebProvidesFourStableEntriesAndSafeState(t *testing.T) {
 func TestRemovedSimulationCommandIsNotRoutable(t *testing.T) {
 	t.Parallel()
 
-	app, err := application.Open(context.Background(), application.Config{DatabasePath: ":memory:"})
-	if err != nil {
-		t.Fatalf("open application: %v", err)
-	}
-	t.Cleanup(func() { _ = app.Close() })
-	server := httptest.NewServer(New(app))
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	server := httptest.NewServer(runtime.Handler)
 	t.Cleanup(server.Close)
 
 	response := postJSONResponse(t, server.Client(), server.URL+"/api/outreach/simulation", `{"jobIds":[]}`)
@@ -69,12 +105,9 @@ func TestRemovedSimulationCommandIsNotRoutable(t *testing.T) {
 func TestWebServesStartupStateAndCSS(t *testing.T) {
 	t.Parallel()
 
-	app, err := application.Open(t.Context(), application.Config{DatabasePath: ":memory:"})
-	if err != nil {
-		t.Fatalf("open application: %v", err)
-	}
-	t.Cleanup(func() { _ = app.Close() })
-	server := httptest.NewServer(New(app))
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	server := httptest.NewServer(runtime.Handler)
 	t.Cleanup(server.Close)
 
 	tests := []struct {
@@ -109,12 +142,9 @@ func TestWebServesStartupStateAndCSS(t *testing.T) {
 func TestWebCommandsReturnBusinessRejections(t *testing.T) {
 	t.Parallel()
 
-	app, err := application.Open(context.Background(), application.Config{DatabasePath: ":memory:"})
-	if err != nil {
-		t.Fatalf("open application: %v", err)
-	}
-	t.Cleanup(func() { _ = app.Close() })
-	server := httptest.NewServer(New(app))
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	server := httptest.NewServer(runtime.Handler)
 	t.Cleanup(server.Close)
 	client := server.Client()
 
@@ -155,22 +185,14 @@ func TestWebRestoresSavedPolicyAndAutomationSettings(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "boss-job-agent.db")
-	first, err := application.Open(context.Background(), application.Config{DatabasePath: path})
-	if err != nil {
-		t.Fatalf("first open: %v", err)
-	}
-	if err := first.Close(); err != nil {
-		t.Fatalf("close first application: %v", err)
-	}
+	first := openTestWeb(t, path)
+	closeTestWeb(t, first)
 
 	seedSavedPolicyAndSettings(t, path)
 
-	restarted, err := application.Open(context.Background(), application.Config{DatabasePath: path})
-	if err != nil {
-		t.Fatalf("restart application: %v", err)
-	}
-	t.Cleanup(func() { _ = restarted.Close() })
-	server := httptest.NewServer(New(restarted))
+	restarted := openTestWeb(t, path)
+	t.Cleanup(func() { closeTestWeb(t, restarted) })
+	server := httptest.NewServer(restarted.Handler)
 	t.Cleanup(server.Close)
 	client := server.Client()
 
@@ -182,6 +204,7 @@ func TestWebRestoresSavedPolicyAndAutomationSettings(t *testing.T) {
 	assertPageContains(t, client, server.URL+"/outreach", []string{
 		"<dd>您好，想和您聊聊这个岗位</dd>",
 		"<dd>按已配置时间段打招呼</dd>",
+		"当前没有可真实打招呼的岗位",
 	})
 }
 
@@ -229,21 +252,13 @@ func TestWebPagesDoNotDependOnUnrelatedDownstreamState(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "boss-job-agent.db")
-	app, err := application.Open(context.Background(), application.Config{DatabasePath: path})
-	if err != nil {
-		t.Fatalf("open application: %v", err)
-	}
-	t.Cleanup(func() { _ = app.Close() })
-	server := httptest.NewServer(New(app))
+	runtime := openTestWeb(t, path)
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	server := httptest.NewServer(runtime.Handler)
 	t.Cleanup(server.Close)
 	client := server.Client()
 
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("open fixture database: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.ExecContext(t.Context(), `DELETE FROM assessment_policy_versions`); err != nil {
+	if _, err := runtime.db.ExecContext(t.Context(), `DELETE FROM assessment_policy_versions`); err != nil {
 		t.Fatalf("remove unrelated policy: %v", err)
 	}
 
@@ -251,7 +266,7 @@ func TestWebPagesDoNotDependOnUnrelatedDownstreamState(t *testing.T) {
 	assertPageStatus(t, client, server.URL+"/outreach", http.StatusOK)
 	assertPageStatus(t, client, server.URL+"/resume", http.StatusOK)
 
-	if _, err := db.ExecContext(t.Context(), `DELETE FROM automation_settings`); err != nil {
+	if _, err := runtime.db.ExecContext(t.Context(), `DELETE FROM automation_settings`); err != nil {
 		t.Fatalf("remove unrelated automation settings: %v", err)
 	}
 	assertPageStatus(t, client, server.URL+"/jobs", http.StatusOK)
