@@ -15,11 +15,10 @@ func EnsureSafeDefaults(ctx context.Context, db *sql.DB, nowMillis int64) error 
 			automatic_assessment_enabled,
 			assessment_processing_limit,
 			automatic_outreach_enabled,
-			automatic_outreach_mode,
 			outreach_greeting_text,
 			outreach_time_windows_json,
 			updated_at
-		) VALUES (1, 0, 5, 0, 'simulation', NULL, '[]', ?)
+		) VALUES (1, 0, 5, 0, NULL, '[]', ?)
 	`, nowMillis); err != nil {
 		return fmt.Errorf("create safe automation settings: %w", err)
 	}

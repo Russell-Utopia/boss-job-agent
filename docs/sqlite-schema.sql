@@ -463,19 +463,9 @@ CREATE TABLE platform_jobs (
                 'pending',         -- 等待 PostService 领取
                 'processing',      -- 正在操作 BOSS
                 'contacted',       -- 已确认真实打招呼，以后不再重复打招呼
-                'simulated',       -- 本轮模拟完成；仍可重新以 real 模式入队
                 'possibly_contacted', -- 可能已打招呼，对账前禁止重试
                 'failed'              -- 明确没有打招呼成功
             )
-        ),
-
-    -- 当前或最近一轮已入队动作采用 simulation 还是真实 real 模式。
-    -- 它是本轮执行方式，不是岗位的永久结果；在入队时冻结，不能中途切换。
-    -- simulated 岗位以后可以重新以 real 模式入队，并用 real 覆盖本字段。
-    outreach_mode TEXT
-        CHECK (
-            outreach_mode IS NULL
-            OR outreach_mode IN ('simulation', 'real')
         ),
 
     -- 本次已入队或已执行动作使用的固定招呼语。
@@ -487,7 +477,7 @@ CREATE TABLE platform_jobs (
         CHECK (outreach_attempt_no >= 0),
 
     -- 当前无人干预执行周期内，能够确认没有打招呼成功的连续失败次数。
-    -- 自动重试不会归零；确认成功、模拟完成或求职者显式重新开始后归零。
+    -- 自动重试不会归零；确认成功或求职者显式重新开始后归零。
     -- possibly_contacted 尚未确认失败，不在对账得出 failed 前递增本字段。
     outreach_consecutive_failure_count INTEGER NOT NULL DEFAULT 0
         CHECK (outreach_consecutive_failure_count >= 0),
@@ -667,32 +657,15 @@ CREATE TABLE platform_jobs (
         )
     ),
 
-    -- 已排队或已由本程序执行的动作必须冻结模式和招呼语。
+    -- 已排队或已由本程序执行的动作必须冻结招呼语。
     CHECK (
         outreach_status NOT IN (
             'pending',
             'processing',
-            'simulated',
             'possibly_contacted',
             'failed'
         )
-        OR (
-            outreach_mode IS NOT NULL
-            AND outreach_greeting_text IS NOT NULL
-        )
-    ),
-
-    -- simulated 只是 simulation 模式这一轮的完成结果，不代表真实打招呼成功。
-    -- 它之后仍可重新变为 pending，并在真实入队时把模式冻结为 real。
-    CHECK (
-        outreach_status <> 'simulated'
-        OR outreach_mode = 'simulation'
-    ),
-
-    -- 只有真实外部动作才可能出现“可能已打招呼”；模拟不会产生这个状态。
-    CHECK (
-        outreach_status <> 'possibly_contacted'
-        OR outreach_mode = 'real'
+        OR outreach_greeting_text IS NOT NULL
     ),
 
     -- 明确打招呼失败或可能已打招呼都必须记录尝试时间；技术错误只写运行日志。
@@ -741,7 +714,7 @@ CREATE TABLE platform_jobs (
     ),
 
     -- 已确认打招呼必须说明时间、来源和 BOSS 页面证据。
-    -- 本程序产生的打招呼只能来自 real 模式；BOSS 原本已沟通时没有本轮执行模式。
+    -- 本程序产生的打招呼必须保留本轮招呼语；BOSS 原本已沟通时可以没有。
     CHECK (
         outreach_status <> 'contacted'
         OR (
@@ -751,12 +724,9 @@ CREATE TABLE platform_jobs (
             AND (
                 (
                     contact_source = 'agent'
-                    AND outreach_mode = 'real'
+                    AND outreach_greeting_text IS NOT NULL
                 )
-                OR (
-                    contact_source = 'boss_existing'
-                    AND outreach_mode IS NULL
-                )
+                OR contact_source = 'boss_existing'
             )
         )
     )
@@ -786,7 +756,7 @@ CREATE INDEX idx_platform_jobs_review
 --
 -- 整个本地个人实例只有一行，固定使用 id=1。
 -- 它保存后台重启后仍要恢复的当前运行设置，不保存岗位状态或发现运行状态。
--- 已经入队岗位采用的 outreach_mode 和招呼语仍冻结在 platform_jobs。
+-- 已经入队岗位采用的招呼语仍冻结在 platform_jobs。
 -- ============================================================
 CREATE TABLE automation_settings (
     -- 单行配置的固定主键；应用初始化时插入 id=1，此后只更新该行。
@@ -809,16 +779,10 @@ CREATE TABLE automation_settings (
     automatic_outreach_enabled INTEGER NOT NULL DEFAULT 0
         CHECK (automatic_outreach_enabled IN (0, 1)),
 
-    -- 自动入队的新岗位采用 simulation 还是真实 real 模式；首次初始化默认 simulation。
-    -- 只影响之后的新入队；已经入队岗位继续使用自己冻结的 outreach_mode。
-    automatic_outreach_mode TEXT NOT NULL DEFAULT 'simulation'
-        CHECK (automatic_outreach_mode IN ('simulation', 'real')),
-
     -- 以后新加入首次打招呼队列的岗位使用的当前固定招呼语。
     -- 修改本字段只影响之后入队的岗位；入队时实际内容复制到
     -- platform_jobs.outreach_greeting_text，之后不再跟随本字段变化。
-    -- 为空表示尚未配置，因此不能开启自动打招呼，
-    -- 也不能手工加入模拟队列或真实打招呼队列。
+    -- 为空表示尚未配置，因此不能开启自动打招呼或手工加入真实打招呼队列。
     outreach_greeting_text TEXT
         CHECK (
             outreach_greeting_text IS NULL
@@ -838,7 +802,7 @@ CREATE TABLE automation_settings (
     -- 最近一次修改任一自动化设置的时间。
     updated_at INTEGER NOT NULL,
 
-    -- 无论 simulation 还是真实 real，自动入队前都必须知道原本要发送什么招呼语。
+    -- 自动入队前必须知道将要发送什么招呼语。
     CHECK (
         automatic_outreach_enabled = 0
         OR outreach_greeting_text IS NOT NULL

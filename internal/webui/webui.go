@@ -48,7 +48,6 @@ func New(app *application.Application) http.Handler {
 	mux.HandleFunc("GET /assets/app.css", serveCSS)
 	mux.HandleFunc("GET /api/startup-state", h.startupState)
 	mux.HandleFunc("POST /api/discovery-runs", h.startDiscovery)
-	mux.HandleFunc("POST /api/outreach/simulation", h.queueSimulation)
 	mux.HandleFunc("POST /api/outreach/real", h.queueReal)
 	return mux
 }
@@ -92,16 +91,6 @@ func (h *handler) startupState(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) startDiscovery(w http.ResponseWriter, r *http.Request) {
 	h.writeCommandResult(w, h.app.StartDiscovery(r.Context()))
-}
-
-func (h *handler) queueSimulation(w http.ResponseWriter, r *http.Request) {
-	var request struct {
-		JobIDs []int64 `json:"jobIds"`
-	}
-	if !decodeJSON(w, r, &request) {
-		return
-	}
-	h.writeCommandResult(w, h.app.QueueSimulationOutreach(r.Context(), request.JobIDs))
 }
 
 func (h *handler) queueReal(w http.ResponseWriter, r *http.Request) {

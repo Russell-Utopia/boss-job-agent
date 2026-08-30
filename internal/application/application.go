@@ -13,13 +13,6 @@ import (
 	storage "github.com/Russell-Utopia/boss-job-agent/internal/sqlite"
 )
 
-type OutreachMode string
-
-const (
-	OutreachModeSimulation OutreachMode = "simulation"
-	OutreachModeReal       OutreachMode = "real"
-)
-
 type Config struct {
 	DatabasePath string
 	Now          func() time.Time
@@ -51,8 +44,6 @@ type AutomationSettings struct {
 	AutomaticAssessmentEnabled bool                 `json:"automaticAssessmentEnabled"`
 	AssessmentProcessingLimit  int                  `json:"assessmentProcessingLimit"`
 	AutomaticOutreachEnabled   bool                 `json:"automaticOutreachEnabled"`
-	AutomaticOutreachMode      OutreachMode         `json:"automaticOutreachMode"`
-	AutomaticOutreachModeText  string               `json:"automaticOutreachModeText"`
 	OutreachGreeting           *string              `json:"outreachGreeting"`
 	OutreachTimeWindows        []OutreachTimeWindow `json:"outreachTimeWindows"`
 	OutreachTimeDescription    string               `json:"outreachTimeDescription"`
@@ -64,9 +55,8 @@ type OutreachTimeWindow struct {
 }
 
 type FirstUseActions struct {
-	StartDiscovery          ActionAvailability `json:"startDiscovery"`
-	QueueSimulationOutreach ActionAvailability `json:"queueSimulationOutreach"`
-	QueueRealOutreach       ActionAvailability `json:"queueRealOutreach"`
+	StartDiscovery    ActionAvailability `json:"startDiscovery"`
+	QueueRealOutreach ActionAvailability `json:"queueRealOutreach"`
 }
 
 type ActionAvailability struct {
@@ -175,12 +165,10 @@ func (a *Application) OutreachState(ctx context.Context) (StartupState, error) {
 	if err != nil {
 		return StartupState{}, err
 	}
-	simulation, real := outreachAvailability(automation)
 	return StartupState{
 		Automation: automation,
 		Actions: FirstUseActions{
-			QueueSimulationOutreach: simulation,
-			QueueRealOutreach:       real,
+			QueueRealOutreach: outreachAvailability(automation),
 		},
 	}, nil
 }
@@ -201,22 +189,12 @@ func (a *Application) StartDiscovery(ctx context.Context) error {
 	return rejectUnavailable(discoveryAvailability(resume))
 }
 
-func (a *Application) QueueSimulationOutreach(ctx context.Context, _ []int64) error {
-	automation, err := a.automationSettings(ctx)
-	if err != nil {
-		return err
-	}
-	simulation, _ := outreachAvailability(automation)
-	return rejectUnavailable(simulation)
-}
-
 func (a *Application) QueueRealOutreach(ctx context.Context, _ []int64, _ RealOutreachConfirmation) error {
 	automation, err := a.automationSettings(ctx)
 	if err != nil {
 		return err
 	}
-	_, real := outreachAvailability(automation)
-	return rejectUnavailable(real)
+	return rejectUnavailable(outreachAvailability(automation))
 }
 
 func rejectUnavailable(action ActionAvailability) error {
@@ -227,11 +205,9 @@ func rejectUnavailable(action ActionAvailability) error {
 }
 
 func firstUseActions(state StartupState) FirstUseActions {
-	simulation, real := outreachAvailability(state.Automation)
 	return FirstUseActions{
-		StartDiscovery:          discoveryAvailability(state.CurrentResume),
-		QueueSimulationOutreach: simulation,
-		QueueRealOutreach:       real,
+		StartDiscovery:    discoveryAvailability(state.CurrentResume),
+		QueueRealOutreach: outreachAvailability(state.Automation),
 	}
 }
 
@@ -248,28 +224,17 @@ func discoveryAvailability(resume *OnlineResumeVersion) ActionAvailability {
 	)
 }
 
-func outreachAvailability(automation AutomationSettings) (ActionAvailability, ActionAvailability) {
-	actions := FirstUseActions{
-		QueueSimulationOutreach: unavailable(
-			"outreach_unavailable",
-			"当前没有可模拟打招呼的岗位",
-		),
-		QueueRealOutreach: unavailable(
-			"outreach_unavailable",
-			"当前没有可真实打招呼的岗位",
-		),
-	}
+func outreachAvailability(automation AutomationSettings) ActionAvailability {
 	if automation.OutreachGreeting == nil {
-		actions.QueueSimulationOutreach = unavailable(
-			"outreach_greeting_required",
-			"请先配置固定招呼语，再模拟打招呼",
-		)
-		actions.QueueRealOutreach = unavailable(
+		return unavailable(
 			"outreach_greeting_required",
 			"请先配置固定招呼语，再真实打招呼",
 		)
 	}
-	return actions.QueueSimulationOutreach, actions.QueueRealOutreach
+	return unavailable(
+		"outreach_unavailable",
+		"当前没有可真实打招呼的岗位",
+	)
 }
 
 func unavailable(code, reason string) ActionAvailability {
@@ -324,7 +289,6 @@ func (a *Application) automationSettings(ctx context.Context) (AutomationSetting
 	var automaticAssessment int
 	var processingLimit int
 	var automaticOutreach int
-	var mode string
 	var greeting sql.NullString
 	var windowsJSON string
 	if err := a.db.QueryRowContext(ctx, `
@@ -332,7 +296,6 @@ func (a *Application) automationSettings(ctx context.Context) (AutomationSetting
 			automatic_assessment_enabled,
 			assessment_processing_limit,
 			automatic_outreach_enabled,
-			automatic_outreach_mode,
 			outreach_greeting_text,
 			outreach_time_windows_json
 		FROM automation_settings
@@ -341,7 +304,6 @@ func (a *Application) automationSettings(ctx context.Context) (AutomationSetting
 		&automaticAssessment,
 		&processingLimit,
 		&automaticOutreach,
-		&mode,
 		&greeting,
 		&windowsJSON,
 	); err != nil {
@@ -361,17 +323,10 @@ func (a *Application) automationSettings(ctx context.Context) (AutomationSetting
 		timeDescription = "按已配置时间段打招呼"
 	}
 
-	modeText := "Simulation"
-	if OutreachMode(mode) == OutreachModeReal {
-		modeText = "Real"
-	}
-
 	return AutomationSettings{
 		AutomaticAssessmentEnabled: automaticAssessment == 1,
 		AssessmentProcessingLimit:  processingLimit,
 		AutomaticOutreachEnabled:   automaticOutreach == 1,
-		AutomaticOutreachMode:      OutreachMode(mode),
-		AutomaticOutreachModeText:  modeText,
 		OutreachGreeting:           greetingValue,
 		OutreachTimeWindows:        windows,
 		OutreachTimeDescription:    timeDescription,

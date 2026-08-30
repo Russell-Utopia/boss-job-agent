@@ -22,7 +22,7 @@
 
 `PostService` 没有专属业务表，但仍是必要的深模块：它封装打招呼前复查、真实外部动作、成功证据识别、`possibly_contacted` 对账和浏览器错误分类。删除它会让这些有副作用的规则散落到 Worker、界面或 `JobPool` 中。
 
-`AutomationSettings` 不是第四个执行模块或 Worker。它只集中校验并保存一行实例级设置；删除它会让 Web、`AdviceService` 和 `PostService` 分别理解时间窗、模式切换和开关语义。
+`AutomationSettings` 不是第四个执行模块或 Worker。它只集中校验并保存一行实例级设置；删除它会让 Web、`AdviceService` 和 `PostService` 分别理解时间窗、影响预览和开关语义。
 
 `OnlineResumeVersions` 也不是执行模块或第二份求职资料。只有求职者在设置中显式点击刷新时，它才读取一次 BOSS 在线简历并保存新的不可变版本；发现和鉴定过程只读取已经保存的当前版本，不发起刷新。`SearchService` 为搜索运行记录实际采用的版本，`AdviceService` 在真正开始鉴定时记录实际采用的版本，二者不通过对方的运行记录取得输入。
 
@@ -57,7 +57,6 @@ Run(ctx)                         // 只由后台进程启动
 Observe(ctx, runID, observation) -> JobView
 Review(ctx, decisions)
 QueueAssessments(ctx, jobIDs) -> BatchActionResult
-QueueSimulation(ctx, jobIDs) -> BatchActionResult
 QueueRealOutreach(ctx, jobIDs, confirmation) -> BatchActionResult
 RetryAssessmentFailures(ctx, jobIDs) -> BatchActionResult
 RetryOutreachFailures(ctx, jobIDs) -> BatchActionResult
@@ -65,8 +64,8 @@ RetryOutreachFailures(ctx, jobIDs) -> BatchActionResult
 AdmitAssessments(ctx, limit) -> admittedCount
 ClaimAssessments(ctx, worker, resumeVersionID, policyVersionID, evaluatorVersion, limit) -> AssessmentWork[]
 FinishAssessments(ctx, outcomes)
-AdmitOutreach(ctx, request, limit) -> admittedCount
-ClaimOutreach(ctx, worker, claimMode, limit) -> OutreachWork[]
+AdmitOutreach(ctx, limit) -> admittedCount
+ClaimOutreach(ctx, worker, limit) -> OutreachWork[]
 FinishOutreach(ctx, outcomes)
 
 GetActiveDiscovery(ctx) -> DiscoveryRunView?
@@ -76,13 +75,13 @@ GetJob(ctx, jobID, intendedAction) -> JobView
 
 `Observe` 原子处理平台岗位去重、JD 更新、平台开放状态、因 JD 变化导致的鉴定失效、人工结论待复核以及撤回尚未领取的打招呼请求；它不读取当前策略，也不因发现运行采用的在线简历版本而选择鉴定依据。刷新简历、修改策略，或者从新运行再次观察到 JD 未变化的岗位，都不会让它改写历史岗位的鉴定或打招呼状态；重复观察只更新同一条平台岗位的当前可靠事实和最近发现时间。`Review` 原子处理人工结论和当前打招呼资格。`QueueAssessments` 只接受缺少当前有效 AI 结论、平台状态允许鉴定且尚未入队的选中岗位，并把它们改为 `pending`；已有成功 AI 结论的岗位不能通过本接口重新鉴定，排队时也不选择在线简历或策略。已经 `contacted` 的岗位不会再次进入鉴定或打招呼队列，已有 AI 和人工结论继续保留展示。
 
-手工首次打招呼使用两个明确命令，不提供含糊的通用“加入打招呼队列”：`QueueSimulation` 只创建 `simulation` 工作；`QueueRealOutreach` 只创建 `real` 工作，并要求携带求职者对本批岗位数量、当前固定招呼语和打招呼时间窗的明确确认。两个命令都重新校验岗位确实适合且可沟通，并把当前招呼语和本轮模式冻结到岗位。它们只处理本次选中的岗位，不修改 `automation_settings` 中的自动打招呼开关或默认模式。
+手工首次打招呼只使用 `QueueRealOutreach`，并要求携带求职者对本批岗位数量、当前固定招呼语和打招呼时间窗的明确确认。命令重新校验岗位确实适合且可沟通，并把当前招呼语冻结到岗位。它只处理本次选中的岗位，不修改 `automation_settings` 中的自动打招呼开关。
 
-`JobView` 根据 `intendedAction` 返回该岗位当前是否可以被选择，以及不可选择时的用户可见原因；“AI 鉴定”“模拟打招呼”和“真实打招呼”分别计算，Web 不复制资格规则。界面进入某个批量操作后，只允许勾选当前可执行的岗位；已入队、正在处理、已打招呼、已关闭或不满足该操作条件的岗位禁用复选框并直接展示原因。
+`JobView` 根据 `intendedAction` 返回该岗位当前是否可以被选择，以及不可选择时的用户可见原因；“AI 鉴定”和“真实打招呼”分别计算，Web 不复制资格规则。界面进入某个批量操作后，只允许勾选当前可执行的岗位；已入队、正在处理、已打招呼、已关闭或不满足该操作条件的岗位禁用复选框并直接展示原因。
 
 提交时 `JobPool` 仍逐项重新校验，防止页面展示后岗位状态已经变化。共享输入本身无效时整批拒绝，例如首次打招呼尚未配置固定招呼语；共享输入有效时返回 `BatchActionResult`，说明实际成功数量，以及因提交瞬间状态变化而跳过的岗位和原因。重复提交已入队岗位不会产生第二份工作。该返回结果只用于当前交互，不建立批次表或批次历史；岗位当前状态仍只写入 `platform_jobs`。
 
-两个 `Admit` 方法只把当前符合条件但尚未入队的岗位加入对应队列；自动开关关闭时执行模块不调用它们，手工批量命令仍可直接入队。`AdmitOutreach` 使用岗位当前判断，不要求 AI 结论所用的简历和策略等于后来保存的当前版本；开启自动打招呼就是求职者允许这些仍然有效的既有结论继续产生新打招呼工作。`ClaimAssessments` 才显式接收当前已保存的在线简历版本 ID、启用策略版本 ID 和鉴定器版本，并在同一事务中把 `pending` 改为 `processing`、记录当前 JD 哈希、递增尝试编号并建立租约。到期可重试的 `failed` 鉴定也由该方法直接重新领取：实际输入未变化就延续失败次数，输入变化则开始新的失败周期。打招呼领取继续按自己的模式和时间窗处理。两个 `Finish` 方法使用岗位 ID、尝试编号和结果证据拒绝迟到写入。两种人工重试命令只接受各自流程中明确的 `failed`；`RetryOutreachFailures` 不能把 `possibly_contacted` 直接改回待打招呼。查询返回只读视图，不返回可持久化实体或数据库句柄。
+两个 `Admit` 方法只把当前符合条件但尚未入队的岗位加入对应队列；自动开关关闭时执行模块不调用它们，手工批量命令仍可直接入队。`AdmitOutreach` 使用岗位当前判断，不要求 AI 结论所用的简历和策略等于后来保存的当前版本；开启自动打招呼就是求职者允许这些仍然有效的既有结论继续产生新打招呼工作。`ClaimAssessments` 才显式接收当前已保存的在线简历版本 ID、启用策略版本 ID 和鉴定器版本，并在同一事务中把 `pending` 改为 `processing`、记录当前 JD 哈希、递增尝试编号并建立租约。到期可重试的 `failed` 鉴定也由该方法直接重新领取：实际输入未变化就延续失败次数，输入变化则开始新的失败周期。打招呼领取继续按自己的时间窗处理。两个 `Finish` 方法使用岗位 ID、尝试编号和结果证据拒绝迟到写入。两种人工重试命令只接受各自流程中明确的 `failed`；`RetryOutreachFailures` 不能把 `possibly_contacted` 直接改回待打招呼。查询返回只读视图，不返回可持久化实体或数据库句柄。
 
 ### `AdviceService`
 
@@ -113,20 +112,20 @@ CreatePolicyVersion(ctx, rules, changeNote) -> PolicyVersionID
 Run(ctx)                         // 只由后台进程启动
 ```
 
-`Run` 在自动打招呼开启时通过 `JobPool.AdmitOutreach` 把全局符合条件的岗位按当前配置模式加入打招呼队列；关闭只停止新增自动入队，已经入队的工作继续保留。每次入队冻结这一轮的 `simulation` 或 `real` 模式，修改全局配置不会把在途模拟突然变成真实打招呼。`Run` 可以随时领取 `possibly_contacted` 对账工作；没有配置打招呼时间窗时可以随时领取真实打招呼，配置后只有当前位于任一时间窗内才领取。浏览器动作结束后只提交结果和证据给 `JobPool.FinishOutreach`。打招呼入队、批量重试和人工操作都经 `JobPool`，不为 `PostService` 增加重复入口。
+`Run` 在自动打招呼开启时通过 `JobPool.AdmitOutreach` 把全局符合条件的岗位加入真实打招呼队列；关闭只停止新增自动入队，已经入队的工作继续保留。每次入队冻结当前固定招呼语。`Run` 可以随时领取 `possibly_contacted` 对账工作；没有配置打招呼时间窗时可以随时领取真实打招呼，配置后只有当前位于任一时间窗内才领取。浏览器动作结束后只提交结果和证据给 `JobPool.FinishOutreach`。打招呼入队、批量重试和人工操作都经 `JobPool`，不为 `PostService` 增加重复入口。
 
 ### `AutomationSettings`
 
 ```text
 Get(ctx) -> AutomationSettingsView
 ConfigureAssessment(ctx, enabled, processingLimit)
-PreviewOutreachChange(ctx, enabled, mode) -> OutreachChangeImpact
-ConfigureOutreach(ctx, enabled, mode, greetingText, timeWindows)
+PreviewOutreachChange(ctx, enabled) -> OutreachChangeImpact
+ConfigureOutreach(ctx, enabled, greetingText, timeWindows)
 ```
 
-设置模块只暴露两组业务配置和一个真实打招呼影响预览，不提供通用键值写入接口。它校验鉴定上限、固定招呼语和打招呼时间窗，并只更新 `automation_settings` 的单行记录；`AdviceService` 和 `PostService` 读取当前设置决定是否自动入队或能否领取真实打招呼。`PreviewOutreachChange` 统一计算当前可以进入真实队列的岗位数，以及仍在模拟、暂时不能进入的岗位数，Web 不得复制这套筛选规则。配置变化如何唤醒后台循环属于模块内部实现，不要求界面管理 Worker。
+设置模块只暴露两组业务配置和一个真实打招呼影响预览，不提供通用键值写入接口。它校验鉴定上限、固定招呼语和打招呼时间窗，并只更新 `automation_settings` 的单行记录；`AdviceService` 和 `PostService` 读取当前设置决定是否自动入队或能否领取真实打招呼。`PreviewOutreachChange` 统一计算当前可以进入真实队列的岗位数，Web 不得复制这套筛选规则。配置变化如何唤醒后台循环属于模块内部实现，不要求界面管理 Worker。
 
-应用第一次创建 `automation_settings` 时使用安全默认值：自动岗位鉴定关闭、同时鉴定岗位上限为 5、自动打招呼关闭、默认模式为 `simulation`、固定招呼语尚未配置、打招呼时间不受限制。这些默认值只用于第一次初始化；之后每次启动都读取用户上次保存的同一行，不能重新覆盖设置。
+应用第一次创建 `automation_settings` 时使用安全默认值：自动岗位鉴定关闭、同时鉴定岗位上限为 5、自动打招呼关闭、固定招呼语尚未配置、打招呼时间不受限制。这些默认值只用于第一次初始化；之后每次启动都读取用户上次保存的同一行，不能重新覆盖设置。
 
 ## 模块运行配置
 
@@ -135,11 +134,11 @@ ConfigureOutreach(ctx, enabled, mode, greetingText, timeWindows)
 - 自动岗位鉴定是“新工作入队开关”，不是模块电源开关。关闭时，新的无有效结论岗位保持未入队；已有 `pending`、`processing` 和尚在自动重试周期内的工作继续完成。手工批量鉴定不受该开关限制。
 - 同时鉴定岗位上限统计 `assessment_status=processing` 的岗位数。v1 只有一个在途 Pi 请求，该请求最多领取当前空闲名额数量的岗位，因此调用批量大小自然受同一个上限约束。
 - 自动打招呼也是“新工作入队开关”。关闭时不再自动加入新的岗位；已经 `pending` 的岗位以及手工批量加入的岗位继续等待打招呼。
-- `simulation` 和 `real` 是每一轮首次打招呼工作的执行模式，不是两个互斥的岗位终态。模式在入队时冻结；一轮模拟完成后岗位记为 `simulated`，之后仍可重新以 `real` 模式入队。
-- 自动化设置保存一条当前固定招呼语；自动或手工把岗位加入首次打招呼队列时，都把当时的完整文本复制到岗位上。之后修改全局招呼语只影响新入队岗位，不改变已有 `pending`、`processing` 或已完成记录；尚未配置招呼语时既不能加入模拟队列，也不能加入真实打招呼队列。
-- 手工批量操作明确显示为“加入模拟队列”和“加入真实打招呼队列”。真实打招呼确认页展示本批可入队岗位数量、将冻结的完整招呼语和当前打招呼时间限制；未设置时间窗时明确显示“全天可打招呼”。确认只授权本批岗位，不会顺便开启或修改自动打招呼。
+- MVP 只执行真实打招呼，不提供模拟打招呼、执行模式选择或 `simulated` 岗位状态。无外部副作用的验证只存在于测试 Adapter 和显式本地 live integration test 中。
+- 自动化设置保存一条当前固定招呼语；自动或手工把岗位加入首次打招呼队列时，都把当时的完整文本复制到岗位上。之后修改全局招呼语只影响新入队岗位，不改变已有 `pending`、`processing` 或已完成记录；尚未配置招呼语时不能加入真实打招呼队列。
+- 手工批量操作明确显示为“加入真实打招呼队列”。确认页展示本批可入队岗位数量、将冻结的完整招呼语和当前打招呼时间限制；未设置时间窗时明确显示“全天可打招呼”。确认只授权本批岗位，不会顺便开启或修改自动打招呼。
 - 打招呼时间窗按 `Asia/Shanghai` 解释；未设置任何时间窗表示全天允许开始真实打招呼。设置后允许多个每日重复且互不重叠的半开区间，例如 `[10:00, 12:00)`、`[14:00, 16:00)`；区间结束后不再领取新的打招呼工作，已经进入 `processing` 的动作继续收尾。手工和自动加入的真实打招呼遵守相同规则，`possibly_contacted` 对账全天允许。
-- 模块运行配置保存在 SQLite 的单行 `automation_settings` 中，后台重启后直接恢复。它属于整个本地实例，不放进 `discovery_runs`，也不把整套设置复制到每个 `platform_jobs`；岗位真正开始鉴定时只记录本次实际采用的在线简历版本、JD 和策略版本，打招呼入队时只记录本轮模式和招呼语。
+- 模块运行配置保存在 SQLite 的单行 `automation_settings` 中，后台重启后直接恢复。它属于整个本地实例，不放进 `discovery_runs`，也不把整套设置复制到每个 `platform_jobs`；岗位真正开始鉴定时只记录本次实际采用的在线简历版本、JD 和策略版本，打招呼入队时只记录本轮冻结的招呼语。
 
 ## 两个岗位状态机的衔接
 
@@ -147,23 +146,18 @@ ConfigureOutreach(ctx, enabled, mode, greetingText, timeWindows)
 
 ```text
 鉴定：not_queued → pending → processing → suitable / unsuitable / needs_user_confirmation
-模拟轮次：not_queued → pending(simulation) → processing(simulation) → simulated
-真实轮次：not_queued / simulated → pending(real) → processing(real) → contacted / possibly_contacted / failed
+打招呼：not_queued → pending → processing → contacted / possibly_contacted / failed
 ```
 
 开启自动岗位鉴定时，`AdviceService` 可以在一次短事务中把当前所有符合条件的 `not_queued` 改为 `pending`；此时不选择简历或策略，只形成可见、可恢复的等待队列。准备调用 Agent 时，它才读取当前已保存的在线简历版本和用户设置策略，最多领取“同时鉴定岗位上限”数量的 `pending` 为 `processing`，记录实际采用的版本，并在一个 Pi 请求中发送完整简历、完整策略和这些岗位的 JD；这里不访问 BOSS，也不会把全部等待岗位一次性推给 Pi。
 
-同理，开启自动打招呼时显示的 N 是开启确认这一刻，当前满足打招呼资格且能进入目标模式的岗位数量：目标为 `simulation` 时只计算尚未模拟的 `not_queued`；目标为 `real` 时计算 `not_queued` 和已经 `simulated` 但尚未真实打招呼的岗位。`pending(simulation)` 和 `processing(simulation)` 都不计入这个 N，也不会被切换操作直接改成真实打招呼。
-
-从 `simulation` 切换到自动 `real` 时，确认界面分开显示：“当前 X 个岗位会进入真实打招呼队列；另有 Y 个岗位仍在模拟，本次不会进入”。确认后只把 X 个岗位改为 `pending(real)`。Y 个岗位保持原来的模拟模式并先完成为 `simulated`；如果届时自动真实打招呼仍然开启，它们再逐个重新检查资格并自动进入真实打招呼队列。界面还要明确说明这一后续行为，不能让“本次未进入”被误解为“以后永远不会进入”。
-
-`PostService` 再按模式和时间窗逐个把 `pending` 领取为 `processing`。任何一轮已经以 `simulation` 入队或执行的工作都不会因设置变化中途变成 `real`。
+同理，开启自动打招呼时显示的 N 是开启确认这一刻，当前满足打招呼资格且尚未入队的岗位数量。确认后，`PostService` 按时间窗逐个把 `pending` 领取为 `processing`。关闭自动打招呼只影响之后的新入队，不修改已经排队或执行中的真实打招呼授权。
 
 鉴定状态 `suitable` 是鉴定状态机的成功终态之一，只构成打招呼入队条件，不直接等于 `outreach_status=pending`。只有 `PostService` 的自动入队规则正在开启，或者求职者执行手工批量加入，`JobPool` 才会把打招呼状态从 `not_queued` 改为 `pending`；因此鉴定和打招呼状态机保持独立，只通过打招呼资格规则关联。
 
 关闭自动打招呼只阻止之后的合适岗位自动入队，不修改已有 `pending` 和 `processing`：待打招呼岗位继续按时间窗执行，执行中的岗位继续收尾。v1 不再增加单独的“暂停打招呼”概念。
 
-`simulated` 只防止相同岗位在没有新指令时被自动反复模拟，不会阻止以后真实打招呼。只有取得 BOSS 证据后的 `contacted` 才表示“这个岗位已经真实打招呼过，以后不再重复打招呼”；从 `simulated` 重新进入 `pending(real)` 前，`JobPool` 仍要重新检查岗位开放状态和当前有效的人机结论。
+只有取得 BOSS 证据后的 `contacted` 才表示“这个岗位已经真实打招呼过，以后不再重复打招呼”；从 `not_queued` 进入 `pending` 前，`JobPool` 必须重新检查岗位开放状态和当前有效的人机结论。
 
 ## 事务与外部动作
 
@@ -223,7 +217,7 @@ type CheckContactStatus interface {
 }
 ```
 
-`Check` 只读，只有取得可靠证据时才返回“已沟通”或“未打招呼”；读取失败返回错误，不把“未知”写成平台岗位状态。模拟打招呼绝不调用 `Send`。真实打招呼必须先调用 `Check` 复查；`Send` 的 `FirstContactResult` 无论是否同时返回错误，都必须把外部影响分为“已确认发送”“已确认没有产生发送”和“可能已经产生发送”三类，最后一类必须进入对账而不能自动重发。生产 Adapter 操作 BOSS；内存 Adapter 可以分别模拟三种外部影响和只读对账结果。
+`Check` 只读，只有取得可靠证据时才返回“已沟通”或“未打招呼”；读取失败返回错误，不把“未知”写成平台岗位状态。真实打招呼必须先调用 `Check` 复查；`Send` 的 `FirstContactResult` 无论是否同时返回错误，都必须把外部影响分为“已确认发送”“已确认没有产生发送”和“可能已经产生发送”三类，最后一类必须进入对账而不能自动重发。生产 Adapter 操作 BOSS；内存 Adapter 可以分别模拟三种外部影响和只读对账结果。
 
 ### `AssessmentSubmitter`
 
@@ -250,6 +244,12 @@ type PolicyAdvisor interface {
 ```
 
 `Generate` 和 `Validate` 各执行一次完整外部模型调用。生成请求包含当前已保存的完整在线简历、当前策略和求职者本次选定的有效人工复核样本；验收请求使用同一在线简历版本，并包含候选策略、生成时的当前策略、全部有效人工复核以及哪些样本参与过生成，返回全量与未参与生成样本的逐项实验结论。两种结果都只是当前页面会话中的策略证据，不携带岗位鉴定尝试号，不调用 `confirm_assessment_results`，也不能进入 `JobPool.FinishAssessments`。即使生产环境与岗位 AI 鉴定复用同一种 Pi 运行能力，这仍是独立于 `AssessmentSubmitter` 的外部接口；内存 Adapter 直接返回固定候选策略和验收结果，使策略优化可以在不改写 `platform_jobs` 的情况下测试。
+
+### 测试 Adapter 与 live integration
+
+默认 `go test ./...` 使用真实业务模块和真实内存 SQLite，只把 BOSS、Pi 等外部依赖替换为受控 Adapter；它验证业务资格、状态机、调用次数和外部影响分类，但不证明生产 Adapter 能访问当前真实外部系统。每个生产 Adapter 还必须有显式本地 live integration test，直接连接真实数据源并按自己的接口合同自动校验输入、输出、错误分类和 trace。接口稳定后再运行全部生产 Adapter 组成的完整真实链路测试。
+
+live integration test 不属于默认测试或 CI；缺少 BOSS 登录、真实 Pi 或显式 live 配置时不得运行，也不能制造失败噪声。真实 `SendFirstContact` 测试每次最多自动选择一个当前合格岗位，保存目标、招呼语、外部证据和 trace，并验证后续检查不会再次发送。受控 Adapter、live 配置和测试结果都不形成 Web 功能、自动化设置或 `platform_jobs` 业务状态。
 
 ### 错误、日志与重试
 

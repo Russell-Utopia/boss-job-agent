@@ -47,9 +47,6 @@ func TestFirstStartupRestoresSafeDefaults(t *testing.T) {
 	if state.Automation.AutomaticOutreachEnabled {
 		t.Error("automatic outreach is enabled, want disabled")
 	}
-	if state.Automation.AutomaticOutreachMode != OutreachModeSimulation {
-		t.Errorf("automatic outreach mode = %q, want %q", state.Automation.AutomaticOutreachMode, OutreachModeSimulation)
-	}
 	if state.Automation.OutreachGreeting != nil {
 		t.Errorf("outreach greeting = %q, want unconfigured", *state.Automation.OutreachGreeting)
 	}
@@ -79,7 +76,6 @@ func TestFirstUseActionsAreRejectedWithUserFacingReasons(t *testing.T) {
 		t.Fatalf("query startup state: %v", err)
 	}
 	assertUnavailableAction(t, state.Actions.StartDiscovery, "online_resume_required", "请先刷新在线简历，再开始岗位发现")
-	assertUnavailableAction(t, state.Actions.QueueSimulationOutreach, "outreach_greeting_required", "请先配置固定招呼语，再模拟打招呼")
 	assertUnavailableAction(t, state.Actions.QueueRealOutreach, "outreach_greeting_required", "请先配置固定招呼语，再真实打招呼")
 
 	commands := []struct {
@@ -88,9 +84,6 @@ func TestFirstUseActionsAreRejectedWithUserFacingReasons(t *testing.T) {
 		code string
 	}{
 		{name: "start discovery", run: app.StartDiscovery, code: "online_resume_required"},
-		{name: "queue simulation outreach", run: func(ctx context.Context) error {
-			return app.QueueSimulationOutreach(ctx, nil)
-		}, code: "outreach_greeting_required"},
 		{name: "queue real outreach", run: func(ctx context.Context) error {
 			return app.QueueRealOutreach(ctx, nil, RealOutreachConfirmation{})
 		}, code: "outreach_greeting_required"},

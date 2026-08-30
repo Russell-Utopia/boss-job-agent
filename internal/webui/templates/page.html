@@ -74,7 +74,6 @@
       <article class="card compact">
         <dl>
           <div><dt>自动打招呼</dt><dd>{{enabledText .State.Automation.AutomaticOutreachEnabled}}</dd></div>
-          <div><dt>默认模式</dt><dd>{{.State.Automation.AutomaticOutreachModeText}}</dd></div>
           <div><dt>固定招呼语</dt><dd>{{if .State.Automation.OutreachGreeting}}{{.State.Automation.OutreachGreeting}}{{else}}未配置{{end}}</dd></div>
           <div><dt>真实打招呼时间</dt><dd>{{.State.Automation.OutreachTimeDescription}}</dd></div>
         </dl>
@@ -83,10 +82,8 @@
         <p class="eyebrow">手工操作</p>
         <h2>当前没有可打招呼岗位</h2>
         <div class="button-row">
-          <button type="button" disabled>模拟打招呼</button>
           <button type="button" disabled>真实打招呼</button>
         </div>
-        <p class="reason">{{.State.Actions.QueueSimulationOutreach.Reason}}</p>
         <p class="reason">{{.State.Actions.QueueRealOutreach.Reason}}</p>
       </article>
     </section>
