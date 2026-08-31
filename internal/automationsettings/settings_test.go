@@ -103,7 +103,7 @@ func TestQueueRealOutreachChecksSettingsBeforeDelegatingToTheJobPool(t *testing.
 		t.Fatalf("ensure safe defaults: %v", err)
 	}
 
-	err := settings.QueueRealOutreach(t.Context(), nil, RealOutreachConfirmation{})
+	_, err := settings.QueueRealOutreach(t.Context(), nil, RealOutreachConfirmation{})
 	var rejection *Rejection
 	ok := errors.As(err, &rejection)
 	if !ok {
@@ -121,7 +121,7 @@ func TestQueueRealOutreachChecksSettingsBeforeDelegatingToTheJobPool(t *testing.
 		t.Fatalf("configure greeting fixture: %v", err)
 	}
 
-	err = settings.QueueRealOutreach(t.Context(), nil, RealOutreachConfirmation{})
+	_, err = settings.QueueRealOutreach(t.Context(), nil, RealOutreachConfirmation{})
 	var poolRejection *jobpool.Rejection
 	ok = errors.As(err, &poolRejection)
 	if !ok {
@@ -129,5 +129,45 @@ func TestQueueRealOutreachChecksSettingsBeforeDelegatingToTheJobPool(t *testing.
 	}
 	if poolRejection.Code != "outreach_unavailable" {
 		t.Errorf("queue with greeting code = %q, want outreach_unavailable", poolRejection.Code)
+	}
+}
+
+func TestQueueRealOutreachReturnsTheJobPoolBatchResult(t *testing.T) {
+	t.Parallel()
+
+	settings, db := openTestSettings(t)
+	if err := settings.EnsureSafeDefaults(t.Context(), time.UnixMilli(1000)); err != nil {
+		t.Fatalf("ensure safe defaults: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(), `
+		UPDATE automation_settings
+		SET outreach_greeting_text = '您好，想和您聊聊这个岗位'
+		WHERE id = 1
+	`); err != nil {
+		t.Fatalf("configure greeting fixture: %v", err)
+	}
+	job, err := settings.pool.Observe(t.Context(), 1, jobpool.Observation{
+		PlatformJobID: "boss-job-1", CanonicalURL: "https://www.zhipin.com/job_detail/boss-job-1.html",
+		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
+	})
+	if err != nil {
+		t.Fatalf("observe eligible outreach job: %v", err)
+	}
+	if err := settings.pool.Review(t.Context(), []jobpool.ReviewDecision{{
+		JobID: job.ID, Verdict: jobpool.HumanVerdictSuitable, ReviewedAt: time.UnixMilli(2000),
+	}}); err != nil {
+		t.Fatalf("review eligible outreach job: %v", err)
+	}
+
+	result, err := settings.QueueRealOutreach(
+		t.Context(), []int64{job.ID, 999}, RealOutreachConfirmation{},
+	)
+	if err != nil {
+		t.Fatalf("queue real outreach: %v", err)
+	}
+	if result.Succeeded != 1 || len(result.Skipped) != 1 || result.Skipped[0].JobID != 999 {
+		t.Errorf("queue real outreach result = %#v, want one success and missing job 999", result)
 	}
 }

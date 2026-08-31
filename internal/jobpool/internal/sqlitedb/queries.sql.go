@@ -10,8 +10,125 @@ import (
 	"database/sql"
 )
 
-const listPlatformJobs = `-- name: ListPlatformJobs :many
-SELECT
+const admitAssessments = `-- name: AdmitAssessments :execrows
+UPDATE platform_jobs
+SET assessment_status = 'pending',
+    updated_at = ?1
+WHERE id IN (
+    SELECT candidate.id
+    FROM platform_jobs AS candidate
+    WHERE candidate.platform_status = 'open'
+      AND candidate.outreach_status <> 'contacted'
+      AND candidate.assessment_status = 'not_queued'
+    ORDER BY candidate.first_seen_at, candidate.id
+    LIMIT ?2
+)
+`
+
+type AdmitAssessmentsParams struct {
+	UpdatedAt  int64
+	AdmitLimit int64
+}
+
+func (q *Queries) AdmitAssessments(ctx context.Context, arg AdmitAssessmentsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, admitAssessments, arg.UpdatedAt, arg.AdmitLimit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const admitOutreach = `-- name: AdmitOutreach :execrows
+UPDATE platform_jobs
+SET outreach_status = 'pending',
+    outreach_greeting_text = ?1,
+    outreach_retry_at = NULL,
+    updated_at = ?2
+WHERE id IN (
+    SELECT candidate.id
+    FROM platform_jobs AS candidate
+    WHERE candidate.platform_status = 'open'
+      AND candidate.outreach_status = 'not_queued'
+      AND (
+          (
+              candidate.human_verdict = 'suitable'
+              AND candidate.human_reviewed_jd_hash = candidate.jd_hash
+          )
+          OR (
+              candidate.human_verdict IS NULL
+              AND candidate.assessment_status = 'suitable'
+          )
+      )
+    ORDER BY candidate.first_seen_at, candidate.id
+    LIMIT ?3
+)
+`
+
+type AdmitOutreachParams struct {
+	GreetingText sql.NullString
+	UpdatedAt    int64
+	AdmitLimit   int64
+}
+
+func (q *Queries) AdmitOutreach(ctx context.Context, arg AdmitOutreachParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, admitOutreach, arg.GreetingText, arg.UpdatedAt, arg.AdmitLimit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const claimAssessments = `-- name: ClaimAssessments :many
+UPDATE platform_jobs
+SET assessment_status = 'processing',
+    assessment_resume_version_id = ?1,
+    assessment_jd_hash = jd_hash,
+    assessment_policy_version_id = ?2,
+    evaluator_version = ?3,
+    assessment_attempt_no = assessment_attempt_no + 1,
+    assessment_consecutive_failure_count = CASE
+        WHEN assessment_status = 'failed'
+         AND assessment_resume_version_id = ?1
+         AND assessment_jd_hash = jd_hash
+         AND assessment_policy_version_id = ?2
+         AND evaluator_version = ?3
+        THEN assessment_consecutive_failure_count
+        ELSE 0
+    END,
+    assessment_reason = NULL,
+    assessment_evidence_json = NULL,
+    assessment_retry_at = NULL,
+    assessed_at = NULL,
+    lease_stage = 'assessment',
+    lease_owner = ?4,
+    lease_until = ?5,
+    updated_at = ?6
+WHERE id IN (
+    SELECT candidate.id
+    FROM platform_jobs AS candidate
+    WHERE candidate.platform_status = 'open'
+      AND candidate.outreach_status <> 'contacted'
+      AND (
+          (
+              candidate.lease_stage IS NULL
+              AND candidate.assessment_status = 'pending'
+          )
+          OR (
+              candidate.lease_stage IS NULL
+              AND
+              candidate.assessment_status = 'failed'
+              AND candidate.assessment_retry_at IS NOT NULL
+              AND candidate.assessment_retry_at <= ?7
+              AND candidate.assessment_consecutive_failure_count < ?8
+          )
+      )
+    ORDER BY
+        CASE candidate.assessment_status WHEN 'pending' THEN 0 ELSE 1 END,
+        candidate.first_seen_at,
+        candidate.id
+    LIMIT ?9
+)
+RETURNING
     id,
     platform_job_id,
     canonical_url,
@@ -21,43 +138,474 @@ SELECT
     salary_text,
     jd_json,
     jd_hash,
-    platform_status,
-    platform_closed_reason,
-    platform_status_checked_at,
+    assessment_resume_version_id,
+    assessment_policy_version_id,
+    evaluator_version,
+    assessment_attempt_no,
+    lease_until
+`
+
+type ClaimAssessmentsParams struct {
+	ResumeVersionID  sql.NullInt64
+	PolicyVersionID  sql.NullInt64
+	EvaluatorVersion sql.NullInt64
+	Worker           sql.NullString
+	LeaseUntil       sql.NullInt64
+	UpdatedAt        int64
+	ClaimedAt        sql.NullInt64
+	FailureLimit     int64
+	ClaimLimit       int64
+}
+
+type ClaimAssessmentsRow struct {
+	ID                        int64
+	PlatformJobID             string
+	CanonicalUrl              string
+	JobTitle                  string
+	CompanyName               sql.NullString
+	CityText                  sql.NullString
+	SalaryText                sql.NullString
+	JdJson                    string
+	JdHash                    string
+	AssessmentResumeVersionID sql.NullInt64
+	AssessmentPolicyVersionID sql.NullInt64
+	EvaluatorVersion          sql.NullInt64
+	AssessmentAttemptNo       int64
+	LeaseUntil                sql.NullInt64
+}
+
+func (q *Queries) ClaimAssessments(ctx context.Context, arg ClaimAssessmentsParams) ([]ClaimAssessmentsRow, error) {
+	rows, err := q.db.QueryContext(ctx, claimAssessments,
+		arg.ResumeVersionID,
+		arg.PolicyVersionID,
+		arg.EvaluatorVersion,
+		arg.Worker,
+		arg.LeaseUntil,
+		arg.UpdatedAt,
+		arg.ClaimedAt,
+		arg.FailureLimit,
+		arg.ClaimLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ClaimAssessmentsRow
+	for rows.Next() {
+		var i ClaimAssessmentsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PlatformJobID,
+			&i.CanonicalUrl,
+			&i.JobTitle,
+			&i.CompanyName,
+			&i.CityText,
+			&i.SalaryText,
+			&i.JdJson,
+			&i.JdHash,
+			&i.AssessmentResumeVersionID,
+			&i.AssessmentPolicyVersionID,
+			&i.EvaluatorVersion,
+			&i.AssessmentAttemptNo,
+			&i.LeaseUntil,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const claimOutreachWork = `-- name: ClaimOutreachWork :one
+UPDATE platform_jobs
+SET outreach_status = 'processing',
+    outreach_attempt_no = outreach_attempt_no + 1,
+    outreach_last_attempt_at = ?1,
+    outreach_retry_at = NULL,
+    lease_stage = 'outreach',
+    lease_owner = ?2,
+    lease_until = ?3,
+    updated_at = ?1
+WHERE id = ?4
+  AND outreach_status = ?5
+  AND lease_stage IS NULL
+  AND (
+      ?5 = 'possibly_contacted'
+      OR (
+          platform_status = 'open'
+          AND (
+              (human_verdict = 'suitable' AND human_reviewed_jd_hash = jd_hash)
+              OR (human_verdict IS NULL AND assessment_status = 'suitable')
+          )
+      )
+  )
+RETURNING
+    id,
+    platform_job_id,
+    canonical_url,
+    job_title,
+    company_name,
+    city_text,
+    salary_text,
+    jd_json,
+    jd_hash,
+    outreach_greeting_text,
+    outreach_attempt_no,
+    lease_until
+`
+
+type ClaimOutreachWorkParams struct {
+	ClaimedAt      sql.NullInt64
+	Worker         sql.NullString
+	LeaseUntil     sql.NullInt64
+	JobID          int64
+	ExpectedStatus string
+}
+
+type ClaimOutreachWorkRow struct {
+	ID                   int64
+	PlatformJobID        string
+	CanonicalUrl         string
+	JobTitle             string
+	CompanyName          sql.NullString
+	CityText             sql.NullString
+	SalaryText           sql.NullString
+	JdJson               string
+	JdHash               string
+	OutreachGreetingText sql.NullString
+	OutreachAttemptNo    int64
+	LeaseUntil           sql.NullInt64
+}
+
+func (q *Queries) ClaimOutreachWork(ctx context.Context, arg ClaimOutreachWorkParams) (ClaimOutreachWorkRow, error) {
+	row := q.db.QueryRowContext(ctx, claimOutreachWork,
+		arg.ClaimedAt,
+		arg.Worker,
+		arg.LeaseUntil,
+		arg.JobID,
+		arg.ExpectedStatus,
+	)
+	var i ClaimOutreachWorkRow
+	err := row.Scan(
+		&i.ID,
+		&i.PlatformJobID,
+		&i.CanonicalUrl,
+		&i.JobTitle,
+		&i.CompanyName,
+		&i.CityText,
+		&i.SalaryText,
+		&i.JdJson,
+		&i.JdHash,
+		&i.OutreachGreetingText,
+		&i.OutreachAttemptNo,
+		&i.LeaseUntil,
+	)
+	return i, err
+}
+
+const expireAssessmentLeases = `-- name: ExpireAssessmentLeases :execrows
+UPDATE platform_jobs
+SET assessment_status = 'failed',
+    assessment_consecutive_failure_count = assessment_consecutive_failure_count + 1,
+    assessment_reason = ?1,
+    assessment_evidence_json = ?2,
+    assessment_retry_at = ?3,
+    lease_stage = NULL,
+    lease_owner = NULL,
+    lease_until = NULL,
+    updated_at = ?4
+WHERE assessment_status = 'processing'
+  AND lease_stage = 'assessment'
+  AND lease_until <= ?3
+`
+
+type ExpireAssessmentLeasesParams struct {
+	Reason       sql.NullString
+	EvidenceJson sql.NullString
+	ExpiredAt    sql.NullInt64
+	UpdatedAt    int64
+}
+
+func (q *Queries) ExpireAssessmentLeases(ctx context.Context, arg ExpireAssessmentLeasesParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, expireAssessmentLeases,
+		arg.Reason,
+		arg.EvidenceJson,
+		arg.ExpiredAt,
+		arg.UpdatedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const expireOutreachLeases = `-- name: ExpireOutreachLeases :execrows
+UPDATE platform_jobs
+SET outreach_status = 'possibly_contacted',
+    outreach_retry_at = NULL,
+    lease_stage = NULL,
+    lease_owner = NULL,
+    lease_until = NULL,
+    updated_at = ?1
+WHERE outreach_status = 'processing'
+  AND lease_stage = 'outreach'
+  AND lease_until <= ?2
+`
+
+type ExpireOutreachLeasesParams struct {
+	UpdatedAt int64
+	ExpiredAt sql.NullInt64
+}
+
+func (q *Queries) ExpireOutreachLeases(ctx context.Context, arg ExpireOutreachLeasesParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, expireOutreachLeases, arg.UpdatedAt, arg.ExpiredAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const finishAssessment = `-- name: FinishAssessment :one
+UPDATE platform_jobs
+SET assessment_status = ?1,
+    assessment_consecutive_failure_count = CASE
+        WHEN ?1 = 'failed'
+        THEN assessment_consecutive_failure_count + 1
+        ELSE 0
+    END,
+    assessment_reason = ?2,
+    assessment_evidence_json = ?3,
+    assessment_retry_at = CASE
+        WHEN ?1 = 'failed' THEN ?4
+        ELSE NULL
+    END,
+    assessed_at = CASE
+        WHEN ?1 = 'suitable'
+          OR ?1 = 'unsuitable'
+          OR ?1 = 'needs_user_confirmation'
+        THEN ?5
+        ELSE NULL
+    END,
+    lease_stage = NULL,
+    lease_owner = NULL,
+    lease_until = NULL,
+    updated_at = ?5
+WHERE id = ?6
+  AND assessment_status = 'processing'
+  AND assessment_attempt_no = ?7
+  AND lease_stage = 'assessment'
+RETURNING id
+`
+
+type FinishAssessmentParams struct {
+	ResultStatus string
+	Reason       sql.NullString
+	EvidenceJson sql.NullString
+	RetryAt      sql.NullInt64
+	CompletedAt  int64
+	JobID        int64
+	AttemptNo    int64
+}
+
+func (q *Queries) FinishAssessment(ctx context.Context, arg FinishAssessmentParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, finishAssessment,
+		arg.ResultStatus,
+		arg.Reason,
+		arg.EvidenceJson,
+		arg.RetryAt,
+		arg.CompletedAt,
+		arg.JobID,
+		arg.AttemptNo,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const finishOutreachWork = `-- name: FinishOutreachWork :one
+UPDATE platform_jobs
+SET outreach_status = ?1,
+    outreach_consecutive_failure_count = CASE
+        WHEN ?1 = 'failed' THEN outreach_consecutive_failure_count + 1
+        WHEN ?1 = 'contacted' THEN 0
+        ELSE outreach_consecutive_failure_count
+    END,
+    outreach_retry_at = CASE
+        WHEN ?1 = 'failed' THEN ?2
+        ELSE NULL
+    END,
+    outreach_evidence_json = ?3,
+    contact_source = CASE
+        WHEN ?1 = 'contacted' THEN ?4
+        ELSE NULL
+    END,
+    contacted_at = CASE
+        WHEN ?1 = 'contacted' THEN ?5
+        ELSE NULL
+    END,
+    lease_stage = NULL,
+    lease_owner = NULL,
+    lease_until = NULL,
+    updated_at = ?5
+WHERE id = ?6
+  AND outreach_status = 'processing'
+  AND outreach_attempt_no = ?7
+  AND lease_stage = 'outreach'
+RETURNING id
+`
+
+type FinishOutreachWorkParams struct {
+	ResultStatus  string
+	RetryAt       sql.NullInt64
+	EvidenceJson  sql.NullString
+	ContactSource sql.NullString
+	CompletedAt   int64
+	JobID         int64
+	AttemptNo     int64
+}
+
+func (q *Queries) FinishOutreachWork(ctx context.Context, arg FinishOutreachWorkParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, finishOutreachWork,
+		arg.ResultStatus,
+		arg.RetryAt,
+		arg.EvidenceJson,
+		arg.ContactSource,
+		arg.CompletedAt,
+		arg.JobID,
+		arg.AttemptNo,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const getOutreachClaimCandidate = `-- name: GetOutreachClaimCandidate :one
+SELECT id, outreach_status
+FROM platform_jobs
+WHERE lease_stage IS NULL
+  AND (
+      outreach_status = 'possibly_contacted'
+      OR (
+          outreach_status = 'pending'
+          AND platform_status = 'open'
+          AND (
+              (human_verdict = 'suitable' AND human_reviewed_jd_hash = jd_hash)
+              OR (human_verdict IS NULL AND assessment_status = 'suitable')
+          )
+      )
+      OR (
+          outreach_status = 'failed'
+          AND outreach_retry_at IS NOT NULL
+          AND outreach_retry_at <= ?1
+          AND outreach_consecutive_failure_count < ?2
+          AND platform_status = 'open'
+          AND (
+              (human_verdict = 'suitable' AND human_reviewed_jd_hash = jd_hash)
+              OR (human_verdict IS NULL AND assessment_status = 'suitable')
+          )
+      )
+  )
+ORDER BY
+    CASE outreach_status WHEN 'possibly_contacted' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
     first_seen_at,
-    last_seen_at,
-    updated_at
+    id
+LIMIT 1
+`
+
+type GetOutreachClaimCandidateParams struct {
+	ClaimedAt    sql.NullInt64
+	FailureLimit int64
+}
+
+type GetOutreachClaimCandidateRow struct {
+	ID             int64
+	OutreachStatus string
+}
+
+func (q *Queries) GetOutreachClaimCandidate(ctx context.Context, arg GetOutreachClaimCandidateParams) (GetOutreachClaimCandidateRow, error) {
+	row := q.db.QueryRowContext(ctx, getOutreachClaimCandidate, arg.ClaimedAt, arg.FailureLimit)
+	var i GetOutreachClaimCandidateRow
+	err := row.Scan(&i.ID, &i.OutreachStatus)
+	return i, err
+}
+
+const getPlatformJob = `-- name: GetPlatformJob :one
+SELECT id, platform_job_id, canonical_url, job_title, company_name, city_text, salary_text, jd_json, jd_hash, platform_status, platform_closed_reason, platform_status_checked_at, assessment_status, assessment_resume_version_id, assessment_jd_hash, assessment_policy_version_id, evaluator_version, assessment_attempt_no, assessment_consecutive_failure_count, assessment_reason, assessment_evidence_json, assessment_retry_at, assessed_at, human_verdict, human_reviewed_jd_hash, human_reviewed_at, human_review_note, outreach_status, outreach_greeting_text, outreach_attempt_no, outreach_consecutive_failure_count, outreach_last_attempt_at, outreach_retry_at, outreach_evidence_json, contact_source, contacted_at, lease_stage, lease_owner, lease_until, first_seen_at, last_seen_at, updated_at
+FROM platform_jobs
+WHERE id = ?1
+`
+
+func (q *Queries) GetPlatformJob(ctx context.Context, jobID int64) (PlatformJob, error) {
+	row := q.db.QueryRowContext(ctx, getPlatformJob, jobID)
+	var i PlatformJob
+	err := row.Scan(
+		&i.ID,
+		&i.PlatformJobID,
+		&i.CanonicalUrl,
+		&i.JobTitle,
+		&i.CompanyName,
+		&i.CityText,
+		&i.SalaryText,
+		&i.JdJson,
+		&i.JdHash,
+		&i.PlatformStatus,
+		&i.PlatformClosedReason,
+		&i.PlatformStatusCheckedAt,
+		&i.AssessmentStatus,
+		&i.AssessmentResumeVersionID,
+		&i.AssessmentJdHash,
+		&i.AssessmentPolicyVersionID,
+		&i.EvaluatorVersion,
+		&i.AssessmentAttemptNo,
+		&i.AssessmentConsecutiveFailureCount,
+		&i.AssessmentReason,
+		&i.AssessmentEvidenceJson,
+		&i.AssessmentRetryAt,
+		&i.AssessedAt,
+		&i.HumanVerdict,
+		&i.HumanReviewedJdHash,
+		&i.HumanReviewedAt,
+		&i.HumanReviewNote,
+		&i.OutreachStatus,
+		&i.OutreachGreetingText,
+		&i.OutreachAttemptNo,
+		&i.OutreachConsecutiveFailureCount,
+		&i.OutreachLastAttemptAt,
+		&i.OutreachRetryAt,
+		&i.OutreachEvidenceJson,
+		&i.ContactSource,
+		&i.ContactedAt,
+		&i.LeaseStage,
+		&i.LeaseOwner,
+		&i.LeaseUntil,
+		&i.FirstSeenAt,
+		&i.LastSeenAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const listPlatformJobs = `-- name: ListPlatformJobs :many
+SELECT id, platform_job_id, canonical_url, job_title, company_name, city_text, salary_text, jd_json, jd_hash, platform_status, platform_closed_reason, platform_status_checked_at, assessment_status, assessment_resume_version_id, assessment_jd_hash, assessment_policy_version_id, evaluator_version, assessment_attempt_no, assessment_consecutive_failure_count, assessment_reason, assessment_evidence_json, assessment_retry_at, assessed_at, human_verdict, human_reviewed_jd_hash, human_reviewed_at, human_review_note, outreach_status, outreach_greeting_text, outreach_attempt_no, outreach_consecutive_failure_count, outreach_last_attempt_at, outreach_retry_at, outreach_evidence_json, contact_source, contacted_at, lease_stage, lease_owner, lease_until, first_seen_at, last_seen_at, updated_at
 FROM platform_jobs
 ORDER BY first_seen_at, id
 `
 
-type ListPlatformJobsRow struct {
-	ID                      int64
-	PlatformJobID           string
-	CanonicalUrl            string
-	JobTitle                string
-	CompanyName             sql.NullString
-	CityText                sql.NullString
-	SalaryText              sql.NullString
-	JdJson                  string
-	JdHash                  string
-	PlatformStatus          string
-	PlatformClosedReason    sql.NullString
-	PlatformStatusCheckedAt int64
-	FirstSeenAt             int64
-	LastSeenAt              int64
-	UpdatedAt               int64
-}
-
-func (q *Queries) ListPlatformJobs(ctx context.Context) ([]ListPlatformJobsRow, error) {
+func (q *Queries) ListPlatformJobs(ctx context.Context) ([]PlatformJob, error) {
 	rows, err := q.db.QueryContext(ctx, listPlatformJobs)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListPlatformJobsRow
+	var items []PlatformJob
 	for rows.Next() {
-		var i ListPlatformJobsRow
+		var i PlatformJob
 		if err := rows.Scan(
 			&i.ID,
 			&i.PlatformJobID,
@@ -71,6 +619,33 @@ func (q *Queries) ListPlatformJobs(ctx context.Context) ([]ListPlatformJobsRow, 
 			&i.PlatformStatus,
 			&i.PlatformClosedReason,
 			&i.PlatformStatusCheckedAt,
+			&i.AssessmentStatus,
+			&i.AssessmentResumeVersionID,
+			&i.AssessmentJdHash,
+			&i.AssessmentPolicyVersionID,
+			&i.EvaluatorVersion,
+			&i.AssessmentAttemptNo,
+			&i.AssessmentConsecutiveFailureCount,
+			&i.AssessmentReason,
+			&i.AssessmentEvidenceJson,
+			&i.AssessmentRetryAt,
+			&i.AssessedAt,
+			&i.HumanVerdict,
+			&i.HumanReviewedJdHash,
+			&i.HumanReviewedAt,
+			&i.HumanReviewNote,
+			&i.OutreachStatus,
+			&i.OutreachGreetingText,
+			&i.OutreachAttemptNo,
+			&i.OutreachConsecutiveFailureCount,
+			&i.OutreachLastAttemptAt,
+			&i.OutreachRetryAt,
+			&i.OutreachEvidenceJson,
+			&i.ContactSource,
+			&i.ContactedAt,
+			&i.LeaseStage,
+			&i.LeaseOwner,
+			&i.LeaseUntil,
 			&i.FirstSeenAt,
 			&i.LastSeenAt,
 			&i.UpdatedAt,
@@ -106,34 +681,107 @@ INSERT INTO platform_jobs (
     updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(platform_job_id) DO UPDATE SET
-    canonical_url = excluded.canonical_url,
-    job_title = excluded.job_title,
-    company_name = excluded.company_name,
-    city_text = excluded.city_text,
-    salary_text = excluded.salary_text,
-    jd_json = excluded.jd_json,
-    jd_hash = excluded.jd_hash,
-    platform_status = excluded.platform_status,
-    platform_closed_reason = excluded.platform_closed_reason,
-    platform_status_checked_at = excluded.platform_status_checked_at,
-    last_seen_at = excluded.last_seen_at,
-    updated_at = excluded.updated_at
-RETURNING
-    id,
-    platform_job_id,
-    canonical_url,
-    job_title,
-    company_name,
-    city_text,
-    salary_text,
-    jd_json,
-    jd_hash,
-    platform_status,
-    platform_closed_reason,
-    platform_status_checked_at,
-    first_seen_at,
-    last_seen_at,
-    updated_at
+    canonical_url = CASE WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at THEN excluded.canonical_url ELSE platform_jobs.canonical_url END,
+    job_title = CASE WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at THEN excluded.job_title ELSE platform_jobs.job_title END,
+    company_name = CASE WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at THEN excluded.company_name ELSE platform_jobs.company_name END,
+    city_text = CASE WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at THEN excluded.city_text ELSE platform_jobs.city_text END,
+    salary_text = CASE WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at THEN excluded.salary_text ELSE platform_jobs.salary_text END,
+    jd_json = CASE WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at THEN excluded.jd_json ELSE platform_jobs.jd_json END,
+    jd_hash = CASE WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at THEN excluded.jd_hash ELSE platform_jobs.jd_hash END,
+    platform_status = CASE WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at THEN excluded.platform_status ELSE platform_jobs.platform_status END,
+    platform_closed_reason = CASE WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at THEN excluded.platform_closed_reason ELSE platform_jobs.platform_closed_reason END,
+    platform_status_checked_at = MAX(platform_jobs.platform_status_checked_at, excluded.platform_status_checked_at),
+    assessment_status = CASE
+        WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at
+         AND excluded.jd_hash <> platform_jobs.jd_hash
+         AND platform_jobs.outreach_status <> 'contacted'
+        THEN CASE
+            WHEN platform_jobs.assessment_status IN ('pending', 'processing', 'failed')
+            THEN 'pending'
+            ELSE 'not_queued'
+        END
+        ELSE platform_jobs.assessment_status
+    END,
+    assessment_resume_version_id = CASE
+        WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at
+         AND excluded.jd_hash <> platform_jobs.jd_hash
+         AND platform_jobs.outreach_status <> 'contacted'
+        THEN NULL ELSE platform_jobs.assessment_resume_version_id END,
+    assessment_jd_hash = CASE
+        WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at
+         AND excluded.jd_hash <> platform_jobs.jd_hash
+         AND platform_jobs.outreach_status <> 'contacted'
+        THEN NULL ELSE platform_jobs.assessment_jd_hash END,
+    assessment_policy_version_id = CASE
+        WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at
+         AND excluded.jd_hash <> platform_jobs.jd_hash
+         AND platform_jobs.outreach_status <> 'contacted'
+        THEN NULL ELSE platform_jobs.assessment_policy_version_id END,
+    evaluator_version = CASE
+        WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at
+         AND excluded.jd_hash <> platform_jobs.jd_hash
+         AND platform_jobs.outreach_status <> 'contacted'
+        THEN NULL ELSE platform_jobs.evaluator_version END,
+    assessment_consecutive_failure_count = CASE
+        WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at
+         AND excluded.jd_hash <> platform_jobs.jd_hash
+         AND platform_jobs.outreach_status <> 'contacted'
+        THEN 0 ELSE platform_jobs.assessment_consecutive_failure_count END,
+    assessment_reason = CASE
+        WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at
+         AND excluded.jd_hash <> platform_jobs.jd_hash
+         AND platform_jobs.outreach_status <> 'contacted'
+        THEN NULL ELSE platform_jobs.assessment_reason END,
+    assessment_evidence_json = CASE
+        WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at
+         AND excluded.jd_hash <> platform_jobs.jd_hash
+         AND platform_jobs.outreach_status <> 'contacted'
+        THEN NULL ELSE platform_jobs.assessment_evidence_json END,
+    assessment_retry_at = CASE
+        WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at
+         AND excluded.jd_hash <> platform_jobs.jd_hash
+         AND platform_jobs.outreach_status <> 'contacted'
+        THEN NULL ELSE platform_jobs.assessment_retry_at END,
+    assessed_at = CASE
+        WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at
+         AND excluded.jd_hash <> platform_jobs.jd_hash
+         AND platform_jobs.outreach_status <> 'contacted'
+        THEN NULL ELSE platform_jobs.assessed_at END,
+    outreach_status = CASE
+        WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at
+         AND platform_jobs.outreach_status = 'pending'
+         AND (excluded.jd_hash <> platform_jobs.jd_hash OR excluded.platform_status = 'closed')
+        THEN 'not_queued'
+        ELSE platform_jobs.outreach_status
+    END,
+    outreach_greeting_text = CASE
+        WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at
+         AND platform_jobs.outreach_status = 'pending'
+         AND (excluded.jd_hash <> platform_jobs.jd_hash OR excluded.platform_status = 'closed')
+        THEN NULL
+        ELSE platform_jobs.outreach_greeting_text
+    END,
+    lease_stage = CASE
+        WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at
+         AND excluded.jd_hash <> platform_jobs.jd_hash
+         AND platform_jobs.outreach_status <> 'contacted'
+         AND platform_jobs.lease_stage = 'assessment'
+        THEN NULL ELSE platform_jobs.lease_stage END,
+    lease_owner = CASE
+        WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at
+         AND excluded.jd_hash <> platform_jobs.jd_hash
+         AND platform_jobs.outreach_status <> 'contacted'
+         AND platform_jobs.lease_stage = 'assessment'
+        THEN NULL ELSE platform_jobs.lease_owner END,
+    lease_until = CASE
+        WHEN excluded.platform_status_checked_at >= platform_jobs.platform_status_checked_at
+         AND excluded.jd_hash <> platform_jobs.jd_hash
+         AND platform_jobs.outreach_status <> 'contacted'
+         AND platform_jobs.lease_stage = 'assessment'
+        THEN NULL ELSE platform_jobs.lease_until END,
+    last_seen_at = MAX(platform_jobs.last_seen_at, excluded.last_seen_at),
+    updated_at = MAX(platform_jobs.updated_at, excluded.updated_at)
+RETURNING id, platform_job_id, canonical_url, job_title, company_name, city_text, salary_text, jd_json, jd_hash, platform_status, platform_closed_reason, platform_status_checked_at, assessment_status, assessment_resume_version_id, assessment_jd_hash, assessment_policy_version_id, evaluator_version, assessment_attempt_no, assessment_consecutive_failure_count, assessment_reason, assessment_evidence_json, assessment_retry_at, assessed_at, human_verdict, human_reviewed_jd_hash, human_reviewed_at, human_review_note, outreach_status, outreach_greeting_text, outreach_attempt_no, outreach_consecutive_failure_count, outreach_last_attempt_at, outreach_retry_at, outreach_evidence_json, contact_source, contacted_at, lease_stage, lease_owner, lease_until, first_seen_at, last_seen_at, updated_at
 `
 
 type ObservePlatformJobParams struct {
@@ -153,25 +801,7 @@ type ObservePlatformJobParams struct {
 	UpdatedAt               int64
 }
 
-type ObservePlatformJobRow struct {
-	ID                      int64
-	PlatformJobID           string
-	CanonicalUrl            string
-	JobTitle                string
-	CompanyName             sql.NullString
-	CityText                sql.NullString
-	SalaryText              sql.NullString
-	JdJson                  string
-	JdHash                  string
-	PlatformStatus          string
-	PlatformClosedReason    sql.NullString
-	PlatformStatusCheckedAt int64
-	FirstSeenAt             int64
-	LastSeenAt              int64
-	UpdatedAt               int64
-}
-
-func (q *Queries) ObservePlatformJob(ctx context.Context, arg ObservePlatformJobParams) (ObservePlatformJobRow, error) {
+func (q *Queries) ObservePlatformJob(ctx context.Context, arg ObservePlatformJobParams) (PlatformJob, error) {
 	row := q.db.QueryRowContext(ctx, observePlatformJob,
 		arg.PlatformJobID,
 		arg.CanonicalUrl,
@@ -188,7 +818,7 @@ func (q *Queries) ObservePlatformJob(ctx context.Context, arg ObservePlatformJob
 		arg.LastSeenAt,
 		arg.UpdatedAt,
 	)
-	var i ObservePlatformJobRow
+	var i PlatformJob
 	err := row.Scan(
 		&i.ID,
 		&i.PlatformJobID,
@@ -202,9 +832,271 @@ func (q *Queries) ObservePlatformJob(ctx context.Context, arg ObservePlatformJob
 		&i.PlatformStatus,
 		&i.PlatformClosedReason,
 		&i.PlatformStatusCheckedAt,
+		&i.AssessmentStatus,
+		&i.AssessmentResumeVersionID,
+		&i.AssessmentJdHash,
+		&i.AssessmentPolicyVersionID,
+		&i.EvaluatorVersion,
+		&i.AssessmentAttemptNo,
+		&i.AssessmentConsecutiveFailureCount,
+		&i.AssessmentReason,
+		&i.AssessmentEvidenceJson,
+		&i.AssessmentRetryAt,
+		&i.AssessedAt,
+		&i.HumanVerdict,
+		&i.HumanReviewedJdHash,
+		&i.HumanReviewedAt,
+		&i.HumanReviewNote,
+		&i.OutreachStatus,
+		&i.OutreachGreetingText,
+		&i.OutreachAttemptNo,
+		&i.OutreachConsecutiveFailureCount,
+		&i.OutreachLastAttemptAt,
+		&i.OutreachRetryAt,
+		&i.OutreachEvidenceJson,
+		&i.ContactSource,
+		&i.ContactedAt,
+		&i.LeaseStage,
+		&i.LeaseOwner,
+		&i.LeaseUntil,
 		&i.FirstSeenAt,
 		&i.LastSeenAt,
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const queueAssessment = `-- name: QueueAssessment :one
+UPDATE platform_jobs
+SET assessment_status = 'pending',
+    updated_at = ?1
+WHERE id = ?2
+  AND platform_status = 'open'
+  AND outreach_status <> 'contacted'
+  AND assessment_status = 'not_queued'
+RETURNING id
+`
+
+type QueueAssessmentParams struct {
+	UpdatedAt int64
+	JobID     int64
+}
+
+func (q *Queries) QueueAssessment(ctx context.Context, arg QueueAssessmentParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, queueAssessment, arg.UpdatedAt, arg.JobID)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const queueAuthorizedOutreach = `-- name: QueueAuthorizedOutreach :one
+UPDATE platform_jobs
+SET outreach_status = 'pending',
+    outreach_greeting_text = ?1,
+    outreach_retry_at = NULL,
+    updated_at = ?2
+WHERE id = ?3
+  AND platform_status = 'open'
+  AND outreach_status = 'not_queued'
+  AND (
+      (
+          human_verdict = 'suitable'
+          AND human_reviewed_jd_hash = jd_hash
+      )
+      OR (
+          human_verdict IS NULL
+          AND assessment_status = 'suitable'
+      )
+  )
+RETURNING id
+`
+
+type QueueAuthorizedOutreachParams struct {
+	GreetingText sql.NullString
+	UpdatedAt    int64
+	JobID        int64
+}
+
+func (q *Queries) QueueAuthorizedOutreach(ctx context.Context, arg QueueAuthorizedOutreachParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, queueAuthorizedOutreach, arg.GreetingText, arg.UpdatedAt, arg.JobID)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const retryAssessmentFailure = `-- name: RetryAssessmentFailure :one
+UPDATE platform_jobs
+SET assessment_status = 'pending',
+    assessment_resume_version_id = NULL,
+    assessment_jd_hash = NULL,
+    assessment_policy_version_id = NULL,
+    evaluator_version = NULL,
+    assessment_consecutive_failure_count = 0,
+    assessment_reason = NULL,
+    assessment_evidence_json = NULL,
+    assessment_retry_at = NULL,
+    assessed_at = NULL,
+    updated_at = ?1
+WHERE id = ?2
+  AND platform_status = 'open'
+  AND outreach_status <> 'contacted'
+  AND assessment_status = 'failed'
+  AND lease_stage IS NULL
+RETURNING id
+`
+
+type RetryAssessmentFailureParams struct {
+	UpdatedAt int64
+	JobID     int64
+}
+
+func (q *Queries) RetryAssessmentFailure(ctx context.Context, arg RetryAssessmentFailureParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, retryAssessmentFailure, arg.UpdatedAt, arg.JobID)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const retryOutreachFailure = `-- name: RetryOutreachFailure :one
+UPDATE platform_jobs
+SET outreach_status = 'pending',
+    outreach_consecutive_failure_count = 0,
+    outreach_retry_at = NULL,
+    updated_at = ?1
+WHERE id = ?2
+  AND platform_status = 'open'
+  AND outreach_status = 'failed'
+  AND lease_stage IS NULL
+  AND (
+      (human_verdict = 'suitable' AND human_reviewed_jd_hash = jd_hash)
+      OR (human_verdict IS NULL AND assessment_status = 'suitable')
+  )
+RETURNING id
+`
+
+type RetryOutreachFailureParams struct {
+	UpdatedAt int64
+	JobID     int64
+}
+
+func (q *Queries) RetryOutreachFailure(ctx context.Context, arg RetryOutreachFailureParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, retryOutreachFailure, arg.UpdatedAt, arg.JobID)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const reviewPlatformJob = `-- name: ReviewPlatformJob :one
+UPDATE platform_jobs
+SET human_verdict = ?1,
+    human_reviewed_jd_hash = jd_hash,
+    human_reviewed_at = ?2,
+    human_review_note = ?3,
+    outreach_status = CASE
+        WHEN ?1 = 'unsuitable' AND outreach_status = 'pending' THEN 'not_queued'
+        ELSE outreach_status
+    END,
+    outreach_greeting_text = CASE
+        WHEN ?1 = 'unsuitable' AND outreach_status = 'pending' THEN NULL
+        ELSE outreach_greeting_text
+    END,
+    updated_at = ?4
+WHERE id = ?5
+RETURNING id, platform_job_id, canonical_url, job_title, company_name, city_text, salary_text, jd_json, jd_hash, platform_status, platform_closed_reason, platform_status_checked_at, assessment_status, assessment_resume_version_id, assessment_jd_hash, assessment_policy_version_id, evaluator_version, assessment_attempt_no, assessment_consecutive_failure_count, assessment_reason, assessment_evidence_json, assessment_retry_at, assessed_at, human_verdict, human_reviewed_jd_hash, human_reviewed_at, human_review_note, outreach_status, outreach_greeting_text, outreach_attempt_no, outreach_consecutive_failure_count, outreach_last_attempt_at, outreach_retry_at, outreach_evidence_json, contact_source, contacted_at, lease_stage, lease_owner, lease_until, first_seen_at, last_seen_at, updated_at
+`
+
+type ReviewPlatformJobParams struct {
+	HumanVerdict sql.NullString
+	ReviewedAt   sql.NullInt64
+	ReviewNote   sql.NullString
+	UpdatedAt    int64
+	JobID        int64
+}
+
+func (q *Queries) ReviewPlatformJob(ctx context.Context, arg ReviewPlatformJobParams) (PlatformJob, error) {
+	row := q.db.QueryRowContext(ctx, reviewPlatformJob,
+		arg.HumanVerdict,
+		arg.ReviewedAt,
+		arg.ReviewNote,
+		arg.UpdatedAt,
+		arg.JobID,
+	)
+	var i PlatformJob
+	err := row.Scan(
+		&i.ID,
+		&i.PlatformJobID,
+		&i.CanonicalUrl,
+		&i.JobTitle,
+		&i.CompanyName,
+		&i.CityText,
+		&i.SalaryText,
+		&i.JdJson,
+		&i.JdHash,
+		&i.PlatformStatus,
+		&i.PlatformClosedReason,
+		&i.PlatformStatusCheckedAt,
+		&i.AssessmentStatus,
+		&i.AssessmentResumeVersionID,
+		&i.AssessmentJdHash,
+		&i.AssessmentPolicyVersionID,
+		&i.EvaluatorVersion,
+		&i.AssessmentAttemptNo,
+		&i.AssessmentConsecutiveFailureCount,
+		&i.AssessmentReason,
+		&i.AssessmentEvidenceJson,
+		&i.AssessmentRetryAt,
+		&i.AssessedAt,
+		&i.HumanVerdict,
+		&i.HumanReviewedJdHash,
+		&i.HumanReviewedAt,
+		&i.HumanReviewNote,
+		&i.OutreachStatus,
+		&i.OutreachGreetingText,
+		&i.OutreachAttemptNo,
+		&i.OutreachConsecutiveFailureCount,
+		&i.OutreachLastAttemptAt,
+		&i.OutreachRetryAt,
+		&i.OutreachEvidenceJson,
+		&i.ContactSource,
+		&i.ContactedAt,
+		&i.LeaseStage,
+		&i.LeaseOwner,
+		&i.LeaseUntil,
+		&i.FirstSeenAt,
+		&i.LastSeenAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const stopAssessmentRetriesAtLimit = `-- name: StopAssessmentRetriesAtLimit :execrows
+UPDATE platform_jobs
+SET assessment_retry_at = NULL
+WHERE assessment_status = 'failed'
+  AND assessment_consecutive_failure_count >= ?1
+  AND assessment_retry_at IS NOT NULL
+`
+
+func (q *Queries) StopAssessmentRetriesAtLimit(ctx context.Context, failureLimit int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, stopAssessmentRetriesAtLimit, failureLimit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const stopOutreachRetriesAtLimit = `-- name: StopOutreachRetriesAtLimit :execrows
+UPDATE platform_jobs
+SET outreach_retry_at = NULL
+WHERE outreach_status = 'failed'
+  AND outreach_consecutive_failure_count >= ?1
+  AND outreach_retry_at IS NOT NULL
+`
+
+func (q *Queries) StopOutreachRetriesAtLimit(ctx context.Context, failureLimit int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, stopOutreachRetriesAtLimit, failureLimit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

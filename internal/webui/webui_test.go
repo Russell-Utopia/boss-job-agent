@@ -474,6 +474,57 @@ func TestStartupStateDoesNotExposeResumeDatabaseIDOrContent(t *testing.T) {
 	}
 }
 
+func TestRealOutreachCommandReturnsPerJobBatchResult(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	if _, err := runtime.db.ExecContext(t.Context(), `
+		UPDATE automation_settings
+		SET outreach_greeting_text = '您好，想和您聊聊这个岗位'
+		WHERE id = 1
+	`); err != nil {
+		t.Fatalf("configure outreach greeting: %v", err)
+	}
+	job, err := runtime.pool.Observe(t.Context(), 1, jobpool.Observation{
+		PlatformJobID: "boss-job-1", CanonicalURL: "https://www.zhipin.com/job_detail/boss-job-1.html",
+		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
+	})
+	if err != nil {
+		t.Fatalf("observe outreach job: %v", err)
+	}
+	if err := runtime.pool.Review(t.Context(), []jobpool.ReviewDecision{{
+		JobID: job.ID, Verdict: jobpool.HumanVerdictSuitable, ReviewedAt: time.UnixMilli(2000),
+	}}); err != nil {
+		t.Fatalf("review outreach job: %v", err)
+	}
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+
+	response := postJSONResponse(t, server.Client(), server.URL+"/api/outreach/real", fmt.Sprintf(`{
+		"jobIds":[%d,999],
+		"confirmation":{
+			"jobCount":2,
+			"greetingText":"您好，想和您聊聊这个岗位",
+			"timeDescription":"全天可打招呼",
+			"confirmed":true
+		}
+	}`, job.ID))
+	defer closeResponseBody(t, response.Body)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("queue real outreach status = %d, want 200", response.StatusCode)
+	}
+	var result jobpool.BatchActionResult
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatalf("decode outreach batch result: %v", err)
+	}
+	if result.Succeeded != 1 || len(result.Skipped) != 1 || result.Skipped[0].JobID != 999 {
+		t.Errorf("outreach batch result = %#v, want one success and missing job 999", result)
+	}
+}
+
 func TestWebCommandsReturnBusinessRejections(t *testing.T) {
 	t.Parallel()
 

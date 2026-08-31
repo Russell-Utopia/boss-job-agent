@@ -115,13 +115,13 @@ func (s *Settings) QueueRealOutreach(
 	ctx context.Context,
 	jobIDs []int64,
 	_ RealOutreachConfirmation,
-) error {
+) (jobpool.BatchActionResult, error) {
 	view, err := s.Get(ctx)
 	if err != nil {
-		return err
+		return jobpool.BatchActionResult{}, err
 	}
 	if view.OutreachGreeting == nil {
-		return &Rejection{
+		return jobpool.BatchActionResult{}, &Rejection{
 			Code:   "outreach_greeting_required",
 			Reason: "请先配置固定招呼语，再真实打招呼",
 		}

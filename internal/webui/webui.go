@@ -437,7 +437,12 @@ func (h *handler) queueReal(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	h.writeCommandResult(w, h.dependencies.Settings.QueueRealOutreach(r.Context(), request.JobIDs, request.Confirmation))
+	result, err := h.dependencies.Settings.QueueRealOutreach(r.Context(), request.JobIDs, request.Confirmation)
+	if err != nil {
+		h.writeCommandResult(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (h *handler) writeCommandResult(w http.ResponseWriter, err error) {
