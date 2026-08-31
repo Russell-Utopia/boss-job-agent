@@ -31,14 +31,15 @@ func TestJobDiscoveryFetchesOneCompleteReliablePageThroughKimiWebBridge(t *testi
 	}
 	rawPage := map[string]any{
 		"jobs": []map[string]any{{
-			"platformJobId":       "boss-job-1",
-			"detailPlatformJobId": "boss-job-1",
-			"canonicalUrl":        "https://www.zhipin.com/job_detail/boss-job-1.html",
-			"jobTitle":            "Go 后端工程师",
-			"companyName":         "示例科技",
-			"city":                "福州",
-			"salary":              "20-30K",
-			"fullJD":              "负责 Go 服务开发\n任职要求：熟悉 Go 与 SQLite",
+			"platformJobId":          "boss-job-1",
+			"detailPlatformJobId":    "boss-job-1",
+			"platformStatusEvidence": "招聘中",
+			"canonicalUrl":           "https://www.zhipin.com/job_detail/boss-job-1.html",
+			"jobTitle":               "Go 后端工程师",
+			"companyName":            "示例科技",
+			"city":                   "福州",
+			"salary":                 "20-30K",
+			"fullJD":                 "负责 Go 服务开发\n任职要求：熟悉 Go 与 SQLite",
 		}},
 		"hasMore": false,
 	}
@@ -67,6 +68,7 @@ func TestJobDiscoveryFetchesOneCompleteReliablePageThroughKimiWebBridge(t *testi
 	for _, expected := range []string{
 		"Go 后端工程师", "福州", "20-30K", "全职", `"page":3`,
 		"/wapi/zpgeek/search/joblist.json", "/wapi/zpgeek/job/detail.json", "hasMore",
+		"resolveSalaryOption", "conditions.salaryList",
 	} {
 		if !strings.Contains(fixture.evaluationScript, expected) {
 			t.Errorf("evaluation script does not contain %q", expected)
@@ -110,11 +112,19 @@ func TestJobDiscoveryRejectsAmbiguousJDAndUnconfirmedLiveDetail(t *testing.T) {
 		name                string
 		fullJD              string
 		detailPlatformJobID string
+		platformStatus      string
 	}{
-		{name: "JD has no reliable responsibility requirement boundary", fullJD: "负责 Go 服务开发"},
+		{
+			name: "JD has no reliable responsibility requirement boundary", fullJD: "负责 Go 服务开发",
+			detailPlatformJobID: "boss-job-1", platformStatus: "招聘中",
+		},
 		{
 			name: "live detail does not confirm the listed stable ID", fullJD: "负责 Go 服务开发\n任职要求：熟悉 Go",
-			detailPlatformJobID: "another-job",
+			detailPlatformJobID: "another-job", platformStatus: "招聘中",
+		},
+		{
+			name: "live detail does not confirm the job is open", fullJD: "负责 Go 服务开发\n任职要求：熟悉 Go",
+			detailPlatformJobID: "boss-job-1", platformStatus: "已关闭",
 		},
 	}
 	for _, test := range tests {
@@ -123,8 +133,9 @@ func TestJobDiscoveryRejectsAmbiguousJDAndUnconfirmedLiveDetail(t *testing.T) {
 			rawPage := map[string]any{
 				"jobs": []map[string]any{{
 					"platformJobId": "boss-job-1", "detailPlatformJobId": test.detailPlatformJobID,
-					"canonicalUrl": "https://www.zhipin.com/job_detail/boss-job-1.html",
-					"jobTitle":     "Go 后端工程师", "companyName": "示例科技",
+					"platformStatusEvidence": test.platformStatus,
+					"canonicalUrl":           "https://www.zhipin.com/job_detail/boss-job-1.html",
+					"jobTitle":               "Go 后端工程师", "companyName": "示例科技",
 					"city": "福州", "salary": "20-30K", "fullJD": test.fullJD,
 				}},
 				"hasMore": false,

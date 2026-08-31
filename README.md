@@ -44,7 +44,7 @@ BOSS_JOB_DISCOVERY_EMPLOYMENT_TYPE='全职' \
 make live-job-discovery
 ```
 
-该命令只读取第 1 页，验证稳定平台岗位 ID、完整 JD、可靠平台状态和 `hasMore`，不写入应用 SQLite，也不会开始鉴定或打招呼。
+该命令连续读取最多 3 页（提前遇到 `hasMore=false` 时正常结束），逐页验证稳定平台岗位 ID、完整 JD、可靠平台状态和 `hasMore`，并输出每页新增与累计稳定 ID 数。它不写入应用 SQLite，也不会开始鉴定或打招呼。
 
 ## 架构资料
 

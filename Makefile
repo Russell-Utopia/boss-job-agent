@@ -17,7 +17,7 @@ live-online-resume:
 	BOSS_ONLINE_RESUME_LIVE=1 go test -count=1 -tags=live ./internal/adapters/boss -run '^TestOnlineResumeLiveReadsTheAuthenticatedBossResume$$' -v
 
 live-job-discovery:
-	BOSS_JOB_DISCOVERY_LIVE=1 go test -count=1 -tags=live ./internal/adapters/boss -run '^TestJobDiscoveryLiveReadsOneAuthenticatedBossPage$$' -v
+	BOSS_JOB_DISCOVERY_LIVE=1 go test -count=1 -tags=live ./internal/adapters/boss -run '^TestJobDiscoveryLiveReadsAuthenticatedBossPages$$' -v
 
 check:
 	$(MAKE) toolchain-check

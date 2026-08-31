@@ -107,18 +107,19 @@ type rawDiscoveryPage struct {
 }
 
 type rawDiscoveryJob struct {
-	PlatformJobID       string `json:"platformJobId"`
-	DetailPlatformJobID string `json:"detailPlatformJobId"`
-	CanonicalURL        string `json:"canonicalUrl"`
-	JobTitle            string `json:"jobTitle"`
-	CompanyName         string `json:"companyName"`
-	City                string `json:"city"`
-	Salary              string `json:"salary"`
-	FullJD              string `json:"fullJD"`
+	PlatformJobID          string `json:"platformJobId"`
+	DetailPlatformJobID    string `json:"detailPlatformJobId"`
+	PlatformStatusEvidence string `json:"platformStatusEvidence"`
+	CanonicalURL           string `json:"canonicalUrl"`
+	JobTitle               string `json:"jobTitle"`
+	CompanyName            string `json:"companyName"`
+	City                   string `json:"city"`
+	Salary                 string `json:"salary"`
+	FullJD                 string `json:"fullJD"`
 }
 
 var requirementsHeading = regexp.MustCompile(
-	`(?m)^[\t ]*(?:任职要求|岗位要求|职位要求|任职资格)[\t ]*[：:][\t ]*`,
+	`(?m)^[\t ]*(?:任职要求|岗位要求|职位要求|任职资格)[\t ]*(?:[：:][\t ]*|\n)`,
 )
 
 func decodeReliableDiscoveryPage(value string) (discovery.DiscoveryPage, error) {
@@ -151,12 +152,17 @@ func observationFromReliableSearchDetail(rawJob rawDiscoveryJob) (discovery.JobO
 			"BOSS live detail does not confirm listed platform job %q", rawJob.PlatformJobID,
 		)
 	}
+	if strings.TrimSpace(rawJob.PlatformStatusEvidence) != "招聘中" {
+		return discovery.JobObservation{}, fmt.Errorf(
+			"BOSS platform job %q has no reliable open status", platformJobID,
+		)
+	}
 	responsibilities, requirements, err := splitReliableJD(rawJob.FullJD)
 	if err != nil {
 		return discovery.JobObservation{}, fmt.Errorf("BOSS platform job %q: %w", platformJobID, err)
 	}
-	// Presence in the current search response plus a matching successful live
-	// detail response is this adapter's reliable evidence that the job is open.
+	// A matching live detail identity plus BOSS's explicit 招聘中 status is
+	// this adapter's reliable evidence that the job is open.
 	return discovery.JobObservation{
 		PlatformJobID:    platformJobID,
 		CanonicalURL:     strings.TrimSpace(rawJob.CanonicalURL),
@@ -304,13 +310,41 @@ const fetchJobDiscoveryPageScript = `(async () => {
     }
     return null;
   };
+  const salaryRange = value => {
+    const label = normalized(value).toUpperCase();
+    const numbers = [...label.matchAll(/\d+(?:\.\d+)?/g)].map(match => Number(match[0]));
+    if (!numbers.length || numbers.some(number => !Number.isFinite(number))) return null;
+    if (label.includes("以下")) return {min: 0, max: numbers[0]};
+    if (label.includes("以上")) return {min: numbers[0], max: Number.POSITIVE_INFINITY};
+    if (numbers.length < 2 || numbers[0] >= numbers[1]) return null;
+    return {min: numbers[0], max: numbers[1]};
+  };
+  const resolveSalaryOption = (options, wanted) => {
+    const exact = findNamedOption(options, wanted);
+    if (exact) return exact;
+    const wantedRange = salaryRange(wanted);
+    if (!wantedRange || !Array.isArray(options)) return null;
+    let best = null;
+    let bestOverlap = 0;
+    for (const option of options) {
+      if (Number(optionCode(option)) === 0) continue;
+      const optionRange = salaryRange(option.name ?? option.label ?? option.text);
+      if (!optionRange) continue;
+      const overlap = Math.min(wantedRange.max, optionRange.max) - Math.max(wantedRange.min, optionRange.min);
+      if (overlap > bestOverlap) {
+        best = option;
+        bestOverlap = overlap;
+      }
+    }
+    return best;
+  };
 
   const cityData = await request("/wapi/zpCommon/data/city.json");
   const cityOption = findNamedOption(cityData, input.city);
   if (!cityOption) throw new Error("BOSS_SEARCH_FILTER_UNRESOLVED:city");
   const cityCode = optionCode(cityOption);
   const conditions = await request("/wapi/zpgeek/search/job/condition.json", {city: cityCode, query: input.role});
-  const salaryOption = findNamedOption(conditions, input.salary);
+  const salaryOption = resolveSalaryOption(conditions.salaryList, input.salary);
   const employmentOption = findNamedOption(conditions, input.employmentType);
   if (!salaryOption || !employmentOption) throw new Error("BOSS_SEARCH_FILTER_UNRESOLVED:salary_or_employment_type");
 
@@ -321,7 +355,7 @@ const fetchJobDiscoveryPageScript = `(async () => {
     salary: optionCode(salaryOption),
     jobType: optionCode(employmentOption),
     page: input.page,
-    pageSize: 30
+    pageSize: 15
   });
   if (!Array.isArray(list.jobList) || typeof list.hasMore !== "boolean") {
     throw new Error("BOSS_DISCOVERY_UNRELIABLE_PAGE");
@@ -332,19 +366,21 @@ const fetchJobDiscoveryPageScript = `(async () => {
     const card = entry.jobCard || entry;
     const platformJobId = normalized(card.encryptJobId || card.jobId);
     if (!platformJobId) throw new Error("BOSS_DISCOVERY_UNRELIABLE_PAGE:missing_stable_id");
+    if (jobs.length > 0) await new Promise(resolve => setTimeout(resolve, 750));
     const detail = await request("/wapi/zpgeek/job/detail.json", {
       securityId: card.securityId || "",
       jobId: platformJobId,
       lid: card.lid || list.lid || ""
     });
     const info = detail.jobInfo || detail.jobCard || detail;
-    const detailPlatformJobId = normalized(info.encryptJobId || info.jobId);
+    const detailPlatformJobId = normalized(info.encryptId || info.encryptJobId || info.jobId);
     if (detailPlatformJobId !== platformJobId) {
       throw new Error("BOSS_DISCOVERY_UNRELIABLE_PAGE:detail_identity_mismatch");
     }
     const job = {
       platformJobId,
       detailPlatformJobId,
+      platformStatusEvidence: normalized(info.jobStatusDesc),
       canonicalUrl: "https://www.zhipin.com/job_detail/" + platformJobId + ".html",
       jobTitle: normalized(info.jobName || card.jobName),
       companyName: normalized(info.brandName || card.brandName),
