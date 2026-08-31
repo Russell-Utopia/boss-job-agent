@@ -1,8 +1,10 @@
 package webui
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +27,30 @@ type testWeb struct {
 	Handler http.Handler
 	db      *sql.DB
 	logs    *runlog.Log
+	resume  *webResumeReader
+}
+
+type webResumeReader struct {
+	content onlineresume.ResumeContent
+	err     error
+	calls   int
+}
+
+func (r *webResumeReader) Read(context.Context) (onlineresume.ResumeContent, error) {
+	r.calls++
+	return r.content, r.err
+}
+
+func webResumeContent(role string) onlineresume.ResumeContent {
+	return onlineresume.ResumeContent{
+		JobIntentions: []onlineresume.JobIntention{{
+			Role: role, City: "福州", Salary: "20-30K", EmploymentType: "全职",
+		}},
+		WorkExperiences:    []string{"某公司｜后端工程师"},
+		ProjectExperiences: []string{"招聘助手"},
+		Educations:         []string{"某大学｜计算机本科"},
+		Skills:             []string{"Go", "SQLite"},
+	}
 }
 
 func openTestWeb(t *testing.T, path string) *testWeb {
@@ -50,18 +76,20 @@ func openTestWebWithLogPath(t *testing.T, databasePath, logPath string) *testWeb
 		_ = db.Close()
 		t.Fatalf("ensure safe automation settings: %v", err)
 	}
-	resumeVersions := onlineresume.New(db)
 	logs := runlog.Open(logPath)
+	resumeReader := &webResumeReader{content: webResumeContent("Go 后端工程师")}
+	resumeVersions := onlineresume.New(db, resumeReader, logs, func() time.Time { return now })
 	return &testWeb{
 		Handler: New(Dependencies{
 			Resume:     resumeVersions,
-			Discovery:  discovery.New(resumeVersions),
+			Discovery:  discovery.New(db, resumeVersions),
 			Assessment: assessmentService,
 			Settings:   settings,
 			Runlog:     logs,
 		}),
-		db:   db,
-		logs: logs,
+		db:     db,
+		logs:   logs,
+		resume: resumeReader,
 	}
 }
 
@@ -135,6 +163,48 @@ func TestFirstUseWebProvidesFourStableEntriesAndSafeState(t *testing.T) {
 			assertFirstUsePage(t, client, server.URL+page.path, page.want)
 		})
 	}
+	if runtime.resume.calls != 0 {
+		t.Errorf("page reads triggered %d BOSS online resume calls, want 0", runtime.resume.calls)
+	}
+}
+
+func TestOnlineResumePageRunsTheCompleteControlledRefreshFlow(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	client := server.Client()
+
+	assertPageContains(t, client, server.URL+"/resume", []string{
+		"尚无在线简历版本",
+		`action="/resume/refresh"`,
+		">刷新在线简历</button>",
+	})
+	refreshResumePage(t, client, server.URL, http.StatusOK, []string{
+		"已保存在线简历 v1",
+		"在线简历 v1",
+		"当前没有进行中的岗位发现",
+		"下一次岗位发现和尚未开始的鉴定将使用 v1",
+	})
+	refreshResumePage(t, client, server.URL, http.StatusOK, []string{"内容未变化", "继续使用在线简历 v1"})
+
+	seedWebActiveDiscovery(t, runtime.db, currentResumeVersionID(t, runtime.db))
+	runtime.resume.content = webResumeContent("Go 研发工程师")
+	refreshResumePage(t, client, server.URL, http.StatusOK, []string{
+		"已保存在线简历 v2",
+		"当前岗位发现运行继续使用 v1",
+		"v2 将用于下一次岗位发现和尚未开始的鉴定",
+	})
+
+	runtime.resume.err = errors.New("browser response includes cookie=secret")
+	failedBody := refreshResumePage(t, client, server.URL, http.StatusConflict, []string{
+		"读取 BOSS 在线简历失败，已保留上一次可靠版本",
+		"在线简历 v2",
+	})
+	assertTextAbsent(t, failedBody, "cookie=secret")
+	assertResumeReadCount(t, runtime.resume, 4)
 }
 
 func TestRemovedSimulationCommandIsNotRoutable(t *testing.T) {
@@ -186,6 +256,41 @@ func TestWebServesStartupStateAndCSS(t *testing.T) {
 				t.Errorf("body does not contain %q", test.want)
 			}
 		})
+	}
+}
+
+func TestStartupStateDoesNotExposeResumeDatabaseIDOrContent(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	if _, err := runtime.db.ExecContext(t.Context(), `
+		INSERT INTO online_resume_versions (
+			id, version_no, resume_json, resume_hash, is_current, created_at
+		) VALUES (
+			42, 7,
+			'{"jobIntentions":[{"role":"Go 后端工程师","city":"福州","salary":"20-30K","employmentType":"全职"}],"workExperiences":[],"projectExperiences":[],"educations":[],"skills":[]}',
+			'resume-hash', 1, 1000
+		)
+	`); err != nil {
+		t.Fatalf("seed current online resume: %v", err)
+	}
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+
+	response := getResponse(t, server.Client(), server.URL+"/api/startup-state")
+	body := readResponseBody(t, response)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("startup state status = %d, want 200; body=%s", response.StatusCode, body)
+	}
+	assertTextContains(t, body, []string{`"version":7`, `"createdAt":`})
+	for _, forbidden := range []string{`"id":42`, `"content":`, "Go 后端工程师"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("startup state exposes %q: %s", forbidden, body)
+		}
+	}
+	if runtime.resume.calls != 0 {
+		t.Errorf("startup state triggered %d BOSS online resume calls, want 0", runtime.resume.calls)
 	}
 }
 
@@ -357,6 +462,76 @@ func assertTextContains(t *testing.T, text string, wants []string) {
 			t.Errorf("body does not contain %q", want)
 		}
 	}
+}
+
+func postFormResponse(t *testing.T, client *http.Client, url string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("create form request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("post form: %v", err)
+	}
+	return response
+}
+
+func refreshResumePage(t *testing.T, client *http.Client, baseURL string, status int, wants []string) string {
+	t.Helper()
+	response := postFormResponse(t, client, baseURL+"/resume/refresh")
+	body := readResponseBody(t, response)
+	if response.StatusCode != status {
+		t.Fatalf("refresh status = %d, want %d; body=%s", response.StatusCode, status, body)
+	}
+	assertTextContains(t, body, wants)
+	return body
+}
+
+func currentResumeVersionID(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	var versionID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM online_resume_versions WHERE is_current = 1`).Scan(&versionID); err != nil {
+		t.Fatalf("query current online resume version ID: %v", err)
+	}
+	return versionID
+}
+
+func seedWebActiveDiscovery(t *testing.T, db *sql.DB, resumeVersionID int64) {
+	t.Helper()
+	if _, err := db.ExecContext(t.Context(), `
+		INSERT INTO discovery_runs (
+			resume_version_id, current_role, current_city, next_page,
+			status, attempt_no, created_at, prepared_at, updated_at
+		) VALUES (?, 'Go 后端工程师', '福州', 1, 'paused', 1, 1000, 1000, 1000)
+	`, resumeVersionID); err != nil {
+		t.Fatalf("seed active discovery using v1: %v", err)
+	}
+}
+
+func assertTextAbsent(t *testing.T, text, forbidden string) {
+	t.Helper()
+	if strings.Contains(text, forbidden) {
+		t.Errorf("text contains forbidden value %q", forbidden)
+	}
+}
+
+func assertResumeReadCount(t *testing.T, reader *webResumeReader, want int) {
+	t.Helper()
+	if reader.calls != want {
+		t.Errorf("online resume reads = %d, want %d", reader.calls, want)
+	}
+}
+
+func readResponseBody(t *testing.T, response *http.Response) string {
+	t.Helper()
+	defer closeResponseBody(t, response.Body)
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	return string(body)
 }
 
 func assertPageContains(t *testing.T, client *http.Client, url string, wants []string) {

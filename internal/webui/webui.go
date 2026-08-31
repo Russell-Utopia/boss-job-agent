@@ -5,9 +5,11 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/Russell-Utopia/boss-job-agent/internal/assessment"
 	"github.com/Russell-Utopia/boss-job-agent/internal/automationsettings"
@@ -26,6 +28,9 @@ var pageTemplate = template.Must(template.New("page.html").Funcs(template.FuncMa
 		}
 		return "已关闭"
 	},
+	"savedTime": func(value time.Time) string {
+		return value.Local().Format("2006-01-02 15:04:05")
+	},
 }).ParseFS(files, "templates/page.html"))
 
 type handler struct {
@@ -41,17 +46,24 @@ type Dependencies struct {
 }
 
 type pageData struct {
-	Page      string
-	PageTitle string
-	State     startupState
+	Page           string
+	PageTitle      string
+	State          startupState
+	ResumeFeedback *resumeFeedback
 }
 
 type startupState struct {
-	CurrentResume *onlineresume.Version   `json:"currentResume"`
-	ActivePolicy  assessment.Policy       `json:"activePolicy"`
-	Automation    automationsettings.View `json:"automation"`
-	Actions       firstUseActions         `json:"actions"`
-	RunlogHealth  runlog.Health           `json:"runlogHealth"`
+	CurrentResume   *onlineresume.Version      `json:"currentResume"`
+	ActivePolicy    assessment.Policy          `json:"activePolicy"`
+	Automation      automationsettings.View    `json:"automation"`
+	Actions         firstUseActions            `json:"actions"`
+	RunlogHealth    runlog.Health              `json:"runlogHealth"`
+	ActiveResumeUse *discovery.ActiveResumeUse `json:"activeDiscoveryResumeUse,omitempty"`
+}
+
+type resumeFeedback struct {
+	Message string
+	Error   bool
 }
 
 type firstUseActions struct {
@@ -77,6 +89,7 @@ func New(dependencies Dependencies) http.Handler {
 	mux.HandleFunc("GET /assessments", h.renderPage("assessments", "岗位鉴定", h.assessmentsState))
 	mux.HandleFunc("GET /outreach", h.renderPage("outreach", "打招呼", h.outreachState))
 	mux.HandleFunc("GET /resume", h.renderPage("resume", "在线简历", h.resumeState))
+	mux.HandleFunc("POST /resume/refresh", h.refreshResumePage)
 	mux.HandleFunc("GET /assets/app.css", serveCSS)
 	mux.HandleFunc("GET /api/startup-state", h.startupState)
 	mux.HandleFunc("GET /api/runlog/health", h.runlogHealth)
@@ -144,7 +157,15 @@ func (h *handler) resumeState(ctx context.Context) (startupState, error) {
 	if err != nil {
 		return startupState{}, err
 	}
-	return startupState{CurrentResume: resume, RunlogHealth: h.dependencies.Runlog.Health()}, nil
+	activeUse, err := h.dependencies.Discovery.GetActiveResumeUse(ctx)
+	if err != nil {
+		return startupState{}, err
+	}
+	return startupState{
+		CurrentResume:   resume,
+		RunlogHealth:    h.dependencies.Runlog.Health(),
+		ActiveResumeUse: activeUse,
+	}, nil
 }
 
 func (h *handler) getStartupState(ctx context.Context) (startupState, error) {
@@ -168,6 +189,10 @@ func (h *handler) getStartupState(ctx context.Context) (startupState, error) {
 	if err != nil {
 		return startupState{}, err
 	}
+	activeUse, err := h.dependencies.Discovery.GetActiveResumeUse(ctx)
+	if err != nil {
+		return startupState{}, err
+	}
 	return startupState{
 		CurrentResume: resume,
 		ActivePolicy:  policy,
@@ -176,7 +201,8 @@ func (h *handler) getStartupState(ctx context.Context) (startupState, error) {
 			StartDiscovery:    fromDiscoveryAvailability(discoveryAvailability),
 			QueueRealOutreach: fromSettingsAvailability(outreachAvailability),
 		},
-		RunlogHealth: h.dependencies.Runlog.Health(),
+		RunlogHealth:    h.dependencies.Runlog.Health(),
+		ActiveResumeUse: activeUse,
 	}, nil
 }
 
@@ -195,15 +221,45 @@ func (h *handler) renderPage(page, title string, query stateQuery) http.HandlerF
 			http.Error(w, "无法读取当前业务状态", http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := pageTemplate.ExecuteTemplate(w, "page.html", pageData{
+		h.executePage(w, http.StatusOK, pageData{
 			Page:      page,
 			PageTitle: title,
 			State:     state,
-		}); err != nil {
-			return
-		}
+		})
 	}
+}
+
+func (h *handler) executePage(w http.ResponseWriter, status int, data pageData) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_ = pageTemplate.ExecuteTemplate(w, "page.html", data)
+}
+
+func (h *handler) refreshResumePage(w http.ResponseWriter, r *http.Request) {
+	result, refreshErr := h.dependencies.Resume.RefreshFromBoss(r.Context())
+	state, stateErr := h.resumeState(r.Context())
+	if stateErr != nil {
+		http.Error(w, "无法读取当前业务状态", http.StatusInternalServerError)
+		return
+	}
+	data := pageData{Page: "resume", PageTitle: "在线简历", State: state}
+	if refreshErr == nil {
+		message := "内容未变化，继续使用在线简历 v" + fmt.Sprint(result.Current.Version)
+		if result.Status == onlineresume.RefreshCreated {
+			message = "已保存在线简历 v" + fmt.Sprint(result.Current.Version)
+		}
+		data.ResumeFeedback = &resumeFeedback{Message: message}
+		h.executePage(w, http.StatusOK, data)
+		return
+	}
+	var rejection businessRejection
+	if errors.As(refreshErr, &rejection) {
+		data.ResumeFeedback = &resumeFeedback{Message: rejection.RejectionReason(), Error: true}
+		h.executePage(w, http.StatusConflict, data)
+		return
+	}
+	data.ResumeFeedback = &resumeFeedback{Message: "刷新在线简历失败，请稍后重试", Error: true}
+	h.executePage(w, http.StatusInternalServerError, data)
 }
 
 func serveCSS(w http.ResponseWriter, _ *http.Request) {

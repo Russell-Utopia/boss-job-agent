@@ -18,6 +18,14 @@ sql:
         sql_package: "database/sql"
   - engine: "sqlite"
     schema: "internal/sqlite/migrations"
+    queries: "internal/discovery/internal/sqlitedb/queries.sql"
+    gen:
+      go:
+        package: "sqlitedb"
+        out: "internal/discovery/internal/sqlitedb"
+        sql_package: "database/sql"
+  - engine: "sqlite"
+    schema: "internal/sqlite/migrations"
     queries: "internal/assessment/internal/sqlitedb/queries.sql"
     gen:
       go:

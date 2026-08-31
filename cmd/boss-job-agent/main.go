@@ -78,7 +78,7 @@ func executeLogsFind(ctx context.Context, args []string, output io.Writer) error
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&path, "log", path, "JSONL 运行日志路径")
 	flags.StringVar(&query.TraceID, "trace-id", "", "精确 trace ID")
-	flags.StringVar(&flow, "flow", "", "discovery、assessment 或 outreach")
+	flags.StringVar(&flow, "flow", "", "online_resume、discovery、assessment 或 outreach")
 	flags.StringVar(&operation, "operation", "", "精确外部操作名")
 	flags.Int64Var(&query.DiscoveryRunID, "discovery-run-id", 0, "岗位发现运行 ID")
 	flags.StringVar(&query.PlatformJobID, "platform-job-id", "", "BOSS 平台岗位 ID")

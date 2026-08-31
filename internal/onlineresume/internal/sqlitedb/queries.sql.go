@@ -9,21 +9,96 @@ import (
 	"context"
 )
 
+const clearCurrentOnlineResume = `-- name: ClearCurrentOnlineResume :exec
+UPDATE online_resume_versions
+SET is_current = 0
+WHERE is_current = 1
+`
+
+func (q *Queries) ClearCurrentOnlineResume(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, clearCurrentOnlineResume)
+	return err
+}
+
+const createCurrentOnlineResume = `-- name: CreateCurrentOnlineResume :one
+INSERT INTO online_resume_versions (
+    version_no,
+    resume_json,
+    resume_hash,
+    is_current,
+    created_at
+) VALUES (?, ?, ?, 1, ?)
+RETURNING id, version_no, resume_json, resume_hash, created_at
+`
+
+type CreateCurrentOnlineResumeParams struct {
+	VersionNo  int64
+	ResumeJson string
+	ResumeHash string
+	CreatedAt  int64
+}
+
+type CreateCurrentOnlineResumeRow struct {
+	ID         int64
+	VersionNo  int64
+	ResumeJson string
+	ResumeHash string
+	CreatedAt  int64
+}
+
+func (q *Queries) CreateCurrentOnlineResume(ctx context.Context, arg CreateCurrentOnlineResumeParams) (CreateCurrentOnlineResumeRow, error) {
+	row := q.db.QueryRowContext(ctx, createCurrentOnlineResume,
+		arg.VersionNo,
+		arg.ResumeJson,
+		arg.ResumeHash,
+		arg.CreatedAt,
+	)
+	var i CreateCurrentOnlineResumeRow
+	err := row.Scan(
+		&i.ID,
+		&i.VersionNo,
+		&i.ResumeJson,
+		&i.ResumeHash,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getCurrentOnlineResume = `-- name: GetCurrentOnlineResume :one
-SELECT id, version_no, created_at
+SELECT id, version_no, resume_json, resume_hash, created_at
 FROM online_resume_versions
 WHERE is_current = 1
 `
 
 type GetCurrentOnlineResumeRow struct {
-	ID        int64
-	VersionNo int64
-	CreatedAt int64
+	ID         int64
+	VersionNo  int64
+	ResumeJson string
+	ResumeHash string
+	CreatedAt  int64
 }
 
 func (q *Queries) GetCurrentOnlineResume(ctx context.Context) (GetCurrentOnlineResumeRow, error) {
 	row := q.db.QueryRowContext(ctx, getCurrentOnlineResume)
 	var i GetCurrentOnlineResumeRow
-	err := row.Scan(&i.ID, &i.VersionNo, &i.CreatedAt)
+	err := row.Scan(
+		&i.ID,
+		&i.VersionNo,
+		&i.ResumeJson,
+		&i.ResumeHash,
+		&i.CreatedAt,
+	)
 	return i, err
+}
+
+const getNextOnlineResumeVersionNumber = `-- name: GetNextOnlineResumeVersionNumber :one
+SELECT COALESCE(MAX(version_no), 0) + 1
+FROM online_resume_versions
+`
+
+func (q *Queries) GetNextOnlineResumeVersionNumber(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getNextOnlineResumeVersionNumber)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }

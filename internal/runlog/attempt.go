@@ -12,14 +12,16 @@ import (
 type Flow string
 
 const (
-	FlowDiscovery  Flow = "discovery"
-	FlowAssessment Flow = "assessment"
-	FlowOutreach   Flow = "outreach"
+	FlowOnlineResume Flow = "online_resume"
+	FlowDiscovery    Flow = "discovery"
+	FlowAssessment   Flow = "assessment"
+	FlowOutreach     Flow = "outreach"
 )
 
 type Operation string
 
 const (
+	OperationReadOnlineResume         Operation = "read_online_resume"
 	OperationFetchPage                Operation = "fetch_page"
 	OperationSubmitAssessment         Operation = "submit_assessment"
 	OperationConfirmAssessmentResults Operation = "confirm_assessment_results"
@@ -281,6 +283,8 @@ func validateAttempt(attempt Attempt) error {
 		return fmt.Errorf("external attempt requires flow, operation, and positive attempt number")
 	}
 	switch attempt.Flow {
+	case FlowOnlineResume:
+		return validateOnlineResumeAttempt(attempt)
 	case FlowDiscovery:
 		return validateDiscoveryAttempt(attempt)
 	case FlowAssessment:
@@ -290,6 +294,16 @@ func validateAttempt(attempt Attempt) error {
 	default:
 		return fmt.Errorf("unsupported external flow %q", attempt.Flow)
 	}
+}
+
+func validateOnlineResumeAttempt(attempt Attempt) error {
+	if attempt.Operation != OperationReadOnlineResume {
+		return fmt.Errorf("unsupported online resume operation %q", attempt.Operation)
+	}
+	if attempt.AttemptNo != 1 {
+		return fmt.Errorf("online resume read is a one-shot command and requires attempt number 1")
+	}
+	return nil
 }
 
 func validateDiscoveryAttempt(attempt Attempt) error {

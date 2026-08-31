@@ -111,15 +111,43 @@
     {{end}}
 
     {{if eq .Page "resume"}}
+    {{with .ResumeFeedback}}
+    <section class="card" role="{{if .Error}}alert{{else}}status{{end}}">
+      <p class="{{if .Error}}reason{{else}}muted{{end}}">{{.Message}}</p>
+    </section>
+    {{end}}
     <section class="card hero-card">
       <div>
         <p class="eyebrow">唯一求职资料源</p>
+        {{if .State.CurrentResume}}
+        <h2>在线简历 v{{.State.CurrentResume.Version}}</h2>
+        <dl>
+          <div><dt>版本号</dt><dd>v{{.State.CurrentResume.Version}}</dd></div>
+          <div><dt>保存时间</dt><dd>{{savedTime .State.CurrentResume.CreatedAt}}</dd></div>
+        </dl>
+        {{if .State.ActiveResumeUse}}
+          {{if eq .State.ActiveResumeUse.ResumeVersion .State.CurrentResume.Version}}
+          <p class="muted">当前岗位发现运行使用 v{{.State.ActiveResumeUse.ResumeVersion}}；尚未开始的鉴定也会采用当前保存版本。</p>
+          {{else}}
+          <p class="muted">当前岗位发现运行继续使用 v{{.State.ActiveResumeUse.ResumeVersion}}；v{{.State.CurrentResume.Version}} 将用于下一次岗位发现和尚未开始的鉴定。</p>
+          {{end}}
+        {{else}}
+        <p class="muted">当前没有进行中的岗位发现。下一次岗位发现和尚未开始的鉴定将使用 v{{.State.CurrentResume.Version}}。</p>
+        {{end}}
+        {{else}}
         <h2>尚无在线简历版本</h2>
         <p class="muted">后台启动不会自动访问 BOSS。在线简历只能由你的显式刷新操作创建。</p>
+        {{end}}
       </div>
       <div class="action-block">
-        <button type="button" disabled aria-describedby="refresh-resume-reason">刷新在线简历</button>
-        <p id="refresh-resume-reason" class="reason">BOSS 读取能力尚未接入</p>
+        <form method="post" action="/resume/refresh">
+          <button type="submit" {{if not .State.RunlogHealth.Healthy}}disabled{{end}} aria-describedby="refresh-resume-reason">刷新在线简历</button>
+        </form>
+        {{if .State.RunlogHealth.Healthy}}
+        <p id="refresh-resume-reason" class="reason">只在点击后读取一次 BOSS，不会自动刷新。</p>
+        {{else}}
+        <p id="refresh-resume-reason" class="reason">运行日志恢复前不会访问 BOSS。</p>
+        {{end}}
       </div>
     </section>
     {{end}}

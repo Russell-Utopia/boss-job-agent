@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	bossadapter "github.com/Russell-Utopia/boss-job-agent/internal/adapters/boss"
 	"github.com/Russell-Utopia/boss-job-agent/internal/assessment"
 	"github.com/Russell-Utopia/boss-job-agent/internal/automationsettings"
 	"github.com/Russell-Utopia/boss-job-agent/internal/discovery"
@@ -44,8 +45,8 @@ func assemble(ctx context.Context, config Config) (*assembled, error) {
 		return nil, closeApplicationStorageAfterError(database, logs, err)
 	}
 
-	resumeVersions := onlineresume.New(database)
-	discoveryService := discovery.New(resumeVersions)
+	resumeVersions := onlineresume.New(database, bossadapter.NewDefaultOnlineResume(), logs, config.Now)
+	discoveryService := discovery.New(database, resumeVersions)
 	_ = outreach.New()
 
 	return &assembled{

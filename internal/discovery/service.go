@@ -2,13 +2,23 @@ package discovery
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
 
+	"github.com/Russell-Utopia/boss-job-agent/internal/discovery/internal/sqlitedb"
 	"github.com/Russell-Utopia/boss-job-agent/internal/onlineresume"
 )
 
 // Service owns job discovery runs.
 type Service struct {
 	resumeVersions *onlineresume.Versions
+	queries        *sqlitedb.Queries
+}
+
+type ActiveResumeUse struct {
+	DiscoveryRunID int64 `json:"-"`
+	ResumeVersion  int   `json:"resumeVersion"`
 }
 
 type ActionAvailability struct {
@@ -34,8 +44,22 @@ func (r *Rejection) RejectionReason() string {
 	return r.Reason
 }
 
-func New(resumeVersions *onlineresume.Versions) *Service {
-	return &Service{resumeVersions: resumeVersions}
+func New(db *sql.DB, resumeVersions *onlineresume.Versions) *Service {
+	return &Service{resumeVersions: resumeVersions, queries: sqlitedb.New(db)}
+}
+
+func (s *Service) GetActiveResumeUse(ctx context.Context) (*ActiveResumeUse, error) {
+	row, err := s.queries.GetActiveDiscoveryResumeUse(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query active discovery resume use: %w", err)
+	}
+	return &ActiveResumeUse{
+		DiscoveryRunID: row.DiscoveryRunID,
+		ResumeVersion:  int(row.ResumeVersionNo),
+	}, nil
 }
 
 func (s *Service) StartAvailability(ctx context.Context) (ActionAvailability, error) {
