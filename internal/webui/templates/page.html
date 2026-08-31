@@ -70,15 +70,8 @@
         </dl>
         {{else}}
         {{if .State.Actions.StartDiscovery.Allowed}}
-        {{$intention := index .State.CurrentResume.Content.JobIntentions 0}}
         <h2>准备创建岗位发现</h2>
-        <p class="muted">在线简历 v{{.State.CurrentResume.Version}} 的实际搜索输入</p>
-        <dl>
-          <div><dt>意向岗位</dt><dd>{{$intention.Role}}</dd></div>
-          <div><dt>目标城市</dt><dd>{{$intention.City}}</dd></div>
-          <div><dt>期望薪资</dt><dd>{{$intention.Salary}}</dd></div>
-          <div><dt>求职类型</dt><dd>{{$intention.EmploymentType}}</dd></div>
-        </dl>
+        <p class="muted">请确认右侧的实际搜索输入后再开始。</p>
         {{else}}
         <h2>尚无岗位</h2>
         <p class="muted">刷新并保存在线简历后，才能开始第一次岗位发现。</p>
@@ -86,9 +79,19 @@
         {{end}}
       </div>
       <div class="action-block">
+        {{if .State.Actions.StartDiscovery.Allowed}}
+        {{$intention := index .State.CurrentResume.Content.JobIntentions 0}}
+        <p class="muted">{{if .State.DiscoveryRun}}下一轮将采用{{end}}在线简历 v{{.State.CurrentResume.Version}} 的实际搜索输入</p>
+        <dl>
+          <div><dt>意向岗位</dt><dd>{{$intention.Role}}</dd></div>
+          <div><dt>目标城市</dt><dd>{{$intention.City}}</dd></div>
+          <div><dt>期望薪资</dt><dd>{{$intention.Salary}}</dd></div>
+          <div><dt>求职类型</dt><dd>{{$intention.EmploymentType}}</dd></div>
+        </dl>
+        {{end}}
         <form method="post" action="/discovery-runs">
         {{if .State.Actions.StartDiscovery.Allowed}}
-        <button type="submit">{{if .State.DiscoveryRun}}开始新的岗位发现{{else}}确认并开始岗位发现{{end}}</button>
+        <button type="submit">确认并开始岗位发现</button>
         {{else}}
         <button type="button" disabled aria-describedby="start-discovery-reason">开始岗位发现</button>
         {{end}}

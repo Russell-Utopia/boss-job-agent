@@ -29,7 +29,20 @@ func TestJobDiscoveryFetchesOneCompleteReliablePageThroughKimiWebBridge(t *testi
 		}},
 		HasMore: false,
 	}
-	encoded, err := json.Marshal(want)
+	rawPage := map[string]any{
+		"jobs": []map[string]any{{
+			"platformJobId":       "boss-job-1",
+			"detailPlatformJobId": "boss-job-1",
+			"canonicalUrl":        "https://www.zhipin.com/job_detail/boss-job-1.html",
+			"jobTitle":            "Go 后端工程师",
+			"companyName":         "示例科技",
+			"city":                "福州",
+			"salary":              "20-30K",
+			"fullJD":              "负责 Go 服务开发\n任职要求：熟悉 Go 与 SQLite",
+		}},
+		"hasMore": false,
+	}
+	encoded, err := json.Marshal(rawPage)
 	if err != nil {
 		t.Fatalf("encode discovery page fixture: %v", err)
 	}
@@ -87,6 +100,51 @@ func TestJobDiscoveryRejectsTheWholePageWhenOneObservationIsUnreliable(t *testin
 	}
 	if fetchErr.Category != discovery.FetchErrorInvalidResponse {
 		t.Errorf("fetch error category = %q, want invalid_response", fetchErr.Category)
+	}
+}
+
+func TestJobDiscoveryRejectsAmbiguousJDAndUnconfirmedLiveDetail(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                string
+		fullJD              string
+		detailPlatformJobID string
+	}{
+		{name: "JD has no reliable responsibility requirement boundary", fullJD: "负责 Go 服务开发"},
+		{
+			name: "live detail does not confirm the listed stable ID", fullJD: "负责 Go 服务开发\n任职要求：熟悉 Go",
+			detailPlatformJobID: "another-job",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			rawPage := map[string]any{
+				"jobs": []map[string]any{{
+					"platformJobId": "boss-job-1", "detailPlatformJobId": test.detailPlatformJobID,
+					"canonicalUrl": "https://www.zhipin.com/job_detail/boss-job-1.html",
+					"jobTitle":     "Go 后端工程师", "companyName": "示例科技",
+					"city": "福州", "salary": "20-30K", "fullJD": test.fullJD,
+				}},
+				"hasMore": false,
+			}
+			encoded, err := json.Marshal(rawPage)
+			if err != nil {
+				t.Fatalf("encode raw page: %v", err)
+			}
+			fixture := &successfulJobDiscoveryFixture{t: t, encodedPage: string(encoded)}
+			server := httptest.NewServer(fixture)
+			t.Cleanup(server.Close)
+
+			_, err = NewJobDiscovery(server.URL, server.Client()).FetchPage(t.Context(), discovery.SearchRange{
+				Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职",
+			}, 1)
+			var fetchErr *discovery.FetchError
+			if !errors.As(err, &fetchErr) || fetchErr.Category != discovery.FetchErrorInvalidResponse {
+				t.Fatalf("fetch error = %v, want invalid_response", err)
+			}
+		})
 	}
 }
 

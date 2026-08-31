@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/Russell-Utopia/boss-job-agent/internal/discovery"
@@ -90,17 +91,97 @@ func (a *JobDiscovery) evaluatePage(
 			errors.New("BOSS discovery extraction returned a non-string result"),
 		)
 	}
-	var page discovery.DiscoveryPage
-	if err := json.Unmarshal([]byte(evaluation.Value), &page); err != nil {
+	page, err := decodeReliableDiscoveryPage(evaluation.Value)
+	if err != nil {
 		return discovery.DiscoveryPage{}, newAdapterFailure(
-			adapterFailureInvalidProtocol,
-			fmt.Errorf("decode BOSS discovery page: %w", err),
+			adapterFailureInvalidResponse,
+			fmt.Errorf("decode reliable BOSS discovery page: %w", err),
 		)
 	}
+	return page, nil
+}
+
+type rawDiscoveryPage struct {
+	Jobs    []rawDiscoveryJob `json:"jobs"`
+	HasMore *bool             `json:"hasMore"`
+}
+
+type rawDiscoveryJob struct {
+	PlatformJobID       string `json:"platformJobId"`
+	DetailPlatformJobID string `json:"detailPlatformJobId"`
+	CanonicalURL        string `json:"canonicalUrl"`
+	JobTitle            string `json:"jobTitle"`
+	CompanyName         string `json:"companyName"`
+	City                string `json:"city"`
+	Salary              string `json:"salary"`
+	FullJD              string `json:"fullJD"`
+}
+
+var requirementsHeading = regexp.MustCompile(
+	`(?m)^[\t ]*(?:任职要求|岗位要求|职位要求|任职资格)[\t ]*[：:][\t ]*`,
+)
+
+func decodeReliableDiscoveryPage(value string) (discovery.DiscoveryPage, error) {
+	var rawPage rawDiscoveryPage
+	if err := json.Unmarshal([]byte(value), &rawPage); err != nil {
+		return discovery.DiscoveryPage{}, err
+	}
+	if rawPage.Jobs == nil || rawPage.HasMore == nil {
+		return discovery.DiscoveryPage{}, errors.New("BOSS discovery result requires jobs and explicit hasMore")
+	}
+	observations := make([]discovery.JobObservation, 0, len(rawPage.Jobs))
+	for _, rawJob := range rawPage.Jobs {
+		observation, err := observationFromReliableSearchDetail(rawJob)
+		if err != nil {
+			return discovery.DiscoveryPage{}, err
+		}
+		observations = append(observations, observation)
+	}
+	page := discovery.DiscoveryPage{Observations: observations, HasMore: *rawPage.HasMore}
 	if err := discovery.ValidatePage(page); err != nil {
-		return discovery.DiscoveryPage{}, newAdapterFailure(adapterFailureInvalidResponse, err)
+		return discovery.DiscoveryPage{}, err
 	}
 	return page, nil
+}
+
+func observationFromReliableSearchDetail(rawJob rawDiscoveryJob) (discovery.JobObservation, error) {
+	platformJobID := strings.TrimSpace(rawJob.PlatformJobID)
+	if platformJobID == "" || strings.TrimSpace(rawJob.DetailPlatformJobID) != platformJobID {
+		return discovery.JobObservation{}, fmt.Errorf(
+			"BOSS live detail does not confirm listed platform job %q", rawJob.PlatformJobID,
+		)
+	}
+	responsibilities, requirements, err := splitReliableJD(rawJob.FullJD)
+	if err != nil {
+		return discovery.JobObservation{}, fmt.Errorf("BOSS platform job %q: %w", platformJobID, err)
+	}
+	// Presence in the current search response plus a matching successful live
+	// detail response is this adapter's reliable evidence that the job is open.
+	return discovery.JobObservation{
+		PlatformJobID:    platformJobID,
+		CanonicalURL:     strings.TrimSpace(rawJob.CanonicalURL),
+		JobTitle:         strings.TrimSpace(rawJob.JobTitle),
+		CompanyName:      strings.TrimSpace(rawJob.CompanyName),
+		City:             strings.TrimSpace(rawJob.City),
+		Salary:           strings.TrimSpace(rawJob.Salary),
+		Responsibilities: responsibilities,
+		Requirements:     requirements,
+		PlatformStatus:   discovery.PlatformStatusOpen,
+	}, nil
+}
+
+func splitReliableJD(value string) (string, string, error) {
+	fullJD := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n"))
+	boundary := requirementsHeading.FindStringIndex(fullJD)
+	if boundary == nil || boundary[0] == 0 {
+		return "", "", errors.New("complete JD has no reliable responsibilities and requirements boundary")
+	}
+	responsibilities := strings.TrimSpace(fullJD[:boundary[0]])
+	requirements := strings.TrimSpace(fullJD[boundary[1]:])
+	if responsibilities == "" || requirements == "" {
+		return "", "", errors.New("complete JD responsibilities or requirements are empty")
+	}
+	return responsibilities, requirements, nil
 }
 
 func validateSearchInput(searchRange discovery.SearchRange, pageNo int) error {
@@ -246,17 +327,7 @@ const fetchJobDiscoveryPageScript = `(async () => {
     throw new Error("BOSS_DISCOVERY_UNRELIABLE_PAGE");
   }
 
-  const splitJD = value => {
-    const full = normalized(value).replace(/\r\n?/g, "\n");
-    if (!full) throw new Error("BOSS_DISCOVERY_UNRELIABLE_PAGE:missing_jd");
-    const marker = full.search(/(?:任职要求|岗位要求|职位要求|任职资格)\s*[：:]/);
-    if (marker > 0) {
-      return {responsibilities: full.slice(0, marker).trim(), requirements: full.slice(marker).trim()};
-    }
-    return {responsibilities: full, requirements: full};
-  };
-
-  const observations = [];
+  const jobs = [];
   for (const entry of list.jobList) {
     const card = entry.jobCard || entry;
     const platformJobId = normalized(card.encryptJobId || card.jobId);
@@ -267,22 +338,24 @@ const fetchJobDiscoveryPageScript = `(async () => {
       lid: card.lid || list.lid || ""
     });
     const info = detail.jobInfo || detail.jobCard || detail;
-    const jd = splitJD(info.postDescription || info.jobDescription);
-    const observation = {
+    const detailPlatformJobId = normalized(info.encryptJobId || info.jobId);
+    if (detailPlatformJobId !== platformJobId) {
+      throw new Error("BOSS_DISCOVERY_UNRELIABLE_PAGE:detail_identity_mismatch");
+    }
+    const job = {
       platformJobId,
+      detailPlatformJobId,
       canonicalUrl: "https://www.zhipin.com/job_detail/" + platformJobId + ".html",
       jobTitle: normalized(info.jobName || card.jobName),
       companyName: normalized(info.brandName || card.brandName),
       city: normalized(info.cityName || card.cityName),
       salary: normalized(info.salaryDesc || card.salaryDesc),
-      responsibilities: jd.responsibilities,
-      requirements: jd.requirements,
-      platformStatus: "open"
+      fullJD: normalized(info.postDescription || info.jobDescription).replace(/\r\n?/g, "\n")
     };
-    if (Object.values(observation).some(value => !normalized(value))) {
+    if (Object.values(job).some(value => !normalized(value))) {
       throw new Error("BOSS_DISCOVERY_UNRELIABLE_PAGE:missing_job_field");
     }
-    observations.push(observation);
+    jobs.push(job);
   }
-  return JSON.stringify({observations, hasMore: list.hasMore});
+  return JSON.stringify({jobs, hasMore: list.hasMore});
 })()`

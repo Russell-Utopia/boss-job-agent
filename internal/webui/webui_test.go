@@ -284,6 +284,15 @@ func TestJobsPageDisplaysDiscoveryInputsProgressSettingsHintsAndGlobalJobs(t *te
 		"Go 平台工程师",
 		"另一科技",
 	})
+
+	runtime.resume.content = webResumeContent("Go 研发工程师")
+	refreshResumePage(t, client, server.URL, http.StatusOK, []string{"已保存在线简历 v2"})
+	assertPageContains(t, client, server.URL+"/jobs", []string{
+		"在线简历 v1 的实际搜索输入",
+		"下一轮将采用在线简历 v2 的实际搜索输入",
+		"Go 研发工程师",
+		"确认并开始岗位发现",
+	})
 }
 
 func TestRemovedSimulationCommandIsNotRoutable(t *testing.T) {
