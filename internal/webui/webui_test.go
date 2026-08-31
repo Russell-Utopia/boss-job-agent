@@ -252,6 +252,15 @@ func TestJobsPageDisplaysDiscoveryInputsProgressSettingsHintsAndGlobalJobs(t *te
 	client := server.Client()
 
 	refreshResumePage(t, client, server.URL, http.StatusOK, []string{"已保存在线简历 v1"})
+	assertPageContains(t, client, server.URL+"/jobs", []string{
+		"准备创建岗位发现",
+		"在线简历 v1 的实际搜索输入",
+		"Go 后端工程师",
+		"福州",
+		"20-30K",
+		"全职",
+		"确认并开始岗位发现",
+	})
 	response := postJSONResponse(t, client, server.URL+"/api/discovery-runs", `{}`)
 	body := readResponseBody(t, response)
 	if response.StatusCode != http.StatusCreated {
