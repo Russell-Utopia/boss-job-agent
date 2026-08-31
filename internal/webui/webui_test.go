@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,17 +17,24 @@ import (
 	"github.com/Russell-Utopia/boss-job-agent/internal/discovery"
 	"github.com/Russell-Utopia/boss-job-agent/internal/jobpool"
 	"github.com/Russell-Utopia/boss-job-agent/internal/onlineresume"
+	"github.com/Russell-Utopia/boss-job-agent/internal/runlog"
 	storage "github.com/Russell-Utopia/boss-job-agent/internal/sqlite"
 )
 
 type testWeb struct {
 	Handler http.Handler
 	db      *sql.DB
+	logs    *runlog.Log
 }
 
 func openTestWeb(t *testing.T, path string) *testWeb {
 	t.Helper()
-	db, err := storage.Open(t.Context(), path)
+	return openTestWebWithLogPath(t, path, filepath.Join(t.TempDir(), "boss-job-agent.jsonl"))
+}
+
+func openTestWebWithLogPath(t *testing.T, databasePath, logPath string) *testWeb {
+	t.Helper()
+	db, err := storage.Open(t.Context(), databasePath)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -43,21 +51,63 @@ func openTestWeb(t *testing.T, path string) *testWeb {
 		t.Fatalf("ensure safe automation settings: %v", err)
 	}
 	resumeVersions := onlineresume.New(db)
+	logs := runlog.Open(logPath)
 	return &testWeb{
 		Handler: New(Dependencies{
 			Resume:     resumeVersions,
 			Discovery:  discovery.New(resumeVersions),
 			Assessment: assessmentService,
 			Settings:   settings,
+			Runlog:     logs,
 		}),
-		db: db,
+		db:   db,
+		logs: logs,
 	}
 }
 
 func closeTestWeb(t *testing.T, runtime *testWeb) {
 	t.Helper()
+	if err := runtime.logs.Close(); err != nil {
+		t.Errorf("close test runlog: %v", err)
+	}
 	if err := runtime.db.Close(); err != nil {
 		t.Errorf("close test sqlite: %v", err)
+	}
+}
+
+func TestDegradedRunlogKeepsSQLiteWebAvailableAndSupportsImmediateRecheck(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	blockedParent := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(blockedParent, []byte("conflict"), 0o600); err != nil {
+		t.Fatalf("write blocking parent: %v", err)
+	}
+	runtime := openTestWebWithLogPath(t, ":memory:", filepath.Join(blockedParent, "boss-job-agent.jsonl"))
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+
+	assertPageContains(t, server.Client(), server.URL+"/jobs", []string{
+		"运行日志不可用",
+		"新的 BOSS/Pi 外部动作已关闭",
+		`action="/runlog/recheck?return=jobs"`,
+		"尚无岗位",
+	})
+	if err := os.Remove(blockedParent); err != nil {
+		t.Fatalf("remove blocking parent: %v", err)
+	}
+	response := postJSONResponse(t, server.Client(), server.URL+"/api/runlog/recheck", `{}`)
+	defer closeResponseBody(t, response.Body)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("recheck status = %d, want 200", response.StatusCode)
+	}
+	var health runlog.Health
+	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+		t.Fatalf("decode recheck health: %v", err)
+	}
+	if !health.Healthy {
+		t.Fatalf("recheck health = %#v, want healthy", health)
 	}
 }
 

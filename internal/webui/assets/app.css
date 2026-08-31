@@ -104,6 +104,23 @@ h2 { margin: 6px 0 10px; font-size: 22px; }
 }
 
 .card { padding: 28px; }
+.health-banner {
+  max-width: 1080px;
+  margin: 0 auto 22px;
+  padding: 22px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  border: 1px solid #e4b77d;
+  border-radius: 16px;
+  background: #fff5e8;
+  color: #603f1f;
+}
+.health-banner p { margin: 6px 0 0; }
+.health-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+.health-actions form { margin: 0; }
+.danger-button { background: #9b3d2f; }
 .hero-card { max-width: 1080px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 40px; }
 .action-block { max-width: 300px; text-align: right; }
 
@@ -151,6 +168,8 @@ dd { margin: 0; font-weight: 720; text-align: right; }
   .runtime { display: none; }
   main { padding: 28px 18px; }
   .hero-card, .page-header { align-items: flex-start; }
+  .health-banner { display: block; }
+  .health-actions { margin-top: 18px; justify-content: flex-start; }
   .hero-card { display: block; }
   .action-block { margin-top: 24px; max-width: none; text-align: left; }
   .summary-grid, .settings-grid { grid-template-columns: 1fr; }

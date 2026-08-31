@@ -27,6 +27,12 @@ func Run(ctx context.Context, config Config) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("listen for Web requests: %w", err)
 	}
+	backgroundContext, stopBackground := context.WithCancel(ctx)
+	waitForBackground := runtime.startBackground(backgroundContext, config.RunlogRecheckInterval)
+	defer func() {
+		stopBackground()
+		waitForBackground()
+	}()
 	server := &http.Server{
 		Handler:           runtime.handler,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -55,6 +61,9 @@ func Run(ctx context.Context, config Config) (runErr error) {
 		}
 		if err := <-serverError; !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("finish Web server: %w", err)
+		}
+		if err := runtime.logs.Drain(shutdownContext); err != nil {
+			return fmt.Errorf("drain runlog terminal records: %w", err)
 		}
 		return nil
 	}

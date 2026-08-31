@@ -13,6 +13,7 @@ import (
 	"github.com/Russell-Utopia/boss-job-agent/internal/automationsettings"
 	"github.com/Russell-Utopia/boss-job-agent/internal/discovery"
 	"github.com/Russell-Utopia/boss-job-agent/internal/onlineresume"
+	"github.com/Russell-Utopia/boss-job-agent/internal/runlog"
 )
 
 //go:embed templates/*.html assets/*.css
@@ -36,6 +37,7 @@ type Dependencies struct {
 	Discovery  *discovery.Service
 	Assessment *assessment.Service
 	Settings   *automationsettings.Settings
+	Runlog     *runlog.Log
 }
 
 type pageData struct {
@@ -49,6 +51,7 @@ type startupState struct {
 	ActivePolicy  assessment.Policy       `json:"activePolicy"`
 	Automation    automationsettings.View `json:"automation"`
 	Actions       firstUseActions         `json:"actions"`
+	RunlogHealth  runlog.Health           `json:"runlogHealth"`
 }
 
 type firstUseActions struct {
@@ -76,6 +79,9 @@ func New(dependencies Dependencies) http.Handler {
 	mux.HandleFunc("GET /resume", h.renderPage("resume", "在线简历", h.resumeState))
 	mux.HandleFunc("GET /assets/app.css", serveCSS)
 	mux.HandleFunc("GET /api/startup-state", h.startupState)
+	mux.HandleFunc("GET /api/runlog/health", h.runlogHealth)
+	mux.HandleFunc("POST /api/runlog/recheck", h.recheckRunlogAPI)
+	mux.HandleFunc("POST /runlog/recheck", h.recheckRunlogPage)
 	mux.HandleFunc("POST /api/discovery-runs", h.startDiscovery)
 	mux.HandleFunc("POST /api/outreach/real", h.queueReal)
 	return mux
@@ -95,6 +101,7 @@ func (h *handler) jobsState(ctx context.Context) (startupState, error) {
 		Actions: firstUseActions{
 			StartDiscovery: fromDiscoveryAvailability(availability),
 		},
+		RunlogHealth: h.dependencies.Runlog.Health(),
 	}, nil
 }
 
@@ -107,7 +114,11 @@ func (h *handler) assessmentsState(ctx context.Context) (startupState, error) {
 	if err != nil {
 		return startupState{}, err
 	}
-	return startupState{ActivePolicy: policy, Automation: settings}, nil
+	return startupState{
+		ActivePolicy: policy,
+		Automation:   settings,
+		RunlogHealth: h.dependencies.Runlog.Health(),
+	}, nil
 }
 
 func (h *handler) outreachState(ctx context.Context) (startupState, error) {
@@ -124,6 +135,7 @@ func (h *handler) outreachState(ctx context.Context) (startupState, error) {
 		Actions: firstUseActions{
 			QueueRealOutreach: fromSettingsAvailability(availability),
 		},
+		RunlogHealth: h.dependencies.Runlog.Health(),
 	}, nil
 }
 
@@ -132,7 +144,7 @@ func (h *handler) resumeState(ctx context.Context) (startupState, error) {
 	if err != nil {
 		return startupState{}, err
 	}
-	return startupState{CurrentResume: resume}, nil
+	return startupState{CurrentResume: resume, RunlogHealth: h.dependencies.Runlog.Health()}, nil
 }
 
 func (h *handler) getStartupState(ctx context.Context) (startupState, error) {
@@ -164,6 +176,7 @@ func (h *handler) getStartupState(ctx context.Context) (startupState, error) {
 			StartDiscovery:    fromDiscoveryAvailability(discoveryAvailability),
 			QueueRealOutreach: fromSettingsAvailability(outreachAvailability),
 		},
+		RunlogHealth: h.dependencies.Runlog.Health(),
 	}, nil
 }
 
@@ -210,6 +223,39 @@ func (h *handler) startupState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, state)
+}
+
+func (h *handler) runlogHealth(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, h.dependencies.Runlog.Health())
+}
+
+func (h *handler) recheckRunlogAPI(w http.ResponseWriter, r *http.Request) {
+	var decision runlog.RepairDecision
+	if !decodeJSON(w, r, &decision) {
+		return
+	}
+	writeJSON(w, http.StatusOK, h.dependencies.Runlog.Recheck(r.Context(), decision))
+}
+
+func (h *handler) recheckRunlogPage(w http.ResponseWriter, r *http.Request) {
+	decision := runlog.RepairDecision{
+		ConfirmQuarantine: r.URL.Query().Get("confirm-quarantine") == "true",
+	}
+	h.dependencies.Runlog.Recheck(r.Context(), decision)
+	http.Redirect(w, r, runlogReturnPath(r.URL.Query().Get("return")), http.StatusSeeOther)
+}
+
+func runlogReturnPath(page string) string {
+	switch page {
+	case "assessments":
+		return "/assessments"
+	case "outreach":
+		return "/outreach"
+	case "resume":
+		return "/resume"
+	default:
+		return "/jobs"
+	}
 }
 
 func (h *handler) startDiscovery(w http.ResponseWriter, r *http.Request) {

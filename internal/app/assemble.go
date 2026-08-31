@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/Russell-Utopia/boss-job-agent/internal/assessment"
 	"github.com/Russell-Utopia/boss-job-agent/internal/automationsettings"
@@ -13,6 +15,7 @@ import (
 	"github.com/Russell-Utopia/boss-job-agent/internal/jobpool"
 	"github.com/Russell-Utopia/boss-job-agent/internal/onlineresume"
 	"github.com/Russell-Utopia/boss-job-agent/internal/outreach"
+	"github.com/Russell-Utopia/boss-job-agent/internal/runlog"
 	storage "github.com/Russell-Utopia/boss-job-agent/internal/sqlite"
 	"github.com/Russell-Utopia/boss-job-agent/internal/webui"
 )
@@ -20,12 +23,14 @@ import (
 type assembled struct {
 	database *sql.DB
 	handler  http.Handler
+	logs     *runlog.Log
 }
 
 func assemble(ctx context.Context, config Config) (*assembled, error) {
+	logs := openRunlog(config.LogPath)
 	database, err := storage.Open(ctx, config.DatabasePath)
 	if err != nil {
-		return nil, err
+		return nil, closeRunlogAfterError(logs, err)
 	}
 
 	pool := jobpool.New()
@@ -33,10 +38,10 @@ func assemble(ctx context.Context, config Config) (*assembled, error) {
 	assessmentService := assessment.New(database)
 	now := config.Now()
 	if err := assessmentService.EnsureDefaultPolicy(ctx, now); err != nil {
-		return nil, closeDatabaseAfterError(database, err)
+		return nil, closeApplicationStorageAfterError(database, logs, err)
 	}
 	if err := settings.EnsureSafeDefaults(ctx, now); err != nil {
-		return nil, closeDatabaseAfterError(database, err)
+		return nil, closeApplicationStorageAfterError(database, logs, err)
 	}
 
 	resumeVersions := onlineresume.New(database)
@@ -50,20 +55,50 @@ func assemble(ctx context.Context, config Config) (*assembled, error) {
 			Discovery:  discoveryService,
 			Assessment: assessmentService,
 			Settings:   settings,
+			Runlog:     logs,
 		}),
+		logs: logs,
 	}, nil
 }
 
-func closeDatabaseAfterError(database *sql.DB, cause error) error {
-	if err := database.Close(); err != nil {
-		return errors.Join(cause, fmt.Errorf("close application database: %w", err))
+func openRunlog(path string) *runlog.Log {
+	if path == "" {
+		return runlog.OpenDefault()
 	}
-	return cause
+	return runlog.Open(path)
+}
+
+func closeRunlogAfterError(logs *runlog.Log, cause error) error {
+	return errors.Join(cause, logs.Close())
+}
+
+func closeApplicationStorageAfterError(database *sql.DB, logs *runlog.Log, cause error) error {
+	return errors.Join(cause, database.Close(), logs.Close())
 }
 
 func (a *assembled) close() error {
-	if err := a.database.Close(); err != nil {
-		return fmt.Errorf("close application database: %w", err)
+	var logErr error
+	if a.logs != nil {
+		if err := a.logs.Close(); err != nil {
+			logErr = fmt.Errorf("close application runlog: %w", err)
+		}
 	}
-	return nil
+	var databaseErr error
+	if a.database != nil {
+		if err := a.database.Close(); err != nil {
+			databaseErr = fmt.Errorf("close application database: %w", err)
+		}
+	}
+	return errors.Join(logErr, databaseErr)
+}
+
+func (a *assembled) startBackground(ctx context.Context, recheckInterval time.Duration) func() {
+	var group sync.WaitGroup
+	group.Add(1)
+	go func() {
+		defer group.Done()
+		a.logs.RunRechecks(ctx, recheckInterval)
+	}()
+
+	return group.Wait
 }

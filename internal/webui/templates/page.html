@@ -33,6 +33,27 @@
       <span class="safe-badge">安全模式</span>
     </header>
 
+    {{if not .State.RunlogHealth.Healthy}}
+    <section class="health-banner" role="alert">
+      <div>
+        <p class="eyebrow">安全降级</p>
+        <h2>运行日志不可用</h2>
+        <p>{{.State.RunlogHealth.Message}}</p>
+        <p>SQLite 和 Web 仍可使用；新的 BOSS/Pi 外部动作已关闭。</p>
+      </div>
+      <div class="health-actions">
+        <form method="post" action="/runlog/recheck?return={{.Page}}">
+          <button type="submit">立即重查</button>
+        </form>
+        {{if .State.RunlogHealth.ConfirmationRequired}}
+        <form method="post" action="/runlog/recheck?return={{.Page}}&amp;confirm-quarantine=true">
+          <button type="submit" class="danger-button">确认隔离冲突日志并重查</button>
+        </form>
+        {{end}}
+      </div>
+    </section>
+    {{end}}
+
     {{if eq .Page "jobs"}}
     <section class="card hero-card">
       <div>

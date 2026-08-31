@@ -7,11 +7,14 @@ import (
 )
 
 const defaultAddress = "127.0.0.1:8080"
+const defaultRunlogRecheckInterval = time.Minute
 
 type Config struct {
-	Address      string
-	DatabasePath string
-	Now          func() time.Time
+	Address               string
+	DatabasePath          string
+	LogPath               string
+	RunlogRecheckInterval time.Duration
+	Now                   func() time.Time
 }
 
 func DefaultConfig() (Config, error) {
@@ -20,9 +23,10 @@ func DefaultConfig() (Config, error) {
 		return Config{}, err
 	}
 	return Config{
-		Address:      defaultAddress,
-		DatabasePath: databasePath,
-		Now:          time.Now,
+		Address:               defaultAddress,
+		DatabasePath:          databasePath,
+		RunlogRecheckInterval: defaultRunlogRecheckInterval,
+		Now:                   time.Now,
 	}, nil
 }
 
@@ -36,6 +40,9 @@ func (c Config) withDefaults() (Config, error) {
 			return Config{}, err
 		}
 		c.DatabasePath = defaults.DatabasePath
+	}
+	if c.RunlogRecheckInterval <= 0 {
+		c.RunlogRecheckInterval = defaultRunlogRecheckInterval
 	}
 	if c.Now == nil {
 		c.Now = time.Now
