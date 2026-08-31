@@ -22,9 +22,10 @@ import (
 )
 
 type assembled struct {
-	database *sql.DB
-	handler  http.Handler
-	logs     *runlog.Log
+	database  *sql.DB
+	handler   http.Handler
+	logs      *runlog.Log
+	discovery *discovery.Service
 }
 
 func assemble(ctx context.Context, config Config) (*assembled, error) {
@@ -57,7 +58,8 @@ func assemble(ctx context.Context, config Config) (*assembled, error) {
 	_ = outreach.New()
 
 	return &assembled{
-		database: database,
+		database:  database,
+		discovery: discoveryService,
 		handler: webui.New(webui.Dependencies{
 			Resume:     resumeVersions,
 			Discovery:  discoveryService,
@@ -103,10 +105,14 @@ func (a *assembled) close() error {
 
 func (a *assembled) startBackground(ctx context.Context, recheckInterval time.Duration) func() {
 	var group sync.WaitGroup
-	group.Add(1)
+	group.Add(2)
 	go func() {
 		defer group.Done()
 		a.logs.RunRechecks(ctx, recheckInterval)
+	}()
+	go func() {
+		defer group.Done()
+		a.discovery.Run(ctx)
 	}()
 
 	return group.Wait

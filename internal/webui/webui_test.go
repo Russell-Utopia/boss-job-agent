@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +30,7 @@ type testWeb struct {
 	logs      *runlog.Log
 	resume    *webResumeReader
 	discovery *webJobDiscovery
+	pool      *jobpool.Pool
 }
 
 type webResumeReader struct {
@@ -125,6 +127,7 @@ func openTestWebWithLogPath(t *testing.T, databasePath, logPath string) *testWeb
 		logs:      logs,
 		resume:    resumeReader,
 		discovery: discoveryAdapter,
+		pool:      pool,
 	}
 }
 
@@ -267,22 +270,24 @@ func TestJobsPageDisplaysDiscoveryInputsProgressSettingsHintsAndGlobalJobs(t *te
 		t.Fatalf("start discovery status = %d, want 201; body=%s", response.StatusCode, body)
 	}
 	assertTextContains(t, body, []string{`"discoveryRunId":1`})
+	completeWebDiscovery(t, runtime, 1)
 
 	assertPageContains(t, client, server.URL+"/jobs", []string{
-		"岗位发现完成",
+		"岗位发现：发现完成",
 		"在线简历 v1",
+		"已完成 1 / 1",
 		"Go 后端工程师",
 		"福州",
-		"20-30K",
-		"全职",
-		"当前页 1",
-		"已发现 2",
+		"下一页",
+		"已发现岗位数",
+		">2</dd>",
 		"自动岗位鉴定已关闭：新发现岗位将只保存",
 		"自动打招呼已关闭：合适岗位暂不进入打招呼队列",
 		"固定招呼语未配置：这不阻止岗位发现",
 		"示例科技",
 		"Go 平台工程师",
 		"另一科技",
+		`style="width: 100%"`,
 	})
 
 	runtime.resume.content = webResumeContent("Go 研发工程师")
@@ -291,6 +296,93 @@ func TestJobsPageDisplaysDiscoveryInputsProgressSettingsHintsAndGlobalJobs(t *te
 		"在线简历 v1 的实际搜索输入",
 		"下一轮将采用在线简历 v2 的实际搜索输入",
 		"Go 研发工程师",
+		"确认并开始岗位发现",
+	})
+}
+
+func TestJobsPageContinuesAndEndsTheSameDiscoveryRun(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	client := server.Client()
+
+	refreshResumePage(t, client, server.URL, http.StatusOK, []string{"已保存在线简历 v1"})
+	runID := seedWebActiveDiscovery(t, runtime.db, currentResumeVersionID(t, runtime.db))
+	assertPageContains(t, client, server.URL+"/jobs", []string{
+		"岗位发现：已暂停",
+		fmt.Sprintf(`action="/discovery-runs/%d/continue"`, runID),
+		fmt.Sprintf(`action="/discovery-runs/%d/end-early"`, runID),
+	})
+	response := postJSONResponse(
+		t,
+		client,
+		fmt.Sprintf("%s/api/discovery-runs/%d/continue", server.URL, runID),
+		`{}`,
+	)
+	defer closeResponseBody(t, response.Body)
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("continue discovery status = %d, want 204", response.StatusCode)
+	}
+	assertPageContains(t, client, server.URL+"/jobs", []string{"岗位发现：运行中"})
+	response = postJSONResponse(
+		t,
+		client,
+		fmt.Sprintf("%s/api/discovery-runs/%d/end-early", server.URL, runID),
+		`{}`,
+	)
+	defer closeResponseBody(t, response.Body)
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("end discovery status = %d, want 204", response.StatusCode)
+	}
+	assertPageContains(t, client, server.URL+"/jobs", []string{
+		"岗位发现：已提前结束",
+		"确认并开始岗位发现",
+	})
+}
+
+func TestJobsPageExposesAnUnpreparedRunForEarlyTermination(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	client := server.Client()
+
+	refreshResumePage(t, client, server.URL, http.StatusOK, []string{"已保存在线简历 v1"})
+	result, err := runtime.db.ExecContext(t.Context(), `
+		INSERT INTO discovery_runs (status, attempt_no, created_at, updated_at)
+		VALUES ('preparing', 0, 1000, 1000)
+	`)
+	if err != nil {
+		t.Fatalf("seed unprepared discovery: %v", err)
+	}
+	runID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("read unprepared discovery ID: %v", err)
+	}
+	assertPageContains(t, client, server.URL+"/jobs", []string{
+		"岗位发现：准备中",
+		"尚未冻结本轮在线简历版本",
+		fmt.Sprintf(`action="/discovery-runs/%d/end-early"`, runID),
+		"请先处理当前未结束的岗位发现运行",
+	})
+
+	response := postJSONResponse(
+		t,
+		client,
+		fmt.Sprintf("%s/api/discovery-runs/%d/end-early", server.URL, runID),
+		`{}`,
+	)
+	defer closeResponseBody(t, response.Body)
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("end unprepared discovery status = %d, want 204", response.StatusCode)
+	}
+	assertPageContains(t, client, server.URL+"/jobs", []string{
+		"岗位发现：已提前结束",
 		"确认并开始岗位发现",
 	})
 }
@@ -586,15 +678,48 @@ func currentResumeVersionID(t *testing.T, db *sql.DB) int64 {
 	return versionID
 }
 
-func seedWebActiveDiscovery(t *testing.T, db *sql.DB, resumeVersionID int64) {
+func seedWebActiveDiscovery(t *testing.T, db *sql.DB, resumeVersionID int64) int64 {
 	t.Helper()
-	if _, err := db.ExecContext(t.Context(), `
+	result, err := db.ExecContext(t.Context(), `
 		INSERT INTO discovery_runs (
 			resume_version_id, current_role, current_city, next_page,
 			status, attempt_no, created_at, prepared_at, updated_at
 		) VALUES (?, 'Go 后端工程师', '福州', 1, 'paused', 1, 1000, 1000, 1000)
-	`, resumeVersionID); err != nil {
+	`, resumeVersionID)
+	if err != nil {
 		t.Fatalf("seed active discovery using v1: %v", err)
+	}
+	runID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("read seeded discovery run ID: %v", err)
+	}
+	return runID
+}
+
+func completeWebDiscovery(t *testing.T, runtime *testWeb, runID int64) {
+	t.Helper()
+	for _, observation := range []discovery.JobObservation{
+		webDiscoveredJob("boss-job-1", "Go 后端工程师", "示例科技"),
+		webDiscoveredJob("boss-job-2", "Go 平台工程师", "另一科技"),
+	} {
+		if _, err := runtime.pool.Observe(t.Context(), runID, jobpool.Observation{
+			PlatformJobID: observation.PlatformJobID, CanonicalURL: observation.CanonicalURL,
+			JobTitle: observation.JobTitle, CompanyName: observation.CompanyName,
+			City: observation.City, Salary: observation.Salary,
+			Responsibilities: observation.Responsibilities, Requirements: observation.Requirements,
+			PlatformStatus: jobpool.PlatformStatus(observation.PlatformStatus),
+			ObservedAt:     time.UnixMilli(2000),
+		}); err != nil {
+			t.Fatalf("seed discovered job: %v", err)
+		}
+	}
+	if _, err := runtime.db.ExecContext(t.Context(), `
+		UPDATE discovery_runs
+		SET status = 'completed', worker_owner = NULL, worker_lease_until = NULL,
+			last_progress_at = 2000, finished_at = 2000, updated_at = 2000
+		WHERE id = ?
+	`, runID); err != nil {
+		t.Fatalf("complete discovery fixture: %v", err)
 	}
 }
 

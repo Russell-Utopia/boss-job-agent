@@ -19,7 +19,7 @@ func TestOpenAppliesGooseMigrationOnceAcrossRestarts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open new database: %v", err)
 	}
-	assertGooseVersion(t, db, 1)
+	assertGooseVersion(t, db, 2)
 	if err := db.Close(); err != nil {
 		t.Fatalf("close new database: %v", err)
 	}
@@ -29,7 +29,7 @@ func TestOpenAppliesGooseMigrationOnceAcrossRestarts(t *testing.T) {
 		t.Fatalf("reopen migrated database: %v", err)
 	}
 	t.Cleanup(func() { _ = restarted.Close() })
-	assertGooseVersion(t, restarted, 1)
+	assertGooseVersion(t, restarted, 2)
 	assertBackupCount(t, path, 0)
 }
 
@@ -64,12 +64,7 @@ func TestOpenUpgradesCandidateAndPreservesExistingData(t *testing.T) {
 	path := filepath.Join(directory, "boss-job-agent.db")
 	createV1DatabaseWithRepresentativeData(t, path)
 
-	upgraded, err := openWithMigrations(t.Context(), path, testMigrations(t, map[string]string{
-		"00002_resume_created_at_index.sql": `-- +goose Up
-CREATE INDEX idx_online_resume_versions_created_at
-    ON online_resume_versions(created_at);
-`,
-	}))
+	upgraded, err := Open(t.Context(), path)
 	if err != nil {
 		t.Fatalf("upgrade database: %v", err)
 	}
@@ -90,6 +85,41 @@ CREATE INDEX idx_online_resume_versions_created_at
 	}
 }
 
+func TestOpenUpgradesAnUnpreparedRunSoItCanEndEarly(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "boss-job-agent.db")
+	v1, err := openWithMigrations(t.Context(), path, initialMigrations(t))
+	if err != nil {
+		t.Fatalf("open v1 database: %v", err)
+	}
+	if _, err := v1.ExecContext(t.Context(), `
+		INSERT INTO discovery_runs (status, attempt_no, created_at, updated_at)
+		VALUES ('preparing', 0, 1000, 1000)
+	`); err != nil {
+		_ = v1.Close()
+		t.Fatalf("seed unprepared v1 discovery: %v", err)
+	}
+	if err := v1.Close(); err != nil {
+		t.Fatalf("close v1 database: %v", err)
+	}
+
+	upgraded, err := Open(t.Context(), path)
+	if err != nil {
+		t.Fatalf("upgrade unprepared discovery database: %v", err)
+	}
+	t.Cleanup(func() { _ = upgraded.Close() })
+	if _, err := upgraded.ExecContext(t.Context(), `
+		UPDATE discovery_runs
+		SET status = 'ended_early', finished_at = 2000, updated_at = 2000
+		WHERE status = 'preparing'
+	`); err != nil {
+		t.Fatalf("end upgraded unprepared discovery: %v", err)
+	}
+	assertGooseVersion(t, upgraded, 2)
+	assertBackupCount(t, path, 1)
+}
+
 func TestBackupFailureLeavesFormalDatabaseUnchanged(t *testing.T) {
 	t.Parallel()
 
@@ -101,7 +131,7 @@ func TestBackupFailureLeavesFormalDatabaseUnchanged(t *testing.T) {
 	}
 
 	_, err := openWithMigrations(t.Context(), path, testMigrations(t, map[string]string{
-		"00002_valid.sql": "-- +goose Up\nCREATE INDEX idx_resume_hash_created ON online_resume_versions(resume_hash, created_at);\n",
+		"00003_valid.sql": "-- +goose Up\nCREATE INDEX idx_resume_hash_created ON online_resume_versions(resume_hash, created_at);\n",
 	}))
 	if err == nil {
 		t.Fatal("upgrade succeeded with an unusable backup directory")
@@ -118,7 +148,7 @@ func TestCandidateMigrationFailureLeavesFormalDatabaseUnchanged(t *testing.T) {
 	createV1DatabaseWithRepresentativeData(t, path)
 
 	_, err := openWithMigrations(t.Context(), path, testMigrations(t, map[string]string{
-		"00002_broken.sql": "-- +goose Up\nTHIS IS NOT VALID SQL;\n",
+		"00003_broken.sql": "-- +goose Up\nTHIS IS NOT VALID SQL;\n",
 	}))
 	if err == nil {
 		t.Fatal("invalid candidate migration succeeded")
@@ -136,7 +166,7 @@ func TestCandidateValidationFailureLeavesFormalDatabaseUnchanged(t *testing.T) {
 	createV1DatabaseWithRepresentativeData(t, path)
 
 	_, err := openWithMigrations(t.Context(), path, testMigrations(t, map[string]string{
-		"00002_invalid_schema.sql": "-- +goose Up\nDROP TABLE automation_settings;\n",
+		"00003_invalid_schema.sql": "-- +goose Up\nDROP TABLE automation_settings;\n",
 	}))
 	if err == nil {
 		t.Fatal("candidate with a missing business table passed validation")
@@ -154,7 +184,7 @@ func TestCandidateKeyDataChangeLeavesFormalDatabaseUnchanged(t *testing.T) {
 	createV1DatabaseWithRepresentativeData(t, path)
 
 	_, err := openWithMigrations(t.Context(), path, testMigrations(t, map[string]string{
-		"00002_tamper_resume.sql": `-- +goose Up
+		"00003_tamper_resume.sql": `-- +goose Up
 UPDATE online_resume_versions
 SET resume_json = '{"intent":"tampered"}'
 WHERE version_no = 1;
@@ -174,7 +204,7 @@ func TestNewDatabaseMigrationFailureLeavesNoFormalDatabase(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "boss-job-agent.db")
 	_, err := openWithMigrations(t.Context(), path, testMigrations(t, map[string]string{
-		"00002_broken.sql": "-- +goose Up\nTHIS IS NOT VALID SQL;\n",
+		"00003_broken.sql": "-- +goose Up\nTHIS IS NOT VALID SQL;\n",
 	}))
 	if err == nil {
 		t.Fatal("new database succeeded with an invalid migration")
@@ -188,7 +218,7 @@ func TestNewDatabaseMigrationFailureLeavesNoFormalDatabase(t *testing.T) {
 func createV1DatabaseWithRepresentativeData(t *testing.T, path string) {
 	t.Helper()
 
-	db, err := Open(t.Context(), path)
+	db, err := openWithMigrations(t.Context(), path, initialMigrations(t))
 	if err != nil {
 		t.Fatalf("open v1 database: %v", err)
 	}
@@ -240,7 +270,7 @@ func createV1DatabaseWithRepresentativeData(t *testing.T, path string) {
 func assertFormalDatabaseIsStillV1(t *testing.T, path string) {
 	t.Helper()
 
-	db, err := Open(t.Context(), path)
+	db, err := openWithMigrations(t.Context(), path, initialMigrations(t))
 	if err != nil {
 		t.Fatalf("reopen formal database after failed upgrade: %v", err)
 	}
@@ -334,17 +364,28 @@ func assertNoSQLiteSidecars(t *testing.T, path string) {
 func testMigrations(t *testing.T, additional map[string]string) fs.FS {
 	t.Helper()
 
-	initial, err := fs.ReadFile(embeddedMigrations, "migrations/00001_initial.sql")
+	migrations := initialMigrations(t)
+	second, err := fs.ReadFile(embeddedMigrations, "migrations/00002_allow_unprepared_discovery_termination.sql")
 	if err != nil {
-		t.Fatalf("read embedded initial migration: %v", err)
+		t.Fatalf("read embedded second migration: %v", err)
 	}
-	migrations := fstest.MapFS{
-		"00001_initial.sql": &fstest.MapFile{Data: initial},
-	}
+	migrations["00002_allow_unprepared_discovery_termination.sql"] = &fstest.MapFile{Data: second}
 	for name, contents := range additional {
 		migrations[name] = &fstest.MapFile{Data: []byte(contents)}
 	}
 	return migrations
+}
+
+func initialMigrations(t *testing.T) fstest.MapFS {
+	t.Helper()
+
+	initial, err := fs.ReadFile(embeddedMigrations, "migrations/00001_initial.sql")
+	if err != nil {
+		t.Fatalf("read embedded initial migration: %v", err)
+	}
+	return fstest.MapFS{
+		"00001_initial.sql": &fstest.MapFile{Data: initial},
+	}
 }
 
 func assertGooseVersion(t *testing.T, db interface {

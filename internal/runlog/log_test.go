@@ -60,6 +60,43 @@ func TestAttemptFailurePersistsStableFieldsAndCompleteErrorTree(t *testing.T) {
 	assertFailureRecord(t, records[2], trace.ID())
 }
 
+func TestTechnicalErrorPersistsDiscoveryIdentityAndErrorTree(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "boss-job-agent.jsonl")
+	logs := Open(path)
+	t.Cleanup(func() { closeRunlog(t, logs) })
+	err := logs.RecordTechnicalError(t.Context(), TechnicalError{
+		Flow:           FlowDiscovery,
+		Stage:          "worker_lease_expired",
+		DiscoveryRunID: 42,
+		AttemptNo:      3,
+		Err:            fmt.Errorf("recover discovery: %w", errors.New("lease expired")),
+	})
+	if err != nil {
+		t.Fatalf("record technical error: %v", err)
+	}
+
+	records := readJSONL(t, path)
+	if len(records) != 2 {
+		t.Fatalf("record count = %d, want startup + technical error", len(records))
+	}
+	record := records[1]
+	assertJSONField(t, record, "event", "technical_error")
+	traceID, ok := record["trace_id"].(string)
+	if !ok {
+		t.Fatalf("trace_id = %#v, want string", record["trace_id"])
+	}
+	assertTraceID(t, traceID)
+	assertJSONField(t, record, "flow", "discovery")
+	assertJSONField(t, record, "stage", "worker_lease_expired")
+	assertJSONField(t, record, "discovery_run_id", float64(42))
+	assertJSONField(t, record, "attempt_no", float64(3))
+	if _, ok := record["error_chain"].([]any); !ok {
+		t.Fatalf("error_chain = %#v, want array", record["error_chain"])
+	}
+}
+
 func writeFailedAttempt(t *testing.T, logs *Log) Trace {
 	t.Helper()
 	trace, err := logs.Start(t.Context(), Attempt{

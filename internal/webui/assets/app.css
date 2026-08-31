@@ -160,6 +160,8 @@ dt { color: #64736d; }
 dd { margin: 0; font-weight: 720; text-align: right; }
 .rules { margin: 18px 0 0; padding-left: 22px; color: #3e4c46; line-height: 1.7; }
 .button-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.inline-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.inline-actions form { margin: 0; }
 
 @media (max-width: 760px) {
   body { display: block; }

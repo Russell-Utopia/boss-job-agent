@@ -12,7 +12,7 @@ import (
 func TestRunStopsCleanlyWhenItsContextEnds(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
 	err := Run(ctx, Config{

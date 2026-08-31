@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/Russell-Utopia/boss-job-agent/internal/assessment"
@@ -34,12 +35,20 @@ var pageTemplate = template.Must(template.New("page.html").Funcs(template.FuncMa
 	},
 	"discoveryStatusText": func(status discovery.Status) string {
 		switch status {
+		case discovery.StatusPreparing:
+			return "准备中"
+		case discovery.StatusRunning:
+			return "运行中"
+		case discovery.StatusPaused:
+			return "已暂停"
 		case discovery.StatusCompleted:
-			return "岗位发现完成"
+			return "发现完成"
 		case discovery.StatusFailed:
-			return "岗位发现失败"
+			return "失败待处理"
+		case discovery.StatusEndedEarly:
+			return "已提前结束"
 		default:
-			return "岗位发现运行中"
+			return "状态异常"
 		}
 	},
 	"platformStatusText": func(status jobpool.PlatformStatus) string {
@@ -111,12 +120,18 @@ func New(dependencies Dependencies) http.Handler {
 	mux.HandleFunc("GET /resume", h.renderPage("resume", "在线简历", h.resumeState))
 	mux.HandleFunc("POST /resume/refresh", h.refreshResumePage)
 	mux.HandleFunc("POST /discovery-runs", h.startDiscoveryPage)
+	mux.HandleFunc("POST /discovery-runs/{runID}/pause", h.discoveryCommandPage(h.dependencies.Discovery.Pause))
+	mux.HandleFunc("POST /discovery-runs/{runID}/continue", h.discoveryCommandPage(h.dependencies.Discovery.Continue))
+	mux.HandleFunc("POST /discovery-runs/{runID}/end-early", h.discoveryCommandPage(h.dependencies.Discovery.EndEarly))
 	mux.HandleFunc("GET /assets/app.css", serveCSS)
 	mux.HandleFunc("GET /api/startup-state", h.startupState)
 	mux.HandleFunc("GET /api/runlog/health", h.runlogHealth)
 	mux.HandleFunc("POST /api/runlog/recheck", h.recheckRunlogAPI)
 	mux.HandleFunc("POST /runlog/recheck", h.recheckRunlogPage)
 	mux.HandleFunc("POST /api/discovery-runs", h.startDiscovery)
+	mux.HandleFunc("POST /api/discovery-runs/{runID}/pause", h.discoveryCommandAPI(h.dependencies.Discovery.Pause))
+	mux.HandleFunc("POST /api/discovery-runs/{runID}/continue", h.discoveryCommandAPI(h.dependencies.Discovery.Continue))
+	mux.HandleFunc("POST /api/discovery-runs/{runID}/end-early", h.discoveryCommandAPI(h.dependencies.Discovery.EndEarly))
 	mux.HandleFunc("POST /api/outreach/real", h.queueReal)
 	return mux
 }
@@ -371,6 +386,47 @@ func (h *handler) startDiscoveryPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Error(w, "岗位发现失败，请查看运行状态", http.StatusInternalServerError)
+}
+
+type discoveryCommand func(context.Context, int64) error
+
+func (h *handler) discoveryCommandAPI(command discoveryCommand) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		runID, ok := discoveryRunID(w, r)
+		if !ok {
+			return
+		}
+		h.writeCommandResult(w, command(r.Context(), runID))
+	}
+}
+
+func (h *handler) discoveryCommandPage(command discoveryCommand) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		runID, ok := discoveryRunID(w, r)
+		if !ok {
+			return
+		}
+		err := command(r.Context(), runID)
+		if err == nil {
+			http.Redirect(w, r, "/jobs", http.StatusSeeOther)
+			return
+		}
+		var rejection businessRejection
+		if errors.As(err, &rejection) {
+			http.Error(w, rejection.RejectionReason(), http.StatusConflict)
+			return
+		}
+		http.Error(w, "岗位发现操作失败，请稍后重试", http.StatusInternalServerError)
+	}
+}
+
+func discoveryRunID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	runID, err := strconv.ParseInt(r.PathValue("runID"), 10, 64)
+	if err != nil || runID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"reason": "岗位发现运行编号无效"})
+		return 0, false
+	}
+	return runID, true
 }
 
 func (h *handler) queueReal(w http.ResponseWriter, r *http.Request) {

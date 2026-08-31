@@ -59,15 +59,34 @@
       <div>
         <p class="eyebrow">全局岗位池</p>
         {{if .State.DiscoveryRun}}
-        <h2>{{discoveryStatusText .State.DiscoveryRun.Status}}</h2>
+        <h2>岗位发现：{{discoveryStatusText .State.DiscoveryRun.Status}}</h2>
+        {{if .State.DiscoveryRun.ResumeVersion}}
         <p class="muted">在线简历 v{{.State.DiscoveryRun.ResumeVersion}} 的实际搜索输入</p>
         <dl>
-          <div><dt>意向岗位</dt><dd>{{.State.DiscoveryRun.SearchRange.Role}}</dd></div>
-          <div><dt>目标城市</dt><dd>{{.State.DiscoveryRun.SearchRange.City}}</dd></div>
-          <div><dt>期望薪资</dt><dd>{{.State.DiscoveryRun.SearchRange.Salary}}</dd></div>
-          <div><dt>求职类型</dt><dd>{{.State.DiscoveryRun.SearchRange.EmploymentType}}</dd></div>
-          <div><dt>搜索进度</dt><dd>当前页 {{.State.DiscoveryRun.CurrentPage}} · 已发现 {{.State.DiscoveryRun.DiscoveredJobs}}</dd></div>
+          <div><dt>搜索范围</dt><dd>已完成 {{.State.DiscoveryRun.CompletedRanges}} / {{.State.DiscoveryRun.TotalRanges}}</dd></div>
+          <div><dt>当前岗位名</dt><dd>{{.State.DiscoveryRun.CurrentRange.Role}}</dd></div>
+          <div><dt>当前城市</dt><dd>{{.State.DiscoveryRun.CurrentRange.City}}</dd></div>
+          <div><dt>下一页</dt><dd>{{.State.DiscoveryRun.NextPage}}</dd></div>
+          <div><dt>已发现岗位数</dt><dd>{{.State.DiscoveryRun.DiscoveredJobs}}</dd></div>
         </dl>
+        {{else}}
+        <p class="muted">尚未冻结本轮在线简历版本；可提前结束这次运行后重新开始。</p>
+        {{end}}
+        {{if eq .State.DiscoveryRun.Status "running"}}
+        <div class="inline-actions">
+          <form method="post" action="/discovery-runs/{{.State.DiscoveryRun.ID}}/pause"><button type="submit">暂停</button></form>
+          <form method="post" action="/discovery-runs/{{.State.DiscoveryRun.ID}}/end-early"><button type="submit" class="danger-button">提前结束</button></form>
+        </div>
+        {{else if and .State.DiscoveryRun.ResumeVersion (or (eq .State.DiscoveryRun.Status "paused") (eq .State.DiscoveryRun.Status "failed"))}}
+        <div class="inline-actions">
+          <form method="post" action="/discovery-runs/{{.State.DiscoveryRun.ID}}/continue"><button type="submit">继续</button></form>
+          <form method="post" action="/discovery-runs/{{.State.DiscoveryRun.ID}}/end-early"><button type="submit" class="danger-button">提前结束</button></form>
+        </div>
+        {{else if or (eq .State.DiscoveryRun.Status "preparing") (eq .State.DiscoveryRun.Status "failed")}}
+        <div class="inline-actions">
+          <form method="post" action="/discovery-runs/{{.State.DiscoveryRun.ID}}/end-early"><button type="submit" class="danger-button">提前结束</button></form>
+        </div>
+        {{end}}
         {{else}}
         {{if .State.Actions.StartDiscovery.Allowed}}
         <h2>准备创建岗位发现</h2>
@@ -80,14 +99,15 @@
       </div>
       <div class="action-block">
         {{if .State.Actions.StartDiscovery.Allowed}}
-        {{$intention := index .State.CurrentResume.Content.JobIntentions 0}}
         <p class="muted">{{if .State.DiscoveryRun}}下一轮将采用{{end}}在线简历 v{{.State.CurrentResume.Version}} 的实际搜索输入</p>
+        {{range .State.CurrentResume.Content.JobIntentions}}
         <dl>
-          <div><dt>意向岗位</dt><dd>{{$intention.Role}}</dd></div>
-          <div><dt>目标城市</dt><dd>{{$intention.City}}</dd></div>
-          <div><dt>期望薪资</dt><dd>{{$intention.Salary}}</dd></div>
-          <div><dt>求职类型</dt><dd>{{$intention.EmploymentType}}</dd></div>
+          <div><dt>意向岗位</dt><dd>{{.Role}}</dd></div>
+          <div><dt>目标城市</dt><dd>{{.City}}</dd></div>
+          <div><dt>期望薪资</dt><dd>{{.Salary}}</dd></div>
+          <div><dt>求职类型</dt><dd>{{.EmploymentType}}</dd></div>
         </dl>
+        {{end}}
         {{end}}
         <form method="post" action="/discovery-runs">
         {{if .State.Actions.StartDiscovery.Allowed}}
@@ -120,7 +140,7 @@
       </ul>
     </section>
     <section class="summary-grid" aria-label="工作流概况">
-      <article class="metric"><span>岗位</span><strong>{{len .State.Jobs}} / {{len .State.Jobs}}</strong><div class="progress"><i></i></div></article>
+      <article class="metric"><span>岗位发现</span>{{if .State.DiscoveryRun}}<strong>{{.State.DiscoveryRun.CompletedRanges}} / {{.State.DiscoveryRun.TotalRanges}}</strong><div class="progress"><i style="width: {{.State.DiscoveryRun.ProgressPercent}}%"></i></div>{{else}}<strong>0 / 0</strong><div class="progress"><i></i></div>{{end}}</article>
       <article class="metric"><span>岗位鉴定</span><strong>0 / 0</strong><div class="progress"><i></i></div></article>
       <article class="metric"><span>打招呼</span><strong>0 / 0</strong><div class="progress"><i></i></div></article>
     </section>
@@ -198,10 +218,14 @@
           <div><dt>保存时间</dt><dd>{{savedTime .State.CurrentResume.CreatedAt}}</dd></div>
         </dl>
         {{if .State.ActiveResumeUse}}
+          {{if .State.ActiveResumeUse.ResumeVersion}}
           {{if eq .State.ActiveResumeUse.ResumeVersion .State.CurrentResume.Version}}
           <p class="muted">当前岗位发现运行使用 v{{.State.ActiveResumeUse.ResumeVersion}}；尚未开始的鉴定也会采用当前保存版本。</p>
           {{else}}
           <p class="muted">当前岗位发现运行继续使用 v{{.State.ActiveResumeUse.ResumeVersion}}；v{{.State.CurrentResume.Version}} 将用于下一次岗位发现和尚未开始的鉴定。</p>
+          {{end}}
+          {{else}}
+          <p class="muted">当前岗位发现仍在准备在线简历版本；请先在岗位页处理该运行。</p>
           {{end}}
         {{else}}
         <p class="muted">当前没有进行中的岗位发现。下一次岗位发现和尚未开始的鉴定将使用 v{{.State.CurrentResume.Version}}。</p>
