@@ -37,8 +37,16 @@ func assemble(ctx context.Context, config Config) (*assembled, error) {
 
 	pool := jobpool.New(database)
 	settings := automationsettings.New(database, pool)
-	assessmentService := assessment.New(database)
 	now := config.Now()
+	resumeVersions := onlineresume.New(database, bossadapter.NewDefaultOnlineResume(), logs, config.Now)
+	assessmentService := assessment.New(
+		database,
+		resumeVersions,
+		pool,
+		nil,
+		logs,
+		config.Now,
+	)
 	if err := assessmentService.EnsureDefaultPolicy(ctx, now); err != nil {
 		return nil, closeApplicationStorageAfterError(database, logs, err)
 	}
@@ -46,7 +54,6 @@ func assemble(ctx context.Context, config Config) (*assembled, error) {
 		return nil, closeApplicationStorageAfterError(database, logs, err)
 	}
 
-	resumeVersions := onlineresume.New(database, bossadapter.NewDefaultOnlineResume(), logs, config.Now)
 	discoveryService := discovery.New(
 		database,
 		resumeVersions,
@@ -114,6 +121,5 @@ func (a *assembled) startBackground(ctx context.Context, recheckInterval time.Du
 		defer group.Done()
 		a.discovery.Run(ctx)
 	}()
-
 	return group.Wait
 }

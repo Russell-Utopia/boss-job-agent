@@ -8,23 +8,46 @@ import (
 	"time"
 
 	"github.com/Russell-Utopia/boss-job-agent/internal/assessment/internal/sqlitedb"
+	"github.com/Russell-Utopia/boss-job-agent/internal/jobpool"
+	"github.com/Russell-Utopia/boss-job-agent/internal/onlineresume"
+	"github.com/Russell-Utopia/boss-job-agent/internal/runlog"
 )
 
 const defaultPolicyJSON = `{"rules":["只依据本次实际采用的在线简历和 JD，不猜测未提供的经历","有明确且重要的不匹配证据时判为不适合","有明确匹配证据时判为适合","信息不足或证据冲突时需要人工确认"]}`
 
 // Service owns assessment policies.
 type Service struct {
-	queries *sqlitedb.Queries
+	queries        *sqlitedb.Queries
+	resumeVersions *onlineresume.Versions
+	pool           *jobpool.Pool
+	submitter      AssessmentSubmitter
+	logs           *runlog.Log
+	now            func() time.Time
 }
 
 type Policy struct {
+	ID      int64    `json:"-"`
 	Version int      `json:"version"`
 	Name    string   `json:"name"`
 	Rules   []string `json:"rules"`
 }
 
-func New(db *sql.DB) *Service {
-	return &Service{queries: sqlitedb.New(db)}
+func New(
+	db *sql.DB,
+	resumeVersions *onlineresume.Versions,
+	pool *jobpool.Pool,
+	submitter AssessmentSubmitter,
+	logs *runlog.Log,
+	now func() time.Time,
+) *Service {
+	return &Service{
+		queries:        sqlitedb.New(db),
+		resumeVersions: resumeVersions,
+		pool:           pool,
+		submitter:      submitter,
+		logs:           logs,
+		now:            now,
+	}
 }
 
 func (s *Service) EnsureDefaultPolicy(ctx context.Context, now time.Time) error {
@@ -55,5 +78,5 @@ func (s *Service) GetActivePolicy(ctx context.Context) (Policy, error) {
 	if version == 1 && row.ChangeNote.String == "系统默认策略" {
 		name = "默认策略 v1"
 	}
-	return Policy{Version: version, Name: name, Rules: document.Rules}, nil
+	return Policy{ID: row.ID, Version: version, Name: name, Rules: document.Rules}, nil
 }

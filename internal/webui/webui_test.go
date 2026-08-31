@@ -195,8 +195,11 @@ func openTestWebWithLogPath(t *testing.T, databasePath, logPath string) *testWeb
 	}
 	pool := jobpool.New(db)
 	settings := automationsettings.New(db, pool)
-	assessmentService := assessment.New(db)
 	now := time.UnixMilli(1000)
+	logs := runlog.Open(logPath)
+	resumeReader := &webResumeReader{content: webResumeContent("Go 后端工程师")}
+	resumeVersions := onlineresume.New(db, resumeReader, logs, func() time.Time { return now })
+	assessmentService := assessment.New(db, resumeVersions, pool, nil, logs, func() time.Time { return now })
 	if err := assessmentService.EnsureDefaultPolicy(t.Context(), now); err != nil {
 		_ = db.Close()
 		t.Fatalf("ensure default policy: %v", err)
@@ -205,9 +208,6 @@ func openTestWebWithLogPath(t *testing.T, databasePath, logPath string) *testWeb
 		_ = db.Close()
 		t.Fatalf("ensure safe automation settings: %v", err)
 	}
-	logs := runlog.Open(logPath)
-	resumeReader := &webResumeReader{content: webResumeContent("Go 后端工程师")}
-	resumeVersions := onlineresume.New(db, resumeReader, logs, func() time.Time { return now })
 	discoveryAdapter := &webJobDiscovery{}
 	discoveryService := discovery.New(db, resumeVersions, pool, discoveryAdapter, logs, func() time.Time { return now })
 	return &testWeb{
@@ -442,6 +442,131 @@ func TestJobDetailShowsCompleteAssessmentInputsAndReviewDoesNotStartAnotherAsses
 	assertPageContains(t, server.Client(), detailURL+"?reviewed=1", []string{
 		"人工复核已保存", "当前判断", "人工复核 · 适合", "可作为策略优化监督标注",
 	})
+}
+
+func TestJobDetailQueuesAndRetriesAssessmentWithSeparateCommands(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	job := mustObserveWebJob(t, runtime.pool, jobpool.Observation{
+		PlatformJobID: "boss-job-assessment-command",
+		CanonicalURL:  "https://www.zhipin.com/job_detail/boss-job-assessment-command.html",
+		JobTitle:      "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责 Go 服务", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
+	})
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	detailURL := fmt.Sprintf("%s/jobs/%d", server.URL, job.ID)
+	assertPageContains(t, server.Client(), detailURL, []string{
+		"安排 AI 鉴定", fmt.Sprintf(`action="/jobs/%d/assessment"`, job.ID),
+		"此操作只加入待鉴定队列，尚未选择在线简历、JD、策略或鉴定器版本",
+	})
+
+	client := server.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response := postFormResponse(t, client, detailURL+"/assessment", url.Values{})
+	defer closeResponseBody(t, response.Body)
+	wantLocation := fmt.Sprintf("/jobs/%d?assessment=queued", job.ID)
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != wantLocation {
+		t.Fatalf("queue response = %d location %q, want 303 to %q", response.StatusCode, response.Header.Get("Location"), wantLocation)
+	}
+	assertWebAssessmentStatus(t, runtime.pool, job.ID, jobpool.AssessmentStatusPending)
+	assertPageContains(t, server.Client(), detailURL+"?assessment=queued", []string{
+		"已加入 AI 鉴定队列", "待鉴定", "岗位已在等待 AI 鉴定",
+	})
+
+	resumeID, policyID := seedWebAssessmentInputs(t, runtime.db, 2, 2)
+	work, err := runtime.pool.ClaimAssessments(t.Context(), jobpool.AssessmentClaim{
+		Worker: "assessment-worker", ResumeVersionID: resumeID, PolicyVersionID: policyID,
+		EvaluatorVersion: 1, Limit: 1, ClaimedAt: time.UnixMilli(2000), LeaseUntil: time.UnixMilli(3000),
+	})
+	if err != nil || len(work) != 1 {
+		t.Fatalf("claim queued assessment: work=%#v err=%v", work, err)
+	}
+	failed, err := runtime.pool.FinishAssessments(t.Context(), []jobpool.AssessmentOutcome{{
+		JobID: job.ID, AttemptNo: work[0].AttemptNo, Status: jobpool.AssessmentStatusFailed,
+		Reason: "Pi 请求失败", Evidence: json.RawMessage(`{"code":"pi_failed"}`),
+		CompletedAt: time.UnixMilli(2500),
+	}})
+	if err != nil || failed.Succeeded != 1 {
+		t.Fatalf("fail assessment: result=%#v err=%v", failed, err)
+	}
+	assertPageContains(t, server.Client(), detailURL, []string{
+		"重试 AI 鉴定", fmt.Sprintf(`action="/jobs/%d/assessment/retry"`, job.ID),
+	})
+	response = postFormResponse(t, client, detailURL+"/assessment/retry", url.Values{})
+	defer closeResponseBody(t, response.Body)
+	wantLocation = fmt.Sprintf("/jobs/%d?assessment=retried", job.ID)
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != wantLocation {
+		t.Fatalf("retry response = %d location %q, want 303 to %q", response.StatusCode, response.Header.Get("Location"), wantLocation)
+	}
+	assertWebAssessmentStatus(t, runtime.pool, job.ID, jobpool.AssessmentStatusPending)
+}
+
+func TestJobDetailDisablesAssessmentFailureRetryAfterTheJobCloses(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	observation := jobpool.Observation{
+		PlatformJobID: "boss-job-closed-assessment-retry",
+		CanonicalURL:  "https://www.zhipin.com/job_detail/boss-job-closed-assessment-retry.html",
+		JobTitle:      "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责 Go 服务", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1_000),
+	}
+	job := mustObserveWebJob(t, runtime.pool, observation)
+	queued, err := runtime.pool.QueueAssessments(t.Context(), []int64{job.ID})
+	if err != nil || queued.Succeeded != 1 {
+		t.Fatalf("queue assessment: result=%#v err=%v", queued, err)
+	}
+	resumeID, policyID := seedWebAssessmentInputs(t, runtime.db, 2, 2)
+	work, err := runtime.pool.ClaimAssessments(t.Context(), jobpool.AssessmentClaim{
+		Worker: "assessment-worker", ResumeVersionID: resumeID, PolicyVersionID: policyID,
+		EvaluatorVersion: 1, Limit: 1, ClaimedAt: time.UnixMilli(2_000), LeaseUntil: time.UnixMilli(3_000),
+	})
+	if err != nil || len(work) != 1 {
+		t.Fatalf("claim assessment: work=%#v err=%v", work, err)
+	}
+	failed, err := runtime.pool.FinishAssessments(t.Context(), []jobpool.AssessmentOutcome{{
+		JobID: job.ID, AttemptNo: work[0].AttemptNo, Status: jobpool.AssessmentStatusFailed,
+		Reason: "Pi 请求失败", Evidence: json.RawMessage(`{"code":"pi_failed"}`),
+		CompletedAt: time.UnixMilli(2_500),
+	}})
+	if err != nil || failed.Succeeded != 1 {
+		t.Fatalf("fail assessment: result=%#v err=%v", failed, err)
+	}
+	observation.PlatformStatus = jobpool.PlatformStatusClosed
+	observation.PlatformClosedReason = "岗位已关闭"
+	observation.ObservedAt = time.UnixMilli(3_000)
+	if _, err := runtime.pool.Observe(t.Context(), 2, observation); err != nil {
+		t.Fatalf("observe closed job: %v", err)
+	}
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	response := getResponse(t, server.Client(), fmt.Sprintf("%s/jobs/%d", server.URL, job.ID))
+	defer closeResponseBody(t, response.Body)
+	body := readResponseBody(t, response)
+	assertTextContains(t, body, []string{"岗位已关闭，不能开始 AI 鉴定", "重试 AI 鉴定"})
+	assertTextAbsent(t, body, fmt.Sprintf(`action="/jobs/%d/assessment/retry"`, job.ID))
+}
+
+func assertWebAssessmentStatus(
+	t *testing.T,
+	pool *jobpool.Pool,
+	jobID int64,
+	want jobpool.AssessmentStatus,
+) {
+	t.Helper()
+	job, err := pool.GetJob(t.Context(), jobID)
+	if err != nil {
+		t.Fatalf("get platform job %d: %v", jobID, err)
+	}
+	if job.AssessmentStatus != want {
+		t.Errorf("job %d assessment status = %q, want %q", jobID, job.AssessmentStatus, want)
+	}
 }
 
 func TestJobReviewPageRejectsAReviewBasedOnAStaleJD(t *testing.T) {

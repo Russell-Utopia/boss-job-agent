@@ -104,13 +104,26 @@ func (l *Log) StartBatch(ctx context.Context, attempts []Attempt) (Trace, error)
 	return l.start(ctx, attempts)
 }
 
-func (l *Log) start(ctx context.Context, attempts []Attempt) (Trace, error) {
-	if err := validateAttempts(attempts); err != nil {
-		return Trace{}, err
+// StartLinked starts a related external attempt under an existing trusted
+// business trace ID, while retaining its own operation and terminal record.
+func (l *Log) StartLinked(ctx context.Context, traceID string, attempt Attempt) (Trace, error) {
+	if !validTechnicalTraceID(traceID) {
+		return Trace{}, fmt.Errorf("linked trace ID is invalid")
 	}
+	return l.startWithTraceID(ctx, traceID, []Attempt{attempt})
+}
+
+func (l *Log) start(ctx context.Context, attempts []Attempt) (Trace, error) {
 	traceID, err := newTraceID()
 	if err != nil {
 		return Trace{}, fmt.Errorf("generate trace ID: %w", err)
+	}
+	return l.startWithTraceID(ctx, traceID, attempts)
+}
+
+func (l *Log) startWithTraceID(ctx context.Context, traceID string, attempts []Attempt) (Trace, error) {
+	if err := validateAttempts(attempts); err != nil {
+		return Trace{}, err
 	}
 	trace := Trace{id: traceID, attempts: append([]Attempt(nil), attempts...)}
 

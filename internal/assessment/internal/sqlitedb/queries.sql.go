@@ -30,12 +30,13 @@ func (q *Queries) EnsureDefaultPolicy(ctx context.Context, arg EnsureDefaultPoli
 }
 
 const getActivePolicy = `-- name: GetActivePolicy :one
-SELECT version_no, rules_json, change_note
+SELECT id, version_no, rules_json, change_note
 FROM assessment_policy_versions
 WHERE is_active = 1
 `
 
 type GetActivePolicyRow struct {
+	ID         int64
 	VersionNo  int64
 	RulesJson  string
 	ChangeNote sql.NullString
@@ -44,6 +45,11 @@ type GetActivePolicyRow struct {
 func (q *Queries) GetActivePolicy(ctx context.Context) (GetActivePolicyRow, error) {
 	row := q.db.QueryRowContext(ctx, getActivePolicy)
 	var i GetActivePolicyRow
-	err := row.Scan(&i.VersionNo, &i.RulesJson, &i.ChangeNote)
+	err := row.Scan(
+		&i.ID,
+		&i.VersionNo,
+		&i.RulesJson,
+		&i.ChangeNote,
+	)
 	return i, err
 }

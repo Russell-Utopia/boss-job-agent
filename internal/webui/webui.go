@@ -120,12 +120,13 @@ type Dependencies struct {
 }
 
 type pageData struct {
-	Page           string
-	PageTitle      string
-	State          startupState
-	ResumeFeedback *resumeFeedback
-	Job            *jobpool.JobDetailView
-	ReviewSaved    bool
+	Page               string
+	PageTitle          string
+	State              startupState
+	ResumeFeedback     *resumeFeedback
+	AssessmentFeedback string
+	Job                *jobpool.JobDetailView
+	ReviewSaved        bool
 }
 
 type startupState struct {
@@ -166,6 +167,8 @@ func New(dependencies Dependencies) http.Handler {
 	mux.HandleFunc("GET /jobs", h.renderPage("jobs", "岗位工作台", h.jobsState))
 	mux.HandleFunc("GET /jobs/{jobID}", h.jobDetailPage)
 	mux.HandleFunc("POST /jobs/{jobID}/review", h.reviewJobPage)
+	mux.HandleFunc("POST /jobs/{jobID}/assessment", h.assessmentCommandPage(h.dependencies.Jobs.QueueAssessments, "queued"))
+	mux.HandleFunc("POST /jobs/{jobID}/assessment/retry", h.assessmentCommandPage(h.dependencies.Jobs.RetryAssessmentFailures, "retried"))
 	mux.HandleFunc("GET /assessments", h.renderPage("assessments", "岗位鉴定", h.assessmentsState))
 	mux.HandleFunc("GET /outreach", h.renderPage("outreach", "打招呼", h.outreachState))
 	mux.HandleFunc("GET /resume", h.renderPage("resume", "在线简历", h.resumeState))
@@ -183,6 +186,8 @@ func New(dependencies Dependencies) http.Handler {
 	mux.HandleFunc("POST /api/discovery-runs/{runID}/pause", h.discoveryCommandAPI(h.dependencies.Discovery.Pause))
 	mux.HandleFunc("POST /api/discovery-runs/{runID}/continue", h.discoveryCommandAPI(h.dependencies.Discovery.Continue))
 	mux.HandleFunc("POST /api/discovery-runs/{runID}/end-early", h.discoveryCommandAPI(h.dependencies.Discovery.EndEarly))
+	mux.HandleFunc("POST /api/assessments", h.assessmentCommandAPI(h.dependencies.Jobs.QueueAssessments))
+	mux.HandleFunc("POST /api/assessments/retry", h.assessmentCommandAPI(h.dependencies.Jobs.RetryAssessmentFailures))
 	mux.HandleFunc("POST /api/outreach/real", h.queueReal)
 	return mux
 }
@@ -202,13 +207,54 @@ func (h *handler) jobDetailPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "无法读取岗位详情", http.StatusInternalServerError)
 		return
 	}
+	feedback := ""
+	switch r.URL.Query().Get("assessment") {
+	case "queued":
+		feedback = "已加入 AI 鉴定队列。"
+	case "retried":
+		feedback = "已重新加入 AI 鉴定队列。"
+	}
 	h.executePage(w, http.StatusOK, pageData{
-		Page:        "job-detail",
-		PageTitle:   detail.JobTitle,
-		State:       startupState{RunlogHealth: h.dependencies.Runlog.Health()},
-		Job:         &detail,
+		Page: "job-detail", PageTitle: detail.JobTitle,
+		State:              startupState{RunlogHealth: h.dependencies.Runlog.Health()},
+		AssessmentFeedback: feedback, Job: &detail,
 		ReviewSaved: r.URL.Query().Get("reviewed") == "1",
 	})
+}
+
+type assessmentBatchCommand func(context.Context, []int64) (jobpool.BatchActionResult, error)
+
+func (h *handler) assessmentCommandPage(command assessmentBatchCommand, feedback string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jobID, ok := platformJobID(w, r)
+		if !ok {
+			return
+		}
+		result, err := command(r.Context(), []int64{jobID})
+		if err != nil {
+			h.writePageCommandError(w, err)
+			return
+		}
+		if result.Succeeded != 1 {
+			if len(result.Skipped) > 0 {
+				http.Error(w, result.Skipped[0].Reason, http.StatusConflict)
+				return
+			}
+			http.Error(w, "AI 鉴定操作未生效，请刷新后重试", http.StatusConflict)
+			return
+		}
+		//nolint:gosec // jobID is a validated positive integer and feedback is a fixed handler value.
+		http.Redirect(w, r, fmt.Sprintf("/jobs/%d?assessment=%s", jobID, feedback), http.StatusSeeOther)
+	}
+}
+
+func (h *handler) writePageCommandError(w http.ResponseWriter, err error) {
+	var rejection businessRejection
+	if errors.As(err, &rejection) {
+		http.Error(w, rejection.RejectionReason(), http.StatusConflict)
+		return
+	}
+	http.Error(w, "AI 鉴定操作失败，请稍后重试", http.StatusInternalServerError)
 }
 
 func (h *handler) reviewJobPage(w http.ResponseWriter, r *http.Request) {
@@ -561,6 +607,23 @@ func (h *handler) queueReal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *handler) assessmentCommandAPI(command assessmentBatchCommand) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			JobIDs []int64 `json:"jobIds"`
+		}
+		if !decodeJSON(w, r, &request) {
+			return
+		}
+		result, err := command(r.Context(), request.JobIDs)
+		if err != nil {
+			h.writeCommandResult(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	}
 }
 
 func (h *handler) writeCommandResult(w http.ResponseWriter, err error) {

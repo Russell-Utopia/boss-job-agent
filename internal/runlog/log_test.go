@@ -60,6 +60,31 @@ func TestAttemptFailurePersistsStableFieldsAndCompleteErrorTree(t *testing.T) {
 	assertFailureRecord(t, records[2], trace.ID())
 }
 
+func TestLinkedAttemptKeepsTheOriginalBusinessTraceID(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "boss-job-agent.jsonl")
+	logs := Open(path)
+	t.Cleanup(func() { closeRunlog(t, logs) })
+	submit, err := logs.Start(t.Context(), Attempt{
+		Flow: FlowAssessment, Operation: OperationSubmitAssessment,
+		PlatformJobID: "boss-job-7", AttemptNo: 1,
+	})
+	if err != nil {
+		t.Fatalf("start assessment submission: %v", err)
+	}
+	confirmation, err := logs.StartLinked(t.Context(), submit.ID(), Attempt{
+		Flow: FlowAssessment, Operation: OperationConfirmAssessmentResults,
+		PlatformJobID: "boss-job-7", AttemptNo: 1,
+	})
+	if err != nil {
+		t.Fatalf("start linked confirmation: %v", err)
+	}
+	if confirmation.ID() != submit.ID() {
+		t.Fatalf("confirmation trace ID = %q, want %q", confirmation.ID(), submit.ID())
+	}
+}
+
 func TestTechnicalErrorPersistsDiscoveryIdentityAndErrorTree(t *testing.T) {
 	t.Parallel()
 
