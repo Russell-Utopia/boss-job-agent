@@ -57,6 +57,53 @@ var pageTemplate = template.Must(template.New("page.html").Funcs(template.FuncMa
 		}
 		return "已关闭"
 	},
+	"assessmentStatusText": func(status jobpool.AssessmentStatus) string {
+		switch status {
+		case jobpool.AssessmentStatusPending:
+			return "待鉴定"
+		case jobpool.AssessmentStatusProcessing:
+			return "鉴定中"
+		case jobpool.AssessmentStatusSuitable:
+			return "适合"
+		case jobpool.AssessmentStatusUnsuitable:
+			return "不适合"
+		case jobpool.AssessmentStatusNeedsUserConfirmation:
+			return "需要人工确认"
+		case jobpool.AssessmentStatusFailed:
+			return "鉴定失败"
+		default:
+			return "尚未鉴定"
+		}
+	},
+	"humanReviewStatusText": func(status jobpool.HumanReviewStatus) string {
+		switch status {
+		case jobpool.HumanReviewStatusSuitable:
+			return "已复核 · 适合"
+		case jobpool.HumanReviewStatusUnsuitable:
+			return "已复核 · 不适合"
+		case jobpool.HumanReviewStatusStale:
+			return "待重新复核"
+		default:
+			return "未复核"
+		}
+	},
+	"currentJudgmentText": func(judgment jobpool.CurrentJudgment) string {
+		if !judgment.Available {
+			return judgment.Reason
+		}
+		source := "AI 鉴定"
+		if judgment.Source == jobpool.JudgmentSourceHuman {
+			source = "人工复核"
+		}
+		verdict := "不适合"
+		if judgment.Verdict == jobpool.JudgmentVerdictSuitable {
+			verdict = "适合"
+		}
+		return source + " · " + verdict
+	},
+	"jsonText": func(value json.RawMessage) string {
+		return string(value)
+	},
 }).ParseFS(files, "templates/page.html"))
 
 type handler struct {
@@ -77,6 +124,8 @@ type pageData struct {
 	PageTitle      string
 	State          startupState
 	ResumeFeedback *resumeFeedback
+	Job            *jobpool.JobDetailView
+	ReviewSaved    bool
 }
 
 type startupState struct {
@@ -115,6 +164,8 @@ func New(dependencies Dependencies) http.Handler {
 		http.Redirect(w, r, "/jobs", http.StatusSeeOther)
 	})
 	mux.HandleFunc("GET /jobs", h.renderPage("jobs", "岗位工作台", h.jobsState))
+	mux.HandleFunc("GET /jobs/{jobID}", h.jobDetailPage)
+	mux.HandleFunc("POST /jobs/{jobID}/review", h.reviewJobPage)
 	mux.HandleFunc("GET /assessments", h.renderPage("assessments", "岗位鉴定", h.assessmentsState))
 	mux.HandleFunc("GET /outreach", h.renderPage("outreach", "打招呼", h.outreachState))
 	mux.HandleFunc("GET /resume", h.renderPage("resume", "在线简历", h.resumeState))
@@ -134,6 +185,73 @@ func New(dependencies Dependencies) http.Handler {
 	mux.HandleFunc("POST /api/discovery-runs/{runID}/end-early", h.discoveryCommandAPI(h.dependencies.Discovery.EndEarly))
 	mux.HandleFunc("POST /api/outreach/real", h.queueReal)
 	return mux
+}
+
+func (h *handler) jobDetailPage(w http.ResponseWriter, r *http.Request) {
+	jobID, ok := platformJobID(w, r)
+	if !ok {
+		return
+	}
+	detail, err := h.dependencies.Jobs.GetJobDetail(r.Context(), jobID)
+	var rejection businessRejection
+	if errors.As(err, &rejection) && rejection.RejectionCode() == "platform_job_not_found" {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "无法读取岗位详情", http.StatusInternalServerError)
+		return
+	}
+	h.executePage(w, http.StatusOK, pageData{
+		Page:        "job-detail",
+		PageTitle:   detail.JobTitle,
+		State:       startupState{RunlogHealth: h.dependencies.Runlog.Health()},
+		Job:         &detail,
+		ReviewSaved: r.URL.Query().Get("reviewed") == "1",
+	})
+}
+
+func (h *handler) reviewJobPage(w http.ResponseWriter, r *http.Request) {
+	jobID, ok := platformJobID(w, r)
+	if !ok {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "人工复核内容无效", http.StatusBadRequest)
+		return
+	}
+	verdict := jobpool.HumanVerdict(r.PostFormValue("verdict"))
+	if verdict != jobpool.HumanVerdictSuitable && verdict != jobpool.HumanVerdictUnsuitable {
+		http.Error(w, "请选择适合或不适合", http.StatusBadRequest)
+		return
+	}
+	err := h.dependencies.Jobs.Review(r.Context(), []jobpool.ReviewDecision{{
+		JobID:          jobID,
+		ExpectedJDHash: r.PostFormValue("jdHash"),
+		Verdict:        verdict,
+		Note:           r.PostFormValue("note"),
+	}})
+	if err == nil {
+		//nolint:gosec // jobID is a validated positive integer and cannot supply a redirect host or path.
+		http.Redirect(w, r, fmt.Sprintf("/jobs/%d?reviewed=1", jobID), http.StatusSeeOther)
+		return
+	}
+	var rejection businessRejection
+	if errors.As(err, &rejection) {
+		http.Error(w, rejection.RejectionReason(), http.StatusConflict)
+		return
+	}
+	http.Error(w, "保存人工复核失败，请稍后重试", http.StatusInternalServerError)
+}
+
+func platformJobID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	jobID, err := strconv.ParseInt(r.PathValue("jobID"), 10, 64)
+	if err != nil || jobID <= 0 {
+		http.Error(w, "岗位编号无效", http.StatusBadRequest)
+		return 0, false
+	}
+	return jobID, true
 }
 
 func (h *handler) jobsState(ctx context.Context) (startupState, error) {

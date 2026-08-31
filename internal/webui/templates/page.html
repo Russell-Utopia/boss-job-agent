@@ -13,7 +13,7 @@
       <span>BOSS Job Agent</span>
     </a>
     <nav aria-label="主要导航">
-      <a href="/jobs" {{if eq .Page "jobs"}}class="active" aria-current="page"{{end}}>岗位</a>
+      <a href="/jobs" {{if or (eq .Page "jobs") (eq .Page "job-detail")}}class="active" aria-current="page"{{end}}>岗位</a>
       <a href="/assessments" {{if eq .Page "assessments"}}class="active" aria-current="page"{{end}}>岗位鉴定</a>
       <a href="/outreach" {{if eq .Page "outreach"}}class="active" aria-current="page"{{end}}>打招呼</a>
       <a href="/resume" {{if eq .Page "resume"}}class="active" aria-current="page"{{end}}>在线简历</a>
@@ -152,7 +152,7 @@
         <tbody>
           {{range .State.Jobs}}
           <tr>
-            <td><a href="{{.CanonicalURL}}">{{.JobTitle}}</a></td>
+            <td><a href="/jobs/{{.ID}}">{{.JobTitle}}</a></td>
             <td>{{.CompanyName}}</td>
             <td>{{.City}}</td>
             <td>{{.Salary}}</td>
@@ -161,6 +161,78 @@
           {{end}}
         </tbody>
       </table>
+    </section>
+    {{end}}
+    {{end}}
+
+    {{if eq .Page "job-detail"}}
+    {{with .Job}}
+    {{if $.ReviewSaved}}
+    <section class="card detail-card" role="status"><p class="muted">人工复核已保存。</p></section>
+    {{end}}
+    <section class="card detail-card">
+      <div class="detail-heading">
+        <div>
+          <p class="eyebrow">平台岗位详情</p>
+          <h2>{{.JobTitle}}</h2>
+          <p class="muted">{{.CompanyName}} · {{.City}} · {{.Salary}}</p>
+        </div>
+        <a href="{{.CanonicalURL}}" target="_blank" rel="noreferrer">在 BOSS 查看</a>
+      </div>
+      <dl class="detail-facts">
+        <div><dt>平台状态</dt><dd>{{platformStatusText .PlatformStatus}}</dd></div>
+        <div><dt>当前判断</dt><dd>{{currentJudgmentText .CurrentJudgment}}</dd></div>
+        <div><dt>人工结论</dt><dd>{{humanReviewStatusText .HumanReviewStatus}}</dd></div>
+      </dl>
+      {{if .PlatformClosedReason}}<p class="reason">{{.PlatformClosedReason}}</p>{{end}}
+      <div class="jd-grid">
+        <article><h3>完整工作职责</h3><p class="preserve-text">{{.Responsibilities}}</p></article>
+        <article><h3>完整任职要求</h3><p class="preserve-text">{{.Requirements}}</p></article>
+      </div>
+    </section>
+
+    <section class="detail-grid">
+      <article class="card">
+        <p class="eyebrow">AI 信息</p>
+        <h2>AI 结论：{{assessmentStatusText .AssessmentStatus}}</h2>
+        {{if .AssessmentReason}}<p class="preserve-text">{{.AssessmentReason}}</p>{{end}}
+        {{if .AssessmentEvidence}}<pre class="evidence">{{jsonText .AssessmentEvidence}}</pre>{{end}}
+        {{if .AssessmentInputs.ResumeVersion}}
+        <dl>
+          <div><dt>实际在线简历</dt><dd>在线简历 v{{.AssessmentInputs.ResumeVersion}}</dd></div>
+          <div><dt>实际鉴定策略</dt><dd>岗位鉴定策略 v{{.AssessmentInputs.PolicyVersion}}</dd></div>
+          <div><dt>实际鉴定器</dt><dd>鉴定器 v{{.AssessmentInputs.EvaluatorVersion}}</dd></div>
+        </dl>
+        {{else}}
+        <p class="muted">尚无 AI 鉴定实际输入版本。</p>
+        {{end}}
+      </article>
+
+      <article class="card">
+        <p class="eyebrow">当前人工复核</p>
+        <h2>{{humanReviewStatusText .HumanReviewStatus}}</h2>
+        {{if .HumanReviewNote}}<p class="preserve-text">{{.HumanReviewNote}}</p>{{end}}
+        {{if .SupervisionLabel}}
+        <p class="muted">当前结论可作为策略优化监督标注。</p>
+        {{else if eq .HumanReviewStatus "stale"}}
+        <p class="reason">旧人工结论依据的 JD 已变化，重新复核前不参与当前判断，也不能真实打招呼。</p>
+        {{end}}
+      </article>
+    </section>
+
+    <section class="card review-card">
+      <p class="eyebrow">人工复核</p>
+      <h2>请以当前完整 JD 为依据</h2>
+      <p class="muted">保存只更新人工结论，不调用模型、不修改 AI 结论，也不自动生成策略候选稿。</p>
+      <form method="post" action="/jobs/{{.ID}}/review">
+        <input type="hidden" name="jdHash" value="{{.JDHash}}">
+        <label for="review-note">可选说明</label>
+        <textarea id="review-note" name="note" rows="4" placeholder="记录判断依据（可选）">{{.HumanReviewNote}}</textarea>
+        <div class="review-actions">
+          <button type="submit" name="verdict" value="unsuitable" class="secondary-button">不适合</button>
+          <button type="submit" name="verdict" value="suitable">适合</button>
+        </div>
+      </form>
     </section>
     {{end}}
     {{end}}

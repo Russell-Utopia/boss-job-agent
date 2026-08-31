@@ -287,7 +287,7 @@ func TestPlatformClosureStopsClaimsAndReopeningRestoresUnchangedWork(t *testing.
 	job := mustObserve(t, pool, 1, observation)
 	resumeID, policyID := seedAssessmentInputs(t, db)
 	mustReview(t, pool, ReviewDecision{
-		JobID: job.ID, Verdict: HumanVerdictSuitable, ReviewedAt: time.UnixMilli(1500),
+		JobID: job.ID, Verdict: HumanVerdictSuitable,
 	})
 	assertBatchResult(t, mustQueueAssessments(t, pool, job.ID), 1, 0, "")
 	assertBatchResult(t, mustQueueOutreach(t, pool, OutreachAuthorization{
@@ -336,7 +336,7 @@ func TestJDChangeInvalidatesUncontactedAssessmentAndMakesHumanReviewStale(t *tes
 		Reason: "经验匹配", Evidence: json.RawMessage(`{"matched":true}`), CompletedAt: time.UnixMilli(2000),
 	}), 1, 0, "")
 	mustReview(t, pool, ReviewDecision{
-		JobID: job.ID, Verdict: HumanVerdictSuitable, ReviewedAt: time.UnixMilli(2500),
+		JobID: job.ID, Verdict: HumanVerdictSuitable,
 	})
 	assertBatchResult(t, mustQueueOutreach(t, pool, OutreachAuthorization{
 		GreetingText: "您好", TimeDescription: "全天可打招呼",
@@ -347,6 +347,14 @@ func TestJDChangeInvalidatesUncontactedAssessmentAndMakesHumanReviewStale(t *tes
 	changed.ObservedAt = time.UnixMilli(3000)
 	updated := mustObserve(t, pool, 2, changed)
 	assertInvalidatedJDChange(t, job, updated)
+	detail, err := pool.GetJobDetail(t.Context(), job.ID)
+	if err != nil {
+		t.Fatalf("get stale human review detail: %v", err)
+	}
+	if detail.HumanReviewStatus != HumanReviewStatusStale || detail.CurrentJudgment.Available ||
+		detail.CurrentJudgment.Code != "human_review_stale" || detail.SupervisionLabel != "" {
+		t.Errorf("stale review detail = %#v, want blocked current judgment and no supervision label", detail)
+	}
 }
 
 func TestJDChangeKeepsPendingAssessmentQueuedForTheLatestJD(t *testing.T) {
@@ -446,7 +454,7 @@ func TestContactedJobPreservesConclusionsAndRejectsLateOrRepeatedWork(t *testing
 		Reason: "经验匹配", Evidence: json.RawMessage(`{"matched":true}`), CompletedAt: time.UnixMilli(2000),
 	}), 1, 0, "")
 	mustReview(t, pool, ReviewDecision{
-		JobID: job.ID, Verdict: HumanVerdictSuitable, ReviewedAt: time.UnixMilli(2100),
+		JobID: job.ID, Verdict: HumanVerdictSuitable,
 	})
 	assertBatchResult(t, mustQueueOutreach(t, pool, OutreachAuthorization{
 		GreetingText: "您好", TimeDescription: "全天可打招呼",
@@ -494,7 +502,7 @@ func TestExpiredOutreachLeaseRequiresReconciliationInsteadOfResending(t *testing
 	pool, _ := openTestPool(t)
 	job := mustObserve(t, pool, 1, observedJob("boss-job-1"))
 	mustReview(t, pool, ReviewDecision{
-		JobID: job.ID, Verdict: HumanVerdictSuitable, ReviewedAt: time.UnixMilli(1500),
+		JobID: job.ID, Verdict: HumanVerdictSuitable,
 	})
 	if result := mustQueueOutreach(t, pool, OutreachAuthorization{
 		GreetingText: "您好", TimeDescription: "全天可打招呼",
@@ -534,7 +542,7 @@ func TestOutreachAutomaticRetryStopsAfterThreeAttempts(t *testing.T) {
 	pool, db := openTestPool(t)
 	job := mustObserve(t, pool, 1, observedJob("boss-job-1"))
 	mustReview(t, pool, ReviewDecision{
-		JobID: job.ID, Verdict: HumanVerdictSuitable, ReviewedAt: time.UnixMilli(1500),
+		JobID: job.ID, Verdict: HumanVerdictSuitable,
 	})
 	assertBatchResult(t, mustQueueOutreach(t, pool, OutreachAuthorization{
 		GreetingText: "您好", TimeDescription: "全天可打招呼",
@@ -597,7 +605,7 @@ func TestAutomaticAdmissionUsesCurrentEligibilityAndLimit(t *testing.T) {
 		job := mustObserve(t, pool, 1, observedJob(fmt.Sprintf("boss-job-%d", index)))
 		jobs = append(jobs, job)
 		mustReview(t, pool, ReviewDecision{
-			JobID: job.ID, Verdict: HumanVerdictSuitable, ReviewedAt: time.UnixMilli(1500),
+			JobID: job.ID, Verdict: HumanVerdictSuitable,
 		})
 	}
 	closed := observedJob("boss-job-3")
@@ -655,7 +663,7 @@ func TestManualRetriesAcceptFailuresButNeverPossiblyContactedWork(t *testing.T) 
 
 	outreachJob := mustObserve(t, pool, 1, observedJob("boss-job-outreach"))
 	mustReview(t, pool, ReviewDecision{
-		JobID: outreachJob.ID, Verdict: HumanVerdictSuitable, ReviewedAt: time.UnixMilli(1500),
+		JobID: outreachJob.ID, Verdict: HumanVerdictSuitable,
 	})
 	assertBatchResult(t, mustQueueOutreach(t, pool, OutreachAuthorization{
 		GreetingText: "您好", TimeDescription: "全天可打招呼",
@@ -689,7 +697,7 @@ func TestInvalidBusinessCombinationsAreRejectedWithoutMutation(t *testing.T) {
 	pool, _ := openTestPool(t)
 	job := mustObserve(t, pool, 1, observedJob("boss-job-1"))
 	if err := pool.Review(t.Context(), []ReviewDecision{{
-		JobID: job.ID, Verdict: "maybe", ReviewedAt: time.UnixMilli(2000),
+		JobID: job.ID, Verdict: "maybe",
 	}}); err == nil {
 		t.Fatal("invalid human verdict succeeded")
 	}
@@ -761,8 +769,20 @@ func mustGetJob(t *testing.T, pool *Pool, jobID int64) JobView {
 	return job
 }
 
+func mustGetJobDetail(t *testing.T, pool *Pool, jobID int64) JobDetailView {
+	t.Helper()
+	detail, err := pool.GetJobDetail(t.Context(), jobID)
+	if err != nil {
+		t.Fatalf("get platform job detail: %v", err)
+	}
+	return detail
+}
+
 func mustReview(t *testing.T, pool *Pool, decision ReviewDecision) {
 	t.Helper()
+	if decision.ExpectedJDHash == "" {
+		decision.ExpectedJDHash = mustGetJob(t, pool, decision.JobID).JDHash
+	}
 	if err := pool.Review(t.Context(), []ReviewDecision{decision}); err != nil {
 		t.Fatalf("review platform job: %v", err)
 	}
@@ -1124,10 +1144,9 @@ func TestReviewAtomicallyControlsPendingOutreachEligibility(t *testing.T) {
 	assertBatchResult(t, result, 0, 1, "suitable_judgment_required")
 
 	mustReview(t, pool, ReviewDecision{
-		JobID:      job.ID,
-		Verdict:    HumanVerdictSuitable,
-		Note:       "经验匹配",
-		ReviewedAt: time.UnixMilli(2000),
+		JobID:   job.ID,
+		Verdict: HumanVerdictSuitable,
+		Note:    "经验匹配",
 	})
 	reviewed := mustGetJob(t, pool, job.ID)
 	assertOutreachAllowed(t, reviewed)
@@ -1141,10 +1160,253 @@ func TestReviewAtomicallyControlsPendingOutreachEligibility(t *testing.T) {
 	assertQueuedReviewedOutreach(t, queued, "您好，想和您聊聊这个岗位")
 
 	mustReview(t, pool, ReviewDecision{
-		JobID:      job.ID,
-		Verdict:    HumanVerdictUnsuitable,
-		ReviewedAt: time.UnixMilli(3000),
+		JobID:   job.ID,
+		Verdict: HumanVerdictUnsuitable,
 	})
 	withdrawn := mustGetJob(t, pool, job.ID)
 	assertWithdrawnOutreach(t, withdrawn)
+}
+
+func TestReviewDoesNotRollbackOutreachAlreadyClaimedByAWorker(t *testing.T) {
+	t.Parallel()
+
+	pool, _ := openTestPool(t)
+	job := mustObserve(t, pool, 1, observedJob("boss-job-claimed-outreach"))
+	mustReview(t, pool, ReviewDecision{
+		JobID: job.ID, Verdict: HumanVerdictSuitable,
+	})
+	assertBatchResult(t, mustQueueOutreach(t, pool, OutreachAuthorization{
+		GreetingText: "您好", TimeDescription: "全天可打招呼",
+	}, job.ID), 1, 0, "")
+	work := mustClaimOutreach(t, pool, OutreachClaim{
+		Worker: "outreach-worker", Limit: 1,
+		ClaimedAt: time.UnixMilli(2000), LeaseUntil: time.UnixMilli(3000),
+	})
+	requireOutreachWork(t, work, job.ID, 1)
+
+	mustReview(t, pool, ReviewDecision{
+		JobID: job.ID, Verdict: HumanVerdictUnsuitable,
+	})
+	current := mustGetJob(t, pool, job.ID)
+	if current.HumanVerdict != HumanVerdictUnsuitable || current.OutreachStatus != OutreachStatusProcessing ||
+		current.OutreachLeaseOwner != "outreach-worker" {
+		t.Errorf("claimed outreach after unsuitable review = %#v, want external-effect state preserved", current)
+	}
+}
+
+func TestJobDetailUsesTheLatestHumanReviewAsCurrentJudgmentAndSupervision(t *testing.T) {
+	t.Parallel()
+
+	pool, db := openTestPool(t)
+	job := mustObserve(t, pool, 1, observedJob("boss-job-1"))
+	resumeID, policyID := seedAssessmentInputs(t, db)
+	assertBatchResult(t, mustQueueAssessments(t, pool, job.ID), 1, 0, "")
+	work := mustClaimAssessments(t, pool, AssessmentClaim{
+		Worker: "assessment-worker", ResumeVersionID: resumeID, PolicyVersionID: policyID,
+		EvaluatorVersion: 7, Limit: 1, ClaimedAt: time.UnixMilli(1500), LeaseUntil: time.UnixMilli(2500),
+	})
+	assertBatchResult(t, mustFinishAssessments(t, pool, AssessmentOutcome{
+		JobID: job.ID, AttemptNo: work[0].AttemptNo, Status: AssessmentStatusUnsuitable,
+		Reason: "缺少高并发经验", Evidence: json.RawMessage(`{"missing":["高并发"]}`),
+		CompletedAt: time.UnixMilli(2000),
+	}), 1, 0, "")
+
+	reviewedAt := time.UnixMilli(3000)
+	pool.now = func() time.Time { return reviewedAt }
+	mustReview(t, pool, ReviewDecision{
+		JobID: job.ID, Verdict: HumanVerdictSuitable, Note: "项目经历可以覆盖",
+	})
+	detail := mustGetJobDetail(t, pool, job.ID)
+	assertAssessmentInputVersions(t, detail.AssessmentInputs, 1, 1, 7)
+	assertCurrentHumanJudgment(t, detail, HumanVerdictSuitable)
+
+	reviewedAt = time.UnixMilli(4000)
+	mustReview(t, pool, ReviewDecision{
+		JobID: job.ID, Verdict: HumanVerdictUnsuitable, Note: "重新核对后不匹配",
+	})
+	detail = mustGetJobDetail(t, pool, job.ID)
+	assertLatestHumanReview(t, detail, HumanVerdictUnsuitable, "重新核对后不匹配", reviewedAt)
+}
+
+func assertAssessmentInputVersions(
+	t *testing.T,
+	inputs AssessmentInputVersions,
+	resumeVersion, policyVersion, evaluatorVersion int64,
+) {
+	t.Helper()
+	if inputs.ResumeVersion != resumeVersion || inputs.PolicyVersion != policyVersion ||
+		inputs.EvaluatorVersion != evaluatorVersion {
+		t.Errorf(
+			"assessment inputs = %#v, want resume v%d, policy v%d, evaluator v%d",
+			inputs, resumeVersion, policyVersion, evaluatorVersion,
+		)
+	}
+}
+
+func assertCurrentHumanJudgment(t *testing.T, detail JobDetailView, verdict HumanVerdict) {
+	t.Helper()
+	if !detail.CurrentJudgment.Available || detail.CurrentJudgment.Source != JudgmentSourceHuman ||
+		detail.CurrentJudgment.Verdict != JudgmentVerdict(verdict) {
+		t.Errorf("current judgment = %#v, want current %s human judgment", detail.CurrentJudgment, verdict)
+	}
+	if detail.SupervisionLabel != verdict {
+		t.Errorf("supervision label = %q, want %q", detail.SupervisionLabel, verdict)
+	}
+}
+
+func assertLatestHumanReview(
+	t *testing.T,
+	detail JobDetailView,
+	verdict HumanVerdict,
+	note string,
+	reviewedAt time.Time,
+) {
+	t.Helper()
+	if detail.HumanVerdict != verdict || detail.HumanReviewNote != note ||
+		detail.HumanReviewedAt == nil || !detail.HumanReviewedAt.Equal(reviewedAt) {
+		t.Errorf("latest human review = %#v, want %q with the latest note and time", detail.JobView, verdict)
+	}
+	if detail.SupervisionLabel != verdict {
+		t.Errorf("latest supervision label = %q, want %q", detail.SupervisionLabel, verdict)
+	}
+}
+
+func TestReviewAllowsEveryAIStateWithoutStartingAnotherAssessment(t *testing.T) {
+	t.Parallel()
+
+	pool, db := openTestPool(t)
+	resumeID, policyID := seedAssessmentInputs(t, db)
+	tests := []struct {
+		name   string
+		status AssessmentStatus
+	}{
+		{name: "without AI conclusion", status: AssessmentStatusNotQueued},
+		{name: "AI suitable", status: AssessmentStatusSuitable},
+		{name: "AI unsuitable", status: AssessmentStatusUnsuitable},
+		{name: "AI needs confirmation", status: AssessmentStatusNeedsUserConfirmation},
+	}
+
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			job := mustObserve(t, pool, int64(index+1), observedJob(fmt.Sprintf("boss-job-review-%d", index)))
+			if test.status != AssessmentStatusNotQueued {
+				assertBatchResult(t, mustQueueAssessments(t, pool, job.ID), 1, 0, "")
+				work := mustClaimAssessments(t, pool, AssessmentClaim{
+					Worker: fmt.Sprintf("assessment-worker-%d", index), ResumeVersionID: resumeID,
+					PolicyVersionID: policyID, EvaluatorVersion: 1, Limit: 1,
+					ClaimedAt:  time.UnixMilli(int64(2000 + index*1000)),
+					LeaseUntil: time.UnixMilli(int64(2500 + index*1000)),
+				})
+				assertBatchResult(t, mustFinishAssessments(t, pool, AssessmentOutcome{
+					JobID: job.ID, AttemptNo: work[0].AttemptNo, Status: test.status,
+					Reason: "AI 原结论", Evidence: json.RawMessage(`{"source":"ai"}`),
+					CompletedAt: time.UnixMilli(int64(2200 + index*1000)),
+				}), 1, 0, "")
+			}
+
+			before := mustGetJob(t, pool, job.ID)
+			mustReview(t, pool, ReviewDecision{
+				JobID: job.ID, Verdict: HumanVerdictSuitable,
+			})
+			after := mustGetJob(t, pool, job.ID)
+			if after.HumanVerdict != HumanVerdictSuitable {
+				t.Errorf("human verdict = %q, want suitable", after.HumanVerdict)
+			}
+			if after.AssessmentStatus != before.AssessmentStatus || after.AssessmentAttemptNo != before.AssessmentAttemptNo ||
+				after.AssessmentReason != before.AssessmentReason {
+				t.Errorf("assessment changed during review: before=%#v after=%#v", before, after)
+			}
+		})
+	}
+}
+
+func TestReviewAndOutreachClaimLeaveOnlyAnAtomicEligibilityOutcome(t *testing.T) {
+	t.Parallel()
+
+	pool, _ := openTestPool(t)
+	job := mustObserve(t, pool, 1, observedJob("boss-job-concurrent-review"))
+	mustReview(t, pool, ReviewDecision{
+		JobID: job.ID, Verdict: HumanVerdictSuitable,
+	})
+	assertBatchResult(t, mustQueueOutreach(t, pool, OutreachAuthorization{
+		GreetingText: "您好", TimeDescription: "全天可打招呼",
+	}, job.ID), 1, 0, "")
+
+	start := make(chan struct{})
+	reviewError := make(chan error, 1)
+	claimResult := make(chan []OutreachWork, 1)
+	claimError := make(chan error, 1)
+	go func() {
+		<-start
+		reviewError <- pool.Review(t.Context(), []ReviewDecision{{
+			JobID: job.ID, ExpectedJDHash: job.JDHash,
+			Verdict: HumanVerdictUnsuitable,
+		}})
+	}()
+	go func() {
+		<-start
+		work, err := pool.ClaimOutreach(t.Context(), OutreachClaim{
+			Worker: "outreach-worker", Limit: 1,
+			ClaimedAt: time.UnixMilli(2000), LeaseUntil: time.UnixMilli(3000),
+		})
+		claimResult <- work
+		claimError <- err
+	}()
+	close(start)
+
+	if err := <-reviewError; err != nil {
+		t.Fatalf("concurrent review: %v", err)
+	}
+	work := <-claimResult
+	if err := <-claimError; err != nil {
+		t.Fatalf("concurrent outreach claim: %v", err)
+	}
+	current := mustGetJob(t, pool, job.ID)
+	if current.HumanVerdict != HumanVerdictUnsuitable {
+		t.Fatalf("human verdict = %q, want unsuitable", current.HumanVerdict)
+	}
+	assertConcurrentReviewOutcome(t, current, work)
+}
+
+func assertConcurrentReviewOutcome(t *testing.T, current JobView, work []OutreachWork) {
+	t.Helper()
+	switch len(work) {
+	case 0:
+		if current.OutreachStatus != OutreachStatusNotQueued || current.OutreachLeaseOwner != "" {
+			t.Errorf("unclaimed unsuitable outreach = %#v, want atomically withdrawn", current)
+		}
+	case 1:
+		if current.OutreachStatus != OutreachStatusProcessing || current.OutreachLeaseOwner != "outreach-worker" {
+			t.Errorf("claimed outreach after unsuitable review = %#v, want in-flight work preserved", current)
+		}
+	default:
+		t.Fatalf("claimed work count = %d, want 0 or 1", len(work))
+	}
+}
+
+func TestReviewRejectsWhenTheJDSinceShownHasChanged(t *testing.T) {
+	t.Parallel()
+
+	pool, _ := openTestPool(t)
+	original := mustObserve(t, pool, 1, observedJob("boss-job-stale-review-submit"))
+	changed := observedJob("boss-job-stale-review-submit")
+	changed.Requirements = "熟悉 Go、SQLite 与分布式事务"
+	changed.ObservedAt = time.UnixMilli(2000)
+	mustObserve(t, pool, 2, changed)
+
+	err := pool.Review(t.Context(), []ReviewDecision{{
+		JobID: original.ID, ExpectedJDHash: original.JDHash,
+		Verdict: HumanVerdictSuitable,
+	}})
+	var rejection *Rejection
+	if !errors.As(err, &rejection) {
+		t.Fatalf("stale review error = %v, want business rejection", err)
+	}
+	if rejection.Code != "platform_job_changed" {
+		t.Errorf("stale review rejection = %#v, want platform_job_changed", rejection)
+	}
+	current := mustGetJob(t, pool, original.ID)
+	if current.HumanVerdict != "" || current.HumanReviewedJDHash != "" {
+		t.Errorf("stale review changed current job: %#v", current)
+	}
 }

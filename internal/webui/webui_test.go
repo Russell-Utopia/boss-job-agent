@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,6 +84,101 @@ func webResumeContent(role string) onlineresume.ResumeContent {
 		ProjectExperiences: []string{"招聘助手"},
 		Educations:         []string{"某大学｜计算机本科"},
 		Skills:             []string{"Go", "SQLite"},
+	}
+}
+
+func mustObserveWebJob(t *testing.T, pool *jobpool.Pool, observation jobpool.Observation) jobpool.JobView {
+	t.Helper()
+	job, err := pool.Observe(t.Context(), 1, observation)
+	if err != nil {
+		t.Fatalf("observe web job: %v", err)
+	}
+	return job
+}
+
+func seedWebAssessmentInputs(t *testing.T, db *sql.DB, resumeVersion, policyVersion int64) (int64, int64) {
+	t.Helper()
+	resumeResult, err := db.ExecContext(t.Context(), `
+		INSERT INTO online_resume_versions (
+			version_no, resume_json, resume_hash, is_current, created_at
+		) VALUES (?, '{"jobIntentions":[]}', ?, 0, 1000)
+	`, resumeVersion, fmt.Sprintf("resume-v%d", resumeVersion))
+	if err != nil {
+		t.Fatalf("seed assessment online resume: %v", err)
+	}
+	resumeID, err := resumeResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("read assessment online resume ID: %v", err)
+	}
+	policyResult, err := db.ExecContext(t.Context(), `
+		INSERT INTO assessment_policy_versions (
+			version_no, rules_json, is_active, created_at
+		) VALUES (?, '{"rules":["match"]}', 0, 1000)
+	`, policyVersion)
+	if err != nil {
+		t.Fatalf("seed assessment policy: %v", err)
+	}
+	policyID, err := policyResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("read assessment policy ID: %v", err)
+	}
+	return resumeID, policyID
+}
+
+func mustCompleteWebAssessment(
+	t *testing.T,
+	runtime *testWeb,
+	job jobpool.JobView,
+	resumeVersion, policyVersion, evaluatorVersion int64,
+	status jobpool.AssessmentStatus,
+	reason string,
+	evidence json.RawMessage,
+) {
+	t.Helper()
+	resumeID, policyID := seedWebAssessmentInputs(t, runtime.db, resumeVersion, policyVersion)
+	queueResult, err := runtime.pool.QueueAssessments(t.Context(), []int64{job.ID})
+	if err != nil || queueResult.Succeeded != 1 {
+		t.Fatalf("queue assessment: result=%#v err=%v", queueResult, err)
+	}
+	work, err := runtime.pool.ClaimAssessments(t.Context(), jobpool.AssessmentClaim{
+		Worker: "assessment-worker", ResumeVersionID: resumeID, PolicyVersionID: policyID,
+		EvaluatorVersion: evaluatorVersion, Limit: 1,
+		ClaimedAt: time.UnixMilli(1500), LeaseUntil: time.UnixMilli(2500),
+	})
+	if err != nil || len(work) != 1 {
+		t.Fatalf("claim assessment: work=%#v err=%v", work, err)
+	}
+	finishResult, err := runtime.pool.FinishAssessments(t.Context(), []jobpool.AssessmentOutcome{{
+		JobID: job.ID, AttemptNo: work[0].AttemptNo, Status: status,
+		Reason: reason, Evidence: evidence, CompletedAt: time.UnixMilli(2000),
+	}})
+	if err != nil || finishResult.Succeeded != 1 {
+		t.Fatalf("finish assessment: result=%#v err=%v", finishResult, err)
+	}
+}
+
+func mustGetWebJobDetail(t *testing.T, runtime *testWeb, jobID int64) jobpool.JobDetailView {
+	t.Helper()
+	detail, err := runtime.pool.GetJobDetail(t.Context(), jobID)
+	if err != nil {
+		t.Fatalf("get reviewed job detail: %v", err)
+	}
+	return detail
+}
+
+func assertReviewRedirect(t *testing.T, response *http.Response, jobID int64) {
+	t.Helper()
+	wantLocation := fmt.Sprintf("/jobs/%d?reviewed=1", jobID)
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != wantLocation {
+		t.Fatalf("review response = %d location %q, want 303 to %q", response.StatusCode, response.Header.Get("Location"), wantLocation)
+	}
+}
+
+func assertAssessmentUnchangedByReview(t *testing.T, detail jobpool.JobDetailView) {
+	t.Helper()
+	if detail.AssessmentAttemptNo != 1 || detail.AssessmentStatus != jobpool.AssessmentStatusUnsuitable ||
+		detail.AssessmentReason != "缺少明确的高并发证据" {
+		t.Errorf("assessment changed during human review: %#v", detail.JobView)
 	}
 }
 
@@ -300,6 +396,93 @@ func TestJobsPageDisplaysDiscoveryInputsProgressSettingsHintsAndGlobalJobs(t *te
 	})
 }
 
+func TestJobDetailShowsCompleteAssessmentInputsAndReviewDoesNotStartAnotherAssessment(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	job := mustObserveWebJob(t, runtime.pool, jobpool.Observation{
+		PlatformJobID: "boss-job-review", CanonicalURL: "https://www.zhipin.com/job_detail/boss-job-review.html",
+		JobTitle: "Go 平台工程师", CompanyName: "示例科技", City: "福州", Salary: "25-35K",
+		Responsibilities: "负责高并发 Go 服务\n维护关键链路",
+		Requirements:     "熟悉 Go、SQLite\n有可观测性经验",
+		PlatformStatus:   jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
+	})
+	mustCompleteWebAssessment(
+		t, runtime, job, 3, 4, 9, jobpool.AssessmentStatusUnsuitable,
+		"缺少明确的高并发证据", json.RawMessage(`{"missing":["高并发"]}`),
+	)
+
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	detailURL := fmt.Sprintf("%s/jobs/%d", server.URL, job.ID)
+	assertPageContains(t, server.Client(), detailURL, []string{
+		"Go 平台工程师", "示例科技", "福州", "25-35K",
+		"负责高并发 Go 服务", "维护关键链路", "熟悉 Go、SQLite", "有可观测性经验",
+		"AI 结论", "不适合", "缺少明确的高并发证据", "高并发",
+		"在线简历 v3", "岗位鉴定策略 v4", "鉴定器 v9",
+		`action="/jobs/1/review"`, "适合", "不适合", "可选说明",
+	})
+
+	client := server.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response := postFormResponse(t, client, detailURL+"/review", url.Values{
+		"verdict": {"suitable"},
+		"note":    {"项目经历可以覆盖"},
+		"jdHash":  {job.JDHash},
+	})
+	defer closeResponseBody(t, response.Body)
+	assertReviewRedirect(t, response, job.ID)
+
+	detail := mustGetWebJobDetail(t, runtime, job.ID)
+	if detail.HumanVerdict != jobpool.HumanVerdictSuitable || detail.HumanReviewNote != "项目经历可以覆盖" {
+		t.Errorf("human review = %#v, want suitable with note", detail.JobView)
+	}
+	assertAssessmentUnchangedByReview(t, detail)
+	assertPageContains(t, server.Client(), detailURL+"?reviewed=1", []string{
+		"人工复核已保存", "当前判断", "人工复核 · 适合", "可作为策略优化监督标注",
+	})
+}
+
+func TestJobReviewPageRejectsAReviewBasedOnAStaleJD(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	originalObservation := jobpool.Observation{
+		PlatformJobID: "boss-job-stale-web-review", CanonicalURL: "https://www.zhipin.com/job_detail/stale.html",
+		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
+	}
+	original := mustObserveWebJob(t, runtime.pool, originalObservation)
+	changed := originalObservation
+	changed.Requirements = "熟悉 Go、SQLite 与分布式事务"
+	changed.ObservedAt = time.UnixMilli(2000)
+	if _, err := runtime.pool.Observe(t.Context(), 2, changed); err != nil {
+		t.Fatalf("observe changed JD: %v", err)
+	}
+
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	response := postFormResponse(t, server.Client(), fmt.Sprintf("%s/jobs/%d/review", server.URL, original.ID), url.Values{
+		"verdict": {"suitable"},
+		"jdHash":  {original.JDHash},
+	})
+	body := readResponseBody(t, response)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("stale review status = %d, want 409; body=%s", response.StatusCode, body)
+	}
+	assertTextContains(t, body, []string{"JD 已变化", "重新查看完整岗位后再复核"})
+	current, err := runtime.pool.GetJobDetail(t.Context(), original.ID)
+	if err != nil {
+		t.Fatalf("get job after stale review: %v", err)
+	}
+	if current.HumanReviewStatus != jobpool.HumanReviewStatusUnreviewed || current.SupervisionLabel != "" {
+		t.Errorf("stale web review changed current job: %#v", current)
+	}
+}
+
 func TestJobsPageContinuesAndEndsTheSameDiscoveryRun(t *testing.T) {
 	t.Parallel()
 
@@ -496,7 +679,8 @@ func TestRealOutreachCommandReturnsPerJobBatchResult(t *testing.T) {
 		t.Fatalf("observe outreach job: %v", err)
 	}
 	if err := runtime.pool.Review(t.Context(), []jobpool.ReviewDecision{{
-		JobID: job.ID, Verdict: jobpool.HumanVerdictSuitable, ReviewedAt: time.UnixMilli(2000),
+		JobID: job.ID, ExpectedJDHash: job.JDHash,
+		Verdict: jobpool.HumanVerdictSuitable,
 	}}); err != nil {
 		t.Fatalf("review outreach job: %v", err)
 	}
@@ -695,9 +879,13 @@ func assertTextContains(t *testing.T, text string, wants []string) {
 	}
 }
 
-func postFormResponse(t *testing.T, client *http.Client, url string) *http.Response {
+func postFormResponse(t *testing.T, client *http.Client, target string, values ...url.Values) *http.Response {
 	t.Helper()
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, strings.NewReader(""))
+	encoded := ""
+	if len(values) > 0 {
+		encoded = values[0].Encode()
+	}
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, target, strings.NewReader(encoded))
 	if err != nil {
 		t.Fatalf("create form request: %v", err)
 	}

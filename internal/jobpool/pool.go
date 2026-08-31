@@ -18,6 +18,7 @@ import (
 type Pool struct {
 	db      *sql.DB
 	queries *sqlitedb.Queries
+	now     func() time.Time
 }
 
 const unattendedAttemptLimit int64 = 3
@@ -126,11 +127,56 @@ type JobView struct {
 	LastSeenAt           time.Time
 }
 
+type AssessmentInputVersions struct {
+	ResumeVersion    int64
+	PolicyVersion    int64
+	EvaluatorVersion int64
+}
+
+type JudgmentSource string
+
+const (
+	JudgmentSourceAI    JudgmentSource = "ai"
+	JudgmentSourceHuman JudgmentSource = "human"
+)
+
+type JudgmentVerdict string
+
+const (
+	JudgmentVerdictSuitable   JudgmentVerdict = "suitable"
+	JudgmentVerdictUnsuitable JudgmentVerdict = "unsuitable"
+)
+
+type HumanReviewStatus string
+
+const (
+	HumanReviewStatusUnreviewed HumanReviewStatus = "unreviewed"
+	HumanReviewStatusSuitable   HumanReviewStatus = "suitable"
+	HumanReviewStatusUnsuitable HumanReviewStatus = "unsuitable"
+	HumanReviewStatusStale      HumanReviewStatus = "stale"
+)
+
+type CurrentJudgment struct {
+	Available bool
+	Verdict   JudgmentVerdict
+	Source    JudgmentSource
+	Code      string
+	Reason    string
+}
+
+type JobDetailView struct {
+	JobView
+	AssessmentInputs  AssessmentInputVersions
+	CurrentJudgment   CurrentJudgment
+	HumanReviewStatus HumanReviewStatus
+	SupervisionLabel  HumanVerdict
+}
+
 type ReviewDecision struct {
-	JobID      int64
-	Verdict    HumanVerdict
-	Note       string
-	ReviewedAt time.Time
+	JobID          int64
+	ExpectedJDHash string
+	Verdict        HumanVerdict
+	Note           string
 }
 
 type SkippedAction struct {
@@ -245,7 +291,11 @@ func (r *Rejection) RejectionReason() string {
 }
 
 func New(db *sql.DB) *Pool {
-	return &Pool{db: db, queries: sqlitedb.New(db)}
+	return newPool(db, time.Now)
+}
+
+func newPool(db *sql.DB, now func() time.Time) *Pool {
+	return &Pool{db: db, queries: sqlitedb.New(db), now: now}
 }
 
 func (p *Pool) Observe(ctx context.Context, runID int64, observation Observation) (JobView, error) {
@@ -304,6 +354,97 @@ func (p *Pool) GetJob(ctx context.Context, jobID int64) (JobView, error) {
 		return JobView{}, fmt.Errorf("get platform job %d: %w", jobID, err)
 	}
 	return jobViewFromPlatformRow(row)
+}
+
+func (p *Pool) GetJobDetail(ctx context.Context, jobID int64) (JobDetailView, error) {
+	transaction, err := p.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return JobDetailView{}, fmt.Errorf("get platform job %d detail: begin transaction: %w", jobID, err)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	queries := p.queries.WithTx(transaction)
+	row, err := queries.GetPlatformJob(ctx, jobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return JobDetailView{}, &Rejection{Code: "platform_job_not_found", Reason: "岗位不存在"}
+	}
+	if err != nil {
+		return JobDetailView{}, fmt.Errorf("get platform job %d: %w", jobID, err)
+	}
+	job, err := jobViewFromPlatformRow(row)
+	if err != nil {
+		return JobDetailView{}, err
+	}
+	versions, err := queries.GetAssessmentInputVersions(ctx, jobID)
+	if err != nil {
+		return JobDetailView{}, fmt.Errorf("get platform job %d assessment inputs: %w", jobID, err)
+	}
+	review := classifyHumanReview(job)
+	detail := JobDetailView{
+		JobView: job,
+		AssessmentInputs: AssessmentInputVersions{
+			ResumeVersion:    versions.ResumeVersion.Int64,
+			PolicyVersion:    versions.PolicyVersion.Int64,
+			EvaluatorVersion: versions.EvaluatorVersion.Int64,
+		},
+		CurrentJudgment:   currentJudgment(job, review),
+		HumanReviewStatus: review.status,
+	}
+	if review.valid {
+		detail.SupervisionLabel = job.HumanVerdict
+	}
+	if err := transaction.Commit(); err != nil {
+		return JobDetailView{}, fmt.Errorf("get platform job %d detail: commit transaction: %w", jobID, err)
+	}
+	return detail, nil
+}
+
+type humanReviewClassification struct {
+	status HumanReviewStatus
+	valid  bool
+}
+
+func classifyHumanReview(job JobView) humanReviewClassification {
+	if job.HumanVerdict == "" {
+		return humanReviewClassification{status: HumanReviewStatusUnreviewed}
+	}
+	if job.HumanReviewedJDHash != job.JDHash {
+		return humanReviewClassification{status: HumanReviewStatusStale}
+	}
+	if job.HumanVerdict == HumanVerdictSuitable {
+		return humanReviewClassification{status: HumanReviewStatusSuitable, valid: true}
+	}
+	return humanReviewClassification{status: HumanReviewStatusUnsuitable, valid: true}
+}
+
+func currentJudgment(job JobView, review humanReviewClassification) CurrentJudgment {
+	if review.status != HumanReviewStatusUnreviewed {
+		if review.status == HumanReviewStatusStale {
+			return CurrentJudgment{
+				Source: JudgmentSourceHuman,
+				Code:   "human_review_stale",
+				Reason: "JD 已变化，请先重新人工复核",
+			}
+		}
+		return CurrentJudgment{
+			Available: true,
+			Verdict:   JudgmentVerdict(job.HumanVerdict),
+			Source:    JudgmentSourceHuman,
+		}
+	}
+	switch job.AssessmentStatus {
+	case AssessmentStatusSuitable:
+		return CurrentJudgment{Available: true, Verdict: JudgmentVerdictSuitable, Source: JudgmentSourceAI}
+	case AssessmentStatusUnsuitable:
+		return CurrentJudgment{Available: true, Verdict: JudgmentVerdictUnsuitable, Source: JudgmentSourceAI}
+	case AssessmentStatusNeedsUserConfirmation:
+		return CurrentJudgment{
+			Source: JudgmentSourceAI,
+			Code:   "user_confirmation_required",
+			Reason: "AI 无法可靠判断，请人工复核",
+		}
+	default:
+		return CurrentJudgment{Code: "current_judgment_missing", Reason: "岗位尚无当前判断"}
+	}
 }
 
 type judgmentContent struct {
@@ -497,6 +638,13 @@ func timePointer(value sql.NullInt64) *time.Time {
 }
 
 func (p *Pool) Review(ctx context.Context, decisions []ReviewDecision) error {
+	if err := validateReviewDecisions(decisions); err != nil {
+		return err
+	}
+	reviewedAt := p.now()
+	if reviewedAt.IsZero() {
+		return fmt.Errorf("review platform jobs: current time is required")
+	}
 	transaction, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("review platform jobs: begin transaction: %w", err)
@@ -504,27 +652,56 @@ func (p *Pool) Review(ctx context.Context, decisions []ReviewDecision) error {
 	defer func() { _ = transaction.Rollback() }()
 	queries := p.queries.WithTx(transaction)
 	for _, decision := range decisions {
-		if err := validateReviewDecision(decision); err != nil {
+		if err := reviewPlatformJob(ctx, queries, decision, reviewedAt); err != nil {
 			return err
-		}
-		_, err := queries.ReviewPlatformJob(ctx, sqlitedb.ReviewPlatformJobParams{
-			HumanVerdict: sql.NullString{String: string(decision.Verdict), Valid: true},
-			ReviewedAt:   sql.NullInt64{Int64: decision.ReviewedAt.UnixMilli(), Valid: true},
-			ReviewNote:   nullableText(decision.Note),
-			UpdatedAt:    decision.ReviewedAt.UnixMilli(),
-			JobID:        decision.JobID,
-		})
-		if errors.Is(err, sql.ErrNoRows) {
-			return &Rejection{Code: "platform_job_not_found", Reason: "岗位不存在或已发生变化"}
-		}
-		if err != nil {
-			return fmt.Errorf("review platform job %d: %w", decision.JobID, err)
 		}
 	}
 	if err := transaction.Commit(); err != nil {
 		return fmt.Errorf("review platform jobs: commit transaction: %w", err)
 	}
 	return nil
+}
+
+func validateReviewDecisions(decisions []ReviewDecision) error {
+	for _, decision := range decisions {
+		if err := validateReviewDecision(decision); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func reviewPlatformJob(
+	ctx context.Context,
+	queries *sqlitedb.Queries,
+	decision ReviewDecision,
+	reviewedAt time.Time,
+) error {
+	_, err := queries.ReviewPlatformJob(ctx, sqlitedb.ReviewPlatformJobParams{
+		HumanVerdict:   sql.NullString{String: string(decision.Verdict), Valid: true},
+		ReviewedAt:     sql.NullInt64{Int64: reviewedAt.UnixMilli(), Valid: true},
+		ReviewNote:     nullableText(decision.Note),
+		UpdatedAt:      reviewedAt.UnixMilli(),
+		JobID:          decision.JobID,
+		ExpectedJdHash: decision.ExpectedJDHash,
+	})
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("review platform job %d: %w", decision.JobID, err)
+	}
+	current, currentErr := queries.GetPlatformJob(ctx, decision.JobID)
+	if errors.Is(currentErr, sql.ErrNoRows) {
+		return &Rejection{Code: "platform_job_not_found", Reason: "岗位不存在"}
+	}
+	if currentErr != nil {
+		return fmt.Errorf("recheck reviewed platform job %d: %w", decision.JobID, currentErr)
+	}
+	if current.JdHash != decision.ExpectedJDHash {
+		return &Rejection{Code: "platform_job_changed", Reason: "JD 已变化，请重新查看完整岗位后再复核"}
+	}
+	return fmt.Errorf("review platform job %d: update rejected", decision.JobID)
 }
 
 func validateReviewDecision(decision ReviewDecision) error {
@@ -534,8 +711,8 @@ func validateReviewDecision(decision ReviewDecision) error {
 	if decision.Verdict != HumanVerdictSuitable && decision.Verdict != HumanVerdictUnsuitable {
 		return fmt.Errorf("review platform job %d: verdict must be suitable or unsuitable", decision.JobID)
 	}
-	if decision.ReviewedAt.IsZero() {
-		return fmt.Errorf("review platform job %d: review time is required", decision.JobID)
+	if decision.ExpectedJDHash == "" {
+		return fmt.Errorf("review platform job %d: expected JD hash is required", decision.JobID)
 	}
 	return nil
 }

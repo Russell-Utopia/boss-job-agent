@@ -64,7 +64,7 @@ Run(ctx)                         // 只由后台进程启动
 
 ```text
 Observe(ctx, runID, observation) -> JobView
-Review(ctx, decisions)
+Review(ctx, decisions[jobID, expectedJDHash, verdict, note])
 QueueAssessments(ctx, jobIDs) -> BatchActionResult
 QueueAuthorizedOutreach(ctx, jobIDs, authorization) -> BatchActionResult
 RetryAssessmentFailures(ctx, jobIDs) -> BatchActionResult
@@ -80,9 +80,10 @@ FinishOutreach(ctx, outcomes)
 GetActiveDiscovery(ctx) -> DiscoveryRunView?
 ListJobs(ctx, filter, intendedAction) -> JobView[]
 GetJob(ctx, jobID, intendedAction) -> JobView
+GetJobDetail(ctx, jobID) -> JobDetailView
 ```
 
-`Observe` 原子处理平台岗位去重、JD 更新、平台开放状态、因 JD 变化导致的鉴定失效、人工结论待复核以及撤回尚未领取的打招呼请求；它不读取当前策略，也不因发现运行采用的在线简历版本而选择鉴定依据。刷新简历、修改策略，或者从新运行再次观察到 JD 未变化的岗位，都不会让它改写历史岗位的鉴定或打招呼状态；重复观察只更新同一条平台岗位的当前可靠事实和最近发现时间。`Review` 原子处理人工结论和当前打招呼资格。`QueueAssessments` 只接受缺少当前有效 AI 结论、平台状态允许鉴定且尚未入队的选中岗位，并把它们改为 `pending`；已有成功 AI 结论的岗位不能通过本接口重新鉴定，排队时也不选择在线简历或策略。已经 `contacted` 的岗位不会再次进入鉴定或打招呼队列，已有 AI 和人工结论继续保留展示。
+`Observe` 原子处理平台岗位去重、JD 更新、平台开放状态、因 JD 变化导致的鉴定失效、人工结论待复核以及撤回尚未领取的打招呼请求；它不读取当前策略，也不因发现运行采用的在线简历版本而选择鉴定依据。刷新简历、修改策略，或者从新运行再次观察到 JD 未变化的岗位，都不会让它改写历史岗位的鉴定或打招呼状态；重复观察只更新同一条平台岗位的当前可靠事实和最近发现时间。`Review` 携带求职者实际查看的 JD 哈希，在同一事务中拒绝已经变化的 JD，并原子处理人工结论和当前打招呼资格。`QueueAssessments` 只接受缺少当前有效 AI 结论、平台状态允许鉴定且尚未入队的选中岗位，并把它们改为 `pending`；已有成功 AI 结论的岗位不能通过本接口重新鉴定，排队时也不选择在线简历或策略。已经 `contacted` 的岗位不会再次进入鉴定或打招呼队列，已有 AI 和人工结论继续保留展示。
 
 `QueueAuthorizedOutreach` 不是 Web 可以直接调用的命令，只接受 `AutomationSettings` 已经根据当前设置校验过的手工授权；它仍逐项重新校验岗位确实适合且可沟通，并把已授权的当前招呼语冻结到岗位。对求职者可见的手工首次打招呼命令是 `AutomationSettings.QueueRealOutreach`：它要求确认本批岗位数量、当前固定招呼语和打招呼时间窗，只处理本次选中的岗位，也不修改 `automation_settings` 中的自动打招呼开关。
 

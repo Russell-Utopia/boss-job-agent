@@ -162,6 +162,20 @@ dd { margin: 0; font-weight: 720; text-align: right; }
 .button-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
 .inline-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
 .inline-actions form { margin: 0; }
+.detail-card, .detail-grid, .review-card { max-width: 1080px; margin: 22px auto 0; }
+.detail-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+.detail-heading a { color: #147956; font-weight: 700; }
+.detail-facts { margin-top: 18px; }
+.detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.jd-grid { margin-top: 24px; display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+.jd-grid article { padding: 20px; border-radius: 14px; background: #f7f9f8; }
+.jd-grid h3 { margin: 0 0 10px; }
+.preserve-text { white-space: pre-wrap; line-height: 1.7; }
+.evidence { overflow: auto; padding: 14px; border-radius: 10px; background: #f1f5f3; white-space: pre-wrap; }
+.review-card label { display: block; margin: 18px 0 8px; color: #4c5b55; font-weight: 700; }
+.review-card textarea { width: 100%; padding: 12px; border: 1px solid #cad6d0; border-radius: 10px; font: inherit; resize: vertical; }
+.review-actions { margin-top: 16px; display: flex; justify-content: flex-end; gap: 10px; }
+.secondary-button { background: #566760; }
 
 @media (max-width: 760px) {
   body { display: block; }
@@ -174,5 +188,6 @@ dd { margin: 0; font-weight: 720; text-align: right; }
   .health-actions { margin-top: 18px; justify-content: flex-start; }
   .hero-card { display: block; }
   .action-block { margin-top: 24px; max-width: none; text-align: left; }
-  .summary-grid, .settings-grid { grid-template-columns: 1fr; }
+  .summary-grid, .settings-grid, .detail-grid, .jd-grid { grid-template-columns: 1fr; }
+  .detail-heading { display: block; }
 }

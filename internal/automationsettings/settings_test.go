@@ -156,7 +156,8 @@ func TestQueueRealOutreachReturnsTheJobPoolBatchResult(t *testing.T) {
 		t.Fatalf("observe eligible outreach job: %v", err)
 	}
 	if err := settings.pool.Review(t.Context(), []jobpool.ReviewDecision{{
-		JobID: job.ID, Verdict: jobpool.HumanVerdictSuitable, ReviewedAt: time.UnixMilli(2000),
+		JobID: job.ID, ExpectedJDHash: job.JDHash,
+		Verdict: jobpool.HumanVerdictSuitable,
 	}}); err != nil {
 		t.Fatalf("review eligible outreach job: %v", err)
 	}

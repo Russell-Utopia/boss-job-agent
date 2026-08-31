@@ -485,6 +485,32 @@ func (q *Queries) FinishOutreachWork(ctx context.Context, arg FinishOutreachWork
 	return id, err
 }
 
+const getAssessmentInputVersions = `-- name: GetAssessmentInputVersions :one
+SELECT
+    resume.version_no AS resume_version,
+    policy.version_no AS policy_version,
+    job.evaluator_version
+FROM platform_jobs AS job
+LEFT JOIN online_resume_versions AS resume
+    ON resume.id = job.assessment_resume_version_id
+LEFT JOIN assessment_policy_versions AS policy
+    ON policy.id = job.assessment_policy_version_id
+WHERE job.id = ?1
+`
+
+type GetAssessmentInputVersionsRow struct {
+	ResumeVersion    sql.NullInt64
+	PolicyVersion    sql.NullInt64
+	EvaluatorVersion sql.NullInt64
+}
+
+func (q *Queries) GetAssessmentInputVersions(ctx context.Context, jobID int64) (GetAssessmentInputVersionsRow, error) {
+	row := q.db.QueryRowContext(ctx, getAssessmentInputVersions, jobID)
+	var i GetAssessmentInputVersionsRow
+	err := row.Scan(&i.ResumeVersion, &i.PolicyVersion, &i.EvaluatorVersion)
+	return i, err
+}
+
 const getOutreachClaimCandidate = `-- name: GetOutreachClaimCandidate :one
 SELECT id, outreach_status
 FROM platform_jobs
@@ -1002,15 +1028,17 @@ SET human_verdict = ?1,
     END,
     updated_at = ?4
 WHERE id = ?5
+  AND jd_hash = ?6
 RETURNING id, platform_job_id, canonical_url, job_title, company_name, city_text, salary_text, jd_json, jd_hash, platform_status, platform_closed_reason, platform_status_checked_at, assessment_status, assessment_resume_version_id, assessment_jd_hash, assessment_policy_version_id, evaluator_version, assessment_attempt_no, assessment_consecutive_failure_count, assessment_reason, assessment_evidence_json, assessment_retry_at, assessed_at, human_verdict, human_reviewed_jd_hash, human_reviewed_at, human_review_note, outreach_status, outreach_greeting_text, outreach_attempt_no, outreach_consecutive_failure_count, outreach_last_attempt_at, outreach_retry_at, outreach_evidence_json, contact_source, contacted_at, lease_stage, lease_owner, lease_until, first_seen_at, last_seen_at, updated_at
 `
 
 type ReviewPlatformJobParams struct {
-	HumanVerdict sql.NullString
-	ReviewedAt   sql.NullInt64
-	ReviewNote   sql.NullString
-	UpdatedAt    int64
-	JobID        int64
+	HumanVerdict   sql.NullString
+	ReviewedAt     sql.NullInt64
+	ReviewNote     sql.NullString
+	UpdatedAt      int64
+	JobID          int64
+	ExpectedJdHash string
 }
 
 func (q *Queries) ReviewPlatformJob(ctx context.Context, arg ReviewPlatformJobParams) (PlatformJob, error) {
@@ -1020,6 +1048,7 @@ func (q *Queries) ReviewPlatformJob(ctx context.Context, arg ReviewPlatformJobPa
 		arg.ReviewNote,
 		arg.UpdatedAt,
 		arg.JobID,
+		arg.ExpectedJdHash,
 	)
 	var i PlatformJob
 	err := row.Scan(

@@ -123,6 +123,18 @@ SELECT *
 FROM platform_jobs
 WHERE id = sqlc.arg(job_id);
 
+-- name: GetAssessmentInputVersions :one
+SELECT
+    resume.version_no AS resume_version,
+    policy.version_no AS policy_version,
+    job.evaluator_version
+FROM platform_jobs AS job
+LEFT JOIN online_resume_versions AS resume
+    ON resume.id = job.assessment_resume_version_id
+LEFT JOIN assessment_policy_versions AS policy
+    ON policy.id = job.assessment_policy_version_id
+WHERE job.id = sqlc.arg(job_id);
+
 -- name: ReviewPlatformJob :one
 UPDATE platform_jobs
 SET human_verdict = sqlc.arg(human_verdict),
@@ -139,6 +151,7 @@ SET human_verdict = sqlc.arg(human_verdict),
     END,
     updated_at = sqlc.arg(updated_at)
 WHERE id = sqlc.arg(job_id)
+  AND jd_hash = sqlc.arg(expected_jd_hash)
 RETURNING *;
 
 -- name: QueueAuthorizedOutreach :one
