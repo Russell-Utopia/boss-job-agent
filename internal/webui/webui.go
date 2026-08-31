@@ -14,6 +14,7 @@ import (
 	"github.com/Russell-Utopia/boss-job-agent/internal/assessment"
 	"github.com/Russell-Utopia/boss-job-agent/internal/automationsettings"
 	"github.com/Russell-Utopia/boss-job-agent/internal/discovery"
+	"github.com/Russell-Utopia/boss-job-agent/internal/jobpool"
 	"github.com/Russell-Utopia/boss-job-agent/internal/onlineresume"
 	"github.com/Russell-Utopia/boss-job-agent/internal/runlog"
 )
@@ -31,6 +32,22 @@ var pageTemplate = template.Must(template.New("page.html").Funcs(template.FuncMa
 	"savedTime": func(value time.Time) string {
 		return value.Local().Format("2006-01-02 15:04:05")
 	},
+	"discoveryStatusText": func(status discovery.Status) string {
+		switch status {
+		case discovery.StatusCompleted:
+			return "岗位发现完成"
+		case discovery.StatusFailed:
+			return "岗位发现失败"
+		default:
+			return "岗位发现运行中"
+		}
+	},
+	"platformStatusText": func(status jobpool.PlatformStatus) string {
+		if status == jobpool.PlatformStatusOpen {
+			return "可沟通"
+		}
+		return "已关闭"
+	},
 }).ParseFS(files, "templates/page.html"))
 
 type handler struct {
@@ -40,6 +57,7 @@ type handler struct {
 type Dependencies struct {
 	Resume     *onlineresume.Versions
 	Discovery  *discovery.Service
+	Jobs       *jobpool.Pool
 	Assessment *assessment.Service
 	Settings   *automationsettings.Settings
 	Runlog     *runlog.Log
@@ -59,6 +77,8 @@ type startupState struct {
 	Actions         firstUseActions            `json:"actions"`
 	RunlogHealth    runlog.Health              `json:"runlogHealth"`
 	ActiveResumeUse *discovery.ActiveResumeUse `json:"activeDiscoveryResumeUse,omitempty"`
+	DiscoveryRun    *discovery.RunView         `json:"discoveryRun,omitempty"`
+	Jobs            []jobpool.JobView          `json:"jobs"`
 }
 
 type resumeFeedback struct {
@@ -90,6 +110,7 @@ func New(dependencies Dependencies) http.Handler {
 	mux.HandleFunc("GET /outreach", h.renderPage("outreach", "打招呼", h.outreachState))
 	mux.HandleFunc("GET /resume", h.renderPage("resume", "在线简历", h.resumeState))
 	mux.HandleFunc("POST /resume/refresh", h.refreshResumePage)
+	mux.HandleFunc("POST /discovery-runs", h.startDiscoveryPage)
 	mux.HandleFunc("GET /assets/app.css", serveCSS)
 	mux.HandleFunc("GET /api/startup-state", h.startupState)
 	mux.HandleFunc("GET /api/runlog/health", h.runlogHealth)
@@ -109,8 +130,23 @@ func (h *handler) jobsState(ctx context.Context) (startupState, error) {
 	if err != nil {
 		return startupState{}, err
 	}
+	run, err := h.dependencies.Discovery.GetLatestRun(ctx)
+	if err != nil {
+		return startupState{}, err
+	}
+	jobs, err := h.dependencies.Jobs.ListJobs(ctx)
+	if err != nil {
+		return startupState{}, err
+	}
+	settings, err := h.dependencies.Settings.GetDiscoveryHints(ctx)
+	if err != nil {
+		return startupState{}, err
+	}
 	return startupState{
 		CurrentResume: resume,
+		DiscoveryRun:  run,
+		Jobs:          jobs,
+		Automation:    settings,
 		Actions: firstUseActions{
 			StartDiscovery: fromDiscoveryAvailability(availability),
 		},
@@ -315,7 +351,26 @@ func runlogReturnPath(page string) string {
 }
 
 func (h *handler) startDiscovery(w http.ResponseWriter, r *http.Request) {
-	h.writeCommandResult(w, h.dependencies.Discovery.Start(r.Context()))
+	runID, err := h.dependencies.Discovery.Start(r.Context())
+	if err != nil {
+		h.writeCommandResult(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]int64{"discoveryRunId": runID})
+}
+
+func (h *handler) startDiscoveryPage(w http.ResponseWriter, r *http.Request) {
+	_, err := h.dependencies.Discovery.Start(r.Context())
+	if err == nil {
+		http.Redirect(w, r, "/jobs", http.StatusSeeOther)
+		return
+	}
+	var rejection businessRejection
+	if errors.As(err, &rejection) {
+		http.Error(w, rejection.RejectionReason(), http.StatusConflict)
+		return
+	}
+	http.Error(w, "岗位发现失败，请查看运行状态", http.StatusInternalServerError)
 }
 
 func (h *handler) queueReal(w http.ResponseWriter, r *http.Request) {

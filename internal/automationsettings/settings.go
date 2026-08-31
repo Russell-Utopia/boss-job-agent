@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -98,6 +99,16 @@ func (s *Settings) Get(ctx context.Context) (View, error) {
 		OutreachTimeWindows:        windows,
 		OutreachTimeDescription:    timeDescription,
 	}, nil
+}
+
+// GetDiscoveryHints keeps missing downstream settings from blocking job
+// discovery while still reporting other storage failures.
+func (s *Settings) GetDiscoveryHints(ctx context.Context) (View, error) {
+	view, err := s.Get(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return View{}, nil
+	}
+	return view, err
 }
 
 func (s *Settings) QueueRealOutreach(

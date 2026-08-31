@@ -58,19 +58,76 @@
     <section class="card hero-card">
       <div>
         <p class="eyebrow">全局岗位池</p>
+        {{if .State.DiscoveryRun}}
+        <h2>{{discoveryStatusText .State.DiscoveryRun.Status}}</h2>
+        <p class="muted">在线简历 v{{.State.DiscoveryRun.ResumeVersion}} 的实际搜索输入</p>
+        <dl>
+          <div><dt>意向岗位</dt><dd>{{.State.DiscoveryRun.SearchRange.Role}}</dd></div>
+          <div><dt>目标城市</dt><dd>{{.State.DiscoveryRun.SearchRange.City}}</dd></div>
+          <div><dt>期望薪资</dt><dd>{{.State.DiscoveryRun.SearchRange.Salary}}</dd></div>
+          <div><dt>求职类型</dt><dd>{{.State.DiscoveryRun.SearchRange.EmploymentType}}</dd></div>
+          <div><dt>搜索进度</dt><dd>当前页 {{.State.DiscoveryRun.CurrentPage}} · 已发现 {{.State.DiscoveryRun.DiscoveredJobs}}</dd></div>
+        </dl>
+        {{else}}
         <h2>尚无岗位</h2>
         <p class="muted">刷新并保存在线简历后，才能开始第一次岗位发现。</p>
+        {{end}}
       </div>
       <div class="action-block">
+        <form method="post" action="/discovery-runs">
+        {{if .State.Actions.StartDiscovery.Allowed}}
+        <button type="submit">开始岗位发现</button>
+        {{else}}
         <button type="button" disabled aria-describedby="start-discovery-reason">开始岗位发现</button>
+        {{end}}
+        </form>
         <p id="start-discovery-reason" class="reason">{{.State.Actions.StartDiscovery.Reason}}</p>
       </div>
     </section>
+    <section class="card">
+      <p class="eyebrow">下游自动化提示</p>
+      <ul>
+        {{if .State.Automation.AutomaticAssessmentEnabled}}
+        <li>自动岗位鉴定已开启：新发现岗位可进入鉴定队列。</li>
+        {{else}}
+        <li>自动岗位鉴定已关闭：新发现岗位将只保存，暂不进行 AI 鉴定。</li>
+        {{end}}
+        {{if .State.Automation.AutomaticOutreachEnabled}}
+        <li>自动打招呼已开启：只处理之后取得合适结论且可沟通的岗位。</li>
+        {{else}}
+        <li>自动打招呼已关闭：合适岗位暂不进入打招呼队列。</li>
+        {{end}}
+        {{if .State.Automation.OutreachGreeting}}
+        <li>固定招呼语已配置；这不影响岗位发现能否开始。</li>
+        {{else}}
+        <li>固定招呼语未配置：这不阻止岗位发现。</li>
+        {{end}}
+      </ul>
+    </section>
     <section class="summary-grid" aria-label="工作流概况">
-      <article class="metric"><span>岗位</span><strong>0 / 0</strong><div class="progress"><i></i></div></article>
+      <article class="metric"><span>岗位</span><strong>{{len .State.Jobs}} / {{len .State.Jobs}}</strong><div class="progress"><i></i></div></article>
       <article class="metric"><span>岗位鉴定</span><strong>0 / 0</strong><div class="progress"><i></i></div></article>
       <article class="metric"><span>打招呼</span><strong>0 / 0</strong><div class="progress"><i></i></div></article>
     </section>
+    {{if .State.Jobs}}
+    <section class="card">
+      <p class="eyebrow">全局岗位列表</p>
+      <table>
+        <thead><tr><th>岗位</th><th>公司</th><th>城市</th><th>薪资</th><th>平台状态</th></tr></thead>
+        <tbody>
+          {{range .State.Jobs}}
+          <tr>
+            <td><a href="{{.CanonicalURL}}">{{.JobTitle}}</a></td>
+            <td>{{.CompanyName}}</td>
+            <td>{{.City}}</td>
+            <td>{{.Salary}}</td>
+            <td>{{platformStatusText .PlatformStatus}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </section>
+    {{end}}
     {{end}}
 
     {{if eq .Page "assessments"}}

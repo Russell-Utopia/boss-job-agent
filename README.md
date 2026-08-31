@@ -32,6 +32,20 @@ make live-online-resume
 
 该命令用临时内存 SQLite 验证在线简历读取、版本保存和结构化 trace 合同，并输出五部分的条目数量；它不写入应用 SQLite，也不输出简历正文。若真实读取失败，测试还会先校验错误是否带有稳定分类。
 
+## 岗位发现 live 验收
+
+岗位发现的默认测试使用受控 Adapter，不连接 BOSS。确认 Chrome 已登录、Kimi WebBridge 正常，并准备好一个与在线简历一致的单一搜索范围后，可显式验证一页生产读取合同：
+
+```bash
+BOSS_JOB_DISCOVERY_ROLE='Go 后端工程师' \
+BOSS_JOB_DISCOVERY_CITY='福州' \
+BOSS_JOB_DISCOVERY_SALARY='20-30K' \
+BOSS_JOB_DISCOVERY_EMPLOYMENT_TYPE='全职' \
+make live-job-discovery
+```
+
+该命令只读取第 1 页，验证稳定平台岗位 ID、完整 JD、可靠平台状态和 `hasMore`，不写入应用 SQLite，也不会开始鉴定或打招呼。
+
 ## 架构资料
 
 - [Go 工程架构](./docs/architecture.md)：目标目录、依赖方向、应用装配、状态所有权与迁移切片。

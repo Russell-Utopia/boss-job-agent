@@ -1,0 +1,136 @@
+package boss
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/Russell-Utopia/boss-job-agent/internal/discovery"
+)
+
+func TestJobDiscoveryFetchesOneCompleteReliablePageThroughKimiWebBridge(t *testing.T) {
+	t.Parallel()
+
+	want := discovery.DiscoveryPage{
+		Observations: []discovery.JobObservation{{
+			PlatformJobID:    "boss-job-1",
+			CanonicalURL:     "https://www.zhipin.com/job_detail/boss-job-1.html",
+			JobTitle:         "Go 后端工程师",
+			CompanyName:      "示例科技",
+			City:             "福州",
+			Salary:           "20-30K",
+			Responsibilities: "负责 Go 服务开发",
+			Requirements:     "熟悉 Go 与 SQLite",
+			PlatformStatus:   discovery.PlatformStatusOpen,
+		}},
+		HasMore: false,
+	}
+	encoded, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("encode discovery page fixture: %v", err)
+	}
+	fixture := &successfulJobDiscoveryFixture{t: t, encodedPage: string(encoded)}
+	server := httptest.NewServer(fixture)
+	t.Cleanup(server.Close)
+	adapter := NewJobDiscovery(server.URL, server.Client())
+	searchRange := discovery.SearchRange{
+		Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职",
+	}
+
+	got, err := adapter.FetchPage(t.Context(), searchRange, 3)
+	if err != nil {
+		t.Fatalf("fetch discovery page: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("discovery page = %#v, want %#v", got, want)
+	}
+	if !reflect.DeepEqual(fixture.actions, []string{"find_tab", "navigate", "evaluate"}) {
+		t.Errorf("WebBridge actions = %#v", fixture.actions)
+	}
+	for _, expected := range []string{
+		"Go 后端工程师", "福州", "20-30K", "全职", `"page":3`,
+		"/wapi/zpgeek/search/joblist.json", "/wapi/zpgeek/job/detail.json", "hasMore",
+	} {
+		if !strings.Contains(fixture.evaluationScript, expected) {
+			t.Errorf("evaluation script does not contain %q", expected)
+		}
+	}
+}
+
+func TestJobDiscoveryRejectsTheWholePageWhenOneObservationIsUnreliable(t *testing.T) {
+	t.Parallel()
+
+	page := discovery.DiscoveryPage{
+		Observations: []discovery.JobObservation{{
+			JobTitle: "缺少稳定 ID 的岗位",
+		}},
+		HasMore: false,
+	}
+	encoded, err := json.Marshal(page)
+	if err != nil {
+		t.Fatalf("encode unreliable discovery page: %v", err)
+	}
+	fixture := &successfulJobDiscoveryFixture{t: t, encodedPage: string(encoded)}
+	server := httptest.NewServer(fixture)
+	t.Cleanup(server.Close)
+
+	_, err = NewJobDiscovery(server.URL, server.Client()).FetchPage(t.Context(), discovery.SearchRange{
+		Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职",
+	}, 1)
+	var fetchErr *discovery.FetchError
+	if !errors.As(err, &fetchErr) {
+		t.Fatalf("fetch error = %v, want discovery.FetchError", err)
+	}
+	if fetchErr.Category != discovery.FetchErrorInvalidResponse {
+		t.Errorf("fetch error category = %q, want invalid_response", fetchErr.Category)
+	}
+}
+
+type successfulJobDiscoveryFixture struct {
+	t                *testing.T
+	encodedPage      string
+	actions          []string
+	evaluationScript string
+}
+
+func (f *successfulJobDiscoveryFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var command struct {
+		Action  string         `json:"action"`
+		Args    map[string]any `json:"args"`
+		Session string         `json:"session"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&command); err != nil {
+		f.t.Errorf("decode WebBridge command: %v", err)
+		http.Error(w, "invalid command", http.StatusBadRequest)
+		return
+	}
+	f.actions = append(f.actions, command.Action)
+	if command.Session != jobDiscoverySession {
+		f.t.Errorf("session = %q, want %q", command.Session, jobDiscoverySession)
+	}
+	switch command.Action {
+	case "find_tab":
+		writeFixtureJSON(f.t, w, map[string]any{
+			"ok": false,
+			"error": map[string]any{
+				"code": "extension_error", "message": "find_tab: no tab matching BOSS job search",
+			},
+		})
+	case "navigate":
+		writeFixtureJSON(f.t, w, map[string]any{
+			"ok": true, "data": map[string]any{"success": true, "url": jobSearchURL, "tabId": 43},
+		})
+	case "evaluate":
+		f.evaluationScript, _ = command.Args["code"].(string)
+		writeFixtureJSON(f.t, w, map[string]any{
+			"ok": true, "data": map[string]any{"type": "string", "value": f.encodedPage},
+		})
+	default:
+		f.t.Errorf("unexpected WebBridge action %q", command.Action)
+		http.Error(w, "unexpected action", http.StatusBadRequest)
+	}
+}

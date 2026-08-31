@@ -34,7 +34,7 @@ func assemble(ctx context.Context, config Config) (*assembled, error) {
 		return nil, closeRunlogAfterError(logs, err)
 	}
 
-	pool := jobpool.New()
+	pool := jobpool.New(database)
 	settings := automationsettings.New(database, pool)
 	assessmentService := assessment.New(database)
 	now := config.Now()
@@ -46,7 +46,14 @@ func assemble(ctx context.Context, config Config) (*assembled, error) {
 	}
 
 	resumeVersions := onlineresume.New(database, bossadapter.NewDefaultOnlineResume(), logs, config.Now)
-	discoveryService := discovery.New(database, resumeVersions)
+	discoveryService := discovery.New(
+		database,
+		resumeVersions,
+		pool,
+		bossadapter.NewDefaultJobDiscovery(),
+		logs,
+		config.Now,
+	)
 	_ = outreach.New()
 
 	return &assembled{
@@ -54,6 +61,7 @@ func assemble(ctx context.Context, config Config) (*assembled, error) {
 		handler: webui.New(webui.Dependencies{
 			Resume:     resumeVersions,
 			Discovery:  discoveryService,
+			Jobs:       pool,
 			Assessment: assessmentService,
 			Settings:   settings,
 			Runlog:     logs,

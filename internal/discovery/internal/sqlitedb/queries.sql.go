@@ -7,7 +7,145 @@ package sqlitedb
 
 import (
 	"context"
+	"database/sql"
 )
+
+const advanceSingleRangeDiscoveryPage = `-- name: AdvanceSingleRangeDiscoveryPage :one
+UPDATE discovery_runs
+SET next_page = ?,
+    consecutive_failure_count = 0,
+    last_progress_at = ?,
+    updated_at = ?
+WHERE id = ?
+  AND status = 'running'
+  AND next_page = ?
+RETURNING id
+`
+
+type AdvanceSingleRangeDiscoveryPageParams struct {
+	NextPage       sql.NullInt64
+	LastProgressAt sql.NullInt64
+	UpdatedAt      int64
+	ID             int64
+	NextPage_2     sql.NullInt64
+}
+
+func (q *Queries) AdvanceSingleRangeDiscoveryPage(ctx context.Context, arg AdvanceSingleRangeDiscoveryPageParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, advanceSingleRangeDiscoveryPage,
+		arg.NextPage,
+		arg.LastProgressAt,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.NextPage_2,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const completeSingleRangeDiscoveryRun = `-- name: CompleteSingleRangeDiscoveryRun :one
+UPDATE discovery_runs
+SET status = 'completed',
+    consecutive_failure_count = 0,
+    worker_owner = NULL,
+    worker_lease_until = NULL,
+    last_progress_at = ?,
+    finished_at = ?,
+    updated_at = ?
+WHERE id = ?
+  AND status = 'running'
+  AND next_page = ?
+RETURNING id
+`
+
+type CompleteSingleRangeDiscoveryRunParams struct {
+	LastProgressAt sql.NullInt64
+	FinishedAt     sql.NullInt64
+	UpdatedAt      int64
+	ID             int64
+	NextPage       sql.NullInt64
+}
+
+func (q *Queries) CompleteSingleRangeDiscoveryRun(ctx context.Context, arg CompleteSingleRangeDiscoveryRunParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, completeSingleRangeDiscoveryRun,
+		arg.LastProgressAt,
+		arg.FinishedAt,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.NextPage,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const createSingleRangeDiscoveryRun = `-- name: CreateSingleRangeDiscoveryRun :one
+INSERT INTO discovery_runs (
+    resume_version_id,
+    current_role,
+    current_city,
+    next_page,
+    status,
+    attempt_no,
+    worker_owner,
+    worker_lease_until,
+    created_at,
+    prepared_at,
+    updated_at
+) VALUES (?, ?, ?, 1, 'running', 1, ?, ?, ?, ?, ?)
+RETURNING id
+`
+
+type CreateSingleRangeDiscoveryRunParams struct {
+	ResumeVersionID  sql.NullInt64
+	CurrentRole      sql.NullString
+	CurrentCity      sql.NullString
+	WorkerOwner      sql.NullString
+	WorkerLeaseUntil sql.NullInt64
+	CreatedAt        int64
+	PreparedAt       sql.NullInt64
+	UpdatedAt        int64
+}
+
+func (q *Queries) CreateSingleRangeDiscoveryRun(ctx context.Context, arg CreateSingleRangeDiscoveryRunParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, createSingleRangeDiscoveryRun,
+		arg.ResumeVersionID,
+		arg.CurrentRole,
+		arg.CurrentCity,
+		arg.WorkerOwner,
+		arg.WorkerLeaseUntil,
+		arg.CreatedAt,
+		arg.PreparedAt,
+		arg.UpdatedAt,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const failSingleRangeDiscoveryRun = `-- name: FailSingleRangeDiscoveryRun :one
+UPDATE discovery_runs
+SET status = 'failed',
+    consecutive_failure_count = consecutive_failure_count + 1,
+    worker_owner = NULL,
+    worker_lease_until = NULL,
+    updated_at = ?
+WHERE id = ?
+  AND status = 'running'
+RETURNING id
+`
+
+type FailSingleRangeDiscoveryRunParams struct {
+	UpdatedAt int64
+	ID        int64
+}
+
+func (q *Queries) FailSingleRangeDiscoveryRun(ctx context.Context, arg FailSingleRangeDiscoveryRunParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, failSingleRangeDiscoveryRun, arg.UpdatedAt, arg.ID)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
 
 const getActiveDiscoveryResumeUse = `-- name: GetActiveDiscoveryResumeUse :one
 SELECT
@@ -30,5 +168,46 @@ func (q *Queries) GetActiveDiscoveryResumeUse(ctx context.Context) (GetActiveDis
 	row := q.db.QueryRowContext(ctx, getActiveDiscoveryResumeUse)
 	var i GetActiveDiscoveryResumeUseRow
 	err := row.Scan(&i.DiscoveryRunID, &i.ResumeVersionNo)
+	return i, err
+}
+
+const getLatestDiscoveryRun = `-- name: GetLatestDiscoveryRun :one
+SELECT
+    discovery_runs.id,
+    discovery_runs.current_role,
+    discovery_runs.current_city,
+    discovery_runs.next_page,
+    discovery_runs.status,
+    online_resume_versions.version_no AS resume_version_no,
+    online_resume_versions.resume_json
+FROM discovery_runs
+JOIN online_resume_versions
+    ON online_resume_versions.id = discovery_runs.resume_version_id
+ORDER BY discovery_runs.id DESC
+LIMIT 1
+`
+
+type GetLatestDiscoveryRunRow struct {
+	ID              int64
+	CurrentRole     sql.NullString
+	CurrentCity     sql.NullString
+	NextPage        sql.NullInt64
+	Status          string
+	ResumeVersionNo int64
+	ResumeJson      string
+}
+
+func (q *Queries) GetLatestDiscoveryRun(ctx context.Context) (GetLatestDiscoveryRunRow, error) {
+	row := q.db.QueryRowContext(ctx, getLatestDiscoveryRun)
+	var i GetLatestDiscoveryRunRow
+	err := row.Scan(
+		&i.ID,
+		&i.CurrentRole,
+		&i.CurrentCity,
+		&i.NextPage,
+		&i.Status,
+		&i.ResumeVersionNo,
+		&i.ResumeJson,
+	)
 	return i, err
 }

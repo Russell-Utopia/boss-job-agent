@@ -24,10 +24,11 @@ import (
 )
 
 type testWeb struct {
-	Handler http.Handler
-	db      *sql.DB
-	logs    *runlog.Log
-	resume  *webResumeReader
+	Handler   http.Handler
+	db        *sql.DB
+	logs      *runlog.Log
+	resume    *webResumeReader
+	discovery *webJobDiscovery
 }
 
 type webResumeReader struct {
@@ -39,6 +40,36 @@ type webResumeReader struct {
 func (r *webResumeReader) Read(context.Context) (onlineresume.ResumeContent, error) {
 	r.calls++
 	return r.content, r.err
+}
+
+type webJobDiscovery struct{}
+
+func (d *webJobDiscovery) FetchPage(
+	context.Context,
+	discovery.SearchRange,
+	int,
+) (discovery.DiscoveryPage, error) {
+	return discovery.DiscoveryPage{
+		Observations: []discovery.JobObservation{
+			webDiscoveredJob("boss-job-1", "Go 后端工程师", "示例科技"),
+			webDiscoveredJob("boss-job-2", "Go 平台工程师", "另一科技"),
+		},
+		HasMore: false,
+	}, nil
+}
+
+func webDiscoveredJob(platformJobID, title, company string) discovery.JobObservation {
+	return discovery.JobObservation{
+		PlatformJobID:    platformJobID,
+		CanonicalURL:     "https://www.zhipin.com/job_detail/" + platformJobID + ".html",
+		JobTitle:         title,
+		CompanyName:      company,
+		City:             "福州",
+		Salary:           "20-30K",
+		Responsibilities: "负责 Go 服务开发",
+		Requirements:     "熟悉 Go 与 SQLite",
+		PlatformStatus:   discovery.PlatformStatusOpen,
+	}
 }
 
 func webResumeContent(role string) onlineresume.ResumeContent {
@@ -64,7 +95,7 @@ func openTestWebWithLogPath(t *testing.T, databasePath, logPath string) *testWeb
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	pool := jobpool.New()
+	pool := jobpool.New(db)
 	settings := automationsettings.New(db, pool)
 	assessmentService := assessment.New(db)
 	now := time.UnixMilli(1000)
@@ -79,17 +110,21 @@ func openTestWebWithLogPath(t *testing.T, databasePath, logPath string) *testWeb
 	logs := runlog.Open(logPath)
 	resumeReader := &webResumeReader{content: webResumeContent("Go 后端工程师")}
 	resumeVersions := onlineresume.New(db, resumeReader, logs, func() time.Time { return now })
+	discoveryAdapter := &webJobDiscovery{}
+	discoveryService := discovery.New(db, resumeVersions, pool, discoveryAdapter, logs, func() time.Time { return now })
 	return &testWeb{
 		Handler: New(Dependencies{
 			Resume:     resumeVersions,
-			Discovery:  discovery.New(db, resumeVersions),
+			Discovery:  discoveryService,
+			Jobs:       pool,
 			Assessment: assessmentService,
 			Settings:   settings,
 			Runlog:     logs,
 		}),
-		db:     db,
-		logs:   logs,
-		resume: resumeReader,
+		db:        db,
+		logs:      logs,
+		resume:    resumeReader,
+		discovery: discoveryAdapter,
 	}
 }
 
@@ -205,6 +240,41 @@ func TestOnlineResumePageRunsTheCompleteControlledRefreshFlow(t *testing.T) {
 	})
 	assertTextAbsent(t, failedBody, "cookie=secret")
 	assertResumeReadCount(t, runtime.resume, 4)
+}
+
+func TestJobsPageDisplaysDiscoveryInputsProgressSettingsHintsAndGlobalJobs(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	client := server.Client()
+
+	refreshResumePage(t, client, server.URL, http.StatusOK, []string{"已保存在线简历 v1"})
+	response := postJSONResponse(t, client, server.URL+"/api/discovery-runs", `{}`)
+	body := readResponseBody(t, response)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("start discovery status = %d, want 201; body=%s", response.StatusCode, body)
+	}
+	assertTextContains(t, body, []string{`"discoveryRunId":1`})
+
+	assertPageContains(t, client, server.URL+"/jobs", []string{
+		"岗位发现完成",
+		"在线简历 v1",
+		"Go 后端工程师",
+		"福州",
+		"20-30K",
+		"全职",
+		"当前页 1",
+		"已发现 2",
+		"自动岗位鉴定已关闭：新发现岗位将只保存",
+		"自动打招呼已关闭：合适岗位暂不进入打招呼队列",
+		"固定招呼语未配置：这不阻止岗位发现",
+		"示例科技",
+		"Go 平台工程师",
+		"另一科技",
+	})
 }
 
 func TestRemovedSimulationCommandIsNotRoutable(t *testing.T) {

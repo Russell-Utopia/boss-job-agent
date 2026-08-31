@@ -17,7 +17,7 @@ func openTestSettings(t *testing.T) (*Settings, *sql.DB) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return New(db, jobpool.New()), db
+	return New(db, jobpool.New(db)), db
 }
 
 func TestSafeAutomationSettingsAreReadyOnFirstUse(t *testing.T) {
