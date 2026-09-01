@@ -368,11 +368,7 @@ func (s *Settings) QueueRealOutreach(
 				Code: "outreach_confirmation_required", Reason: "请确认本批岗位、完整招呼语和当前时间规则",
 			}
 		}
-		eligibleCount, err := s.pool.CountEligibleOutreach(ctx, jobIDs)
-		if err != nil {
-			return jobpool.BatchActionResult{}, err
-		}
-		if confirmation.JobCount != eligibleCount ||
+		if confirmation.JobCount != uniqueJobCount(jobIDs) ||
 			strings.Join(strings.Fields(confirmation.GreetingText), " ") != *view.OutreachGreeting ||
 			strings.TrimSpace(confirmation.TimeDescription) != view.OutreachTimeDescription {
 			return jobpool.BatchActionResult{}, &Rejection{
@@ -384,6 +380,14 @@ func (s *Settings) QueueRealOutreach(
 		GreetingText:    *view.OutreachGreeting,
 		TimeDescription: view.OutreachTimeDescription,
 	})
+}
+
+func uniqueJobCount(jobIDs []int64) int {
+	seen := make(map[int64]struct{}, len(jobIDs))
+	for _, jobID := range jobIDs {
+		seen[jobID] = struct{}{}
+	}
+	return len(seen)
 }
 
 func (s *Settings) PreviewOutreachChange(ctx context.Context, automaticEnabled bool) (OutreachChangeImpact, error) {

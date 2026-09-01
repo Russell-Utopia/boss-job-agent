@@ -669,6 +669,159 @@ func TestJobsPageDisplaysDiscoveryInputsProgressSettingsHintsAndGlobalJobs(t *te
 	})
 }
 
+func TestJobsWorkbenchRestoresFiltersPaginatesAndShowsWorkflowProgress(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	for index := 0; index < 12; index++ {
+		if _, err := runtime.pool.Observe(t.Context(), 1, jobpool.Observation{
+			PlatformJobID:    fmt.Sprintf("workbench-job-%d", index),
+			CanonicalURL:     fmt.Sprintf("https://www.zhipin.com/job_detail/workbench-job-%d.html", index),
+			JobTitle:         fmt.Sprintf("目标岗位-%d", index),
+			CompanyName:      "目标公司",
+			City:             "福州",
+			Salary:           "20-30K",
+			Responsibilities: "负责 Go 服务开发",
+			Requirements:     "熟悉 Go 与 SQLite",
+			PlatformStatus:   jobpool.PlatformStatusOpen,
+			ObservedAt:       time.UnixMilli(int64(1000 + index)),
+		}); err != nil {
+			t.Fatalf("observe workbench job %d: %v", index, err)
+		}
+	}
+	if _, err := runtime.pool.Observe(t.Context(), 1, jobpool.Observation{
+		PlatformJobID:        "workbench-closed",
+		CanonicalURL:         "https://www.zhipin.com/job_detail/workbench-closed.html",
+		JobTitle:             "目标岗位-closed",
+		CompanyName:          "目标公司",
+		City:                 "福州",
+		Salary:               "20-30K",
+		Responsibilities:     "负责 Go 服务开发",
+		Requirements:         "熟悉 Go 与 SQLite",
+		PlatformStatus:       jobpool.PlatformStatusClosed,
+		PlatformClosedReason: "岗位已关闭",
+		ObservedAt:           time.UnixMilli(2000),
+	}); err != nil {
+		t.Fatalf("observe closed workbench job: %v", err)
+	}
+
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	response := getResponse(t, server.Client(), server.URL+"/jobs?q=%E7%9B%AE%E6%A0%87&platformStatus=open&assessmentStatus=not_queued&humanReview=unreviewed&outreachStatus=not_queued&page=2&pageSize=10")
+	body := readResponseBody(t, response)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("workbench status = %d, want 200; body=%s", response.StatusCode, body)
+	}
+	assertTextContains(t, body, []string{
+		"岗位鉴定",
+		"0 / 13",
+		"筛出未完成鉴定",
+		"assessmentIncomplete=1",
+		"打招呼",
+		"筛出未打招呼",
+		"outreachUncontacted=1",
+		"查看已打招呼",
+		"outreachContacted=1",
+		"第 2 / 2 页",
+		"目标岗位-11",
+		`name="q" value="目标"`,
+		`<option value="open" selected>可沟通</option>`,
+		`<option value="not_queued" selected>尚未安排</option>`,
+		`name="page" value="1"`,
+		"pageSize=20",
+	})
+	assertTextAbsent(t, body, "目标岗位-0")
+}
+
+func TestJobsWorkbenchBatchReviewRechecksEachJobAndReturnsSkippedReason(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	first := mustObserveWebJob(t, runtime.pool, jobpool.Observation{
+		PlatformJobID: "workbench-review-1", CanonicalURL: "https://www.zhipin.com/job_detail/workbench-review-1.html",
+		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责 Go 服务", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
+	})
+	second := mustObserveWebJob(t, runtime.pool, jobpool.Observation{
+		PlatformJobID: "workbench-review-2", CanonicalURL: "https://www.zhipin.com/job_detail/workbench-review-2.html",
+		JobTitle: "Go 平台工程师", CompanyName: "另一科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责平台服务", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1001),
+	})
+
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	payload := mustJSON(t, map[string]any{
+		"action": "review",
+		"decisions": []map[string]any{
+			{"jobId": first.ID, "expectedJdHash": first.JDHash, "verdict": "suitable", "note": "批量复核"},
+			{"jobId": second.ID, "expectedJdHash": "stale-jd-hash", "verdict": "unsuitable"},
+		},
+	})
+	response := postJSONResponse(t, server.Client(), server.URL+"/api/jobs/batch", payload)
+	defer closeResponseBody(t, response.Body)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("batch review status = %d, want 200", response.StatusCode)
+	}
+	var result jobpool.BatchActionResult
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatalf("decode batch review result: %v", err)
+	}
+	if result.Succeeded != 1 || len(result.Skipped) != 1 || result.Skipped[0].JobID != second.ID || result.Skipped[0].Code != "platform_job_changed" {
+		t.Fatalf("batch review result = %#v, want one success and one stale skip", result)
+	}
+	updatedFirst, err := runtime.pool.GetJob(t.Context(), first.ID)
+	if err != nil {
+		t.Fatalf("read successful batch review: %v", err)
+	}
+	if updatedFirst.HumanVerdict != jobpool.HumanVerdictSuitable {
+		t.Errorf("successful batch review verdict = %q, want suitable", updatedFirst.HumanVerdict)
+	}
+}
+
+func TestJobsWorkbenchShowsThreeActionsAndLocalDisabledReasons(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	openJob := mustObserveWebJob(t, runtime.pool, jobpool.Observation{
+		PlatformJobID: "workbench-actions-open", CanonicalURL: "https://www.zhipin.com/job_detail/workbench-actions-open.html",
+		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责 Go 服务", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
+	})
+	mustObserveWebJob(t, runtime.pool, jobpool.Observation{
+		PlatformJobID: "workbench-actions-closed", CanonicalURL: "https://www.zhipin.com/job_detail/workbench-actions-closed.html",
+		JobTitle: "Go 平台工程师", CompanyName: "另一科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责平台服务", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: jobpool.PlatformStatusClosed, PlatformClosedReason: "岗位已关闭", ObservedAt: time.UnixMilli(1001),
+	})
+	if err := runtime.pool.Review(t.Context(), []jobpool.ReviewDecision{{
+		JobID: openJob.ID, ExpectedJDHash: openJob.JDHash, Verdict: jobpool.HumanVerdictSuitable,
+	}}); err != nil {
+		t.Fatalf("review greeting fixture: %v", err)
+	}
+
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	response := getResponse(t, server.Client(), server.URL+"/jobs")
+	defer closeResponseBody(t, response.Body)
+	content, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read workbench action page: %v", err)
+	}
+	body := string(content)
+	assertTextContains(t, body, []string{
+		"AI 鉴定", "人工复核", "真实打招呼", "全选当前页可执行岗位",
+		"岗位已关闭，不能开始 AI 鉴定",
+		"岗位已关闭，不能真实打招呼",
+		"请先配置固定招呼语，再真实打招呼",
+	})
+}
+
 func TestJobDetailShowsCompleteAssessmentInputsAndReviewDoesNotStartAnotherAssessment(t *testing.T) {
 	t.Parallel()
 
@@ -897,7 +1050,15 @@ func TestJobsPageContinuesAndEndsTheSameDiscoveryRun(t *testing.T) {
 		fmt.Sprintf(`action="/discovery-runs/%d/continue"`, runID),
 		fmt.Sprintf(`action="/discovery-runs/%d/end-early"`, runID),
 	})
-	response := postJSONResponse(
+	response := getResponse(t, client, server.URL+"/jobs")
+	defer closeResponseBody(t, response.Body)
+	content, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read paused discovery page: %v", err)
+	}
+	body := string(content)
+	assertTextAbsent(t, body, "确认并开始岗位发现")
+	response = postJSONResponse(
 		t,
 		client,
 		fmt.Sprintf("%s/api/discovery-runs/%d/continue", server.URL, runID),
@@ -1088,7 +1249,7 @@ func TestRealOutreachCommandReturnsPerJobBatchResult(t *testing.T) {
 	response := postJSONResponse(t, server.Client(), server.URL+"/api/outreach/real", fmt.Sprintf(`{
 		"jobIds":[%d,999],
 		"confirmation":{
-			"jobCount":1,
+			"jobCount":2,
 			"greetingText":"您好，想和您聊聊这个岗位",
 			"timeDescription":"全天可打招呼",
 			"confirmed":true

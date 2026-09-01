@@ -115,6 +115,7 @@ type JobView struct {
 	HumanReviewedJDHash   string
 	HumanReviewedAt       *time.Time
 	HumanReviewNote       string
+	HumanReviewStatus     HumanReviewStatus
 	OutreachStatus        OutreachStatus
 	OutreachGreetingText  string
 	OutreachAttemptNo     int64
@@ -170,10 +171,9 @@ type CurrentJudgment struct {
 
 type JobDetailView struct {
 	JobView
-	AssessmentInputs  AssessmentInputVersions
-	CurrentJudgment   CurrentJudgment
-	HumanReviewStatus HumanReviewStatus
-	SupervisionLabel  HumanVerdict
+	AssessmentInputs AssessmentInputVersions
+	CurrentJudgment  CurrentJudgment
+	SupervisionLabel HumanVerdict
 }
 
 // HumanReviewSample is a current-JD human review that can supervise policy
@@ -464,8 +464,7 @@ func (p *Pool) GetJobDetail(ctx context.Context, jobID int64) (JobDetailView, er
 			PolicyVersion:    versions.PolicyVersion.Int64,
 			EvaluatorVersion: versions.EvaluatorVersion.Int64,
 		},
-		CurrentJudgment:   currentJudgment(job, review),
-		HumanReviewStatus: review.status,
+		CurrentJudgment: currentJudgment(job, review),
 	}
 	if review.valid {
 		detail.SupervisionLabel = job.HumanVerdict
@@ -680,6 +679,7 @@ func jobViewFromPlatformRow(row sqlitedb.PlatformJob) (JobView, error) {
 	job.AssessmentRetryAction = assessmentRetryActionAvailability(row)
 	job.ReviewAction = ActionAvailability{Allowed: true}
 	job.OutreachAction = outreachActionAvailability(row)
+	job.HumanReviewStatus = classifyHumanReview(job).status
 	return job, nil
 }
 
@@ -762,6 +762,40 @@ func (p *Pool) Review(ctx context.Context, decisions []ReviewDecision) error {
 	return nil
 }
 
+// ReviewBatch rechecks and records each human decision independently so a
+// changed JD does not discard the decisions for other selected jobs.
+func (p *Pool) ReviewBatch(ctx context.Context, decisions []ReviewDecision) (BatchActionResult, error) {
+	if err := validateReviewDecisions(decisions); err != nil {
+		return BatchActionResult{}, err
+	}
+	reviewedAt := p.now()
+	if reviewedAt.IsZero() {
+		return BatchActionResult{}, fmt.Errorf("review platform jobs: current time is required")
+	}
+	transaction, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return BatchActionResult{}, fmt.Errorf("review platform jobs: begin transaction: %w", err)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	queries := p.queries.WithTx(transaction)
+	result := BatchActionResult{}
+	for _, decision := range uniqueReviewDecisions(decisions) {
+		succeeded, skipped, err := reviewPlatformJobBatch(ctx, queries, decision, reviewedAt)
+		if err != nil {
+			return BatchActionResult{}, err
+		}
+		if succeeded {
+			result.Succeeded++
+		} else {
+			result.Skipped = append(result.Skipped, skipped)
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		return BatchActionResult{}, fmt.Errorf("review platform jobs: commit transaction: %w", err)
+	}
+	return result, nil
+}
+
 func validateReviewDecisions(decisions []ReviewDecision) error {
 	for _, decision := range decisions {
 		if err := validateReviewDecision(decision); err != nil {
@@ -777,6 +811,22 @@ func reviewPlatformJob(
 	decision ReviewDecision,
 	reviewedAt time.Time,
 ) error {
+	succeeded, skipped, err := reviewPlatformJobBatch(ctx, queries, decision, reviewedAt)
+	if err != nil {
+		return err
+	}
+	if succeeded {
+		return nil
+	}
+	return &Rejection{Code: skipped.Code, Reason: skipped.Reason}
+}
+
+func reviewPlatformJobBatch(
+	ctx context.Context,
+	queries *sqlitedb.Queries,
+	decision ReviewDecision,
+	reviewedAt time.Time,
+) (bool, SkippedAction, error) {
 	_, err := queries.ReviewPlatformJob(ctx, sqlitedb.ReviewPlatformJobParams{
 		HumanVerdict:   sql.NullString{String: string(decision.Verdict), Valid: true},
 		ReviewedAt:     sql.NullInt64{Int64: reviewedAt.UnixMilli(), Valid: true},
@@ -786,22 +836,35 @@ func reviewPlatformJob(
 		ExpectedJdHash: decision.ExpectedJDHash,
 	})
 	if err == nil {
-		return nil
+		return true, SkippedAction{}, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("review platform job %d: %w", decision.JobID, err)
+		return false, SkippedAction{}, fmt.Errorf("review platform job %d: %w", decision.JobID, err)
 	}
 	current, currentErr := queries.GetPlatformJob(ctx, decision.JobID)
 	if errors.Is(currentErr, sql.ErrNoRows) {
-		return &Rejection{Code: "platform_job_not_found", Reason: "岗位不存在"}
+		return false, SkippedAction{JobID: decision.JobID, Code: "platform_job_not_found", Reason: "岗位不存在"}, nil
 	}
 	if currentErr != nil {
-		return fmt.Errorf("recheck reviewed platform job %d: %w", decision.JobID, currentErr)
+		return false, SkippedAction{}, fmt.Errorf("recheck reviewed platform job %d: %w", decision.JobID, currentErr)
 	}
 	if current.JdHash != decision.ExpectedJDHash {
-		return &Rejection{Code: "platform_job_changed", Reason: "JD 已变化，请重新查看完整岗位后再复核"}
+		return false, SkippedAction{JobID: decision.JobID, Code: "platform_job_changed", Reason: "JD 已变化，请重新查看完整岗位后再复核"}, nil
 	}
-	return fmt.Errorf("review platform job %d: update rejected", decision.JobID)
+	return false, SkippedAction{}, fmt.Errorf("review platform job %d: update rejected", decision.JobID)
+}
+
+func uniqueReviewDecisions(decisions []ReviewDecision) []ReviewDecision {
+	unique := make([]ReviewDecision, 0, len(decisions))
+	seen := make(map[int64]struct{}, len(decisions))
+	for _, decision := range decisions {
+		if _, duplicate := seen[decision.JobID]; duplicate {
+			continue
+		}
+		seen[decision.JobID] = struct{}{}
+		unique = append(unique, decision)
+	}
+	return unique
 }
 
 func validateReviewDecision(decision ReviewDecision) error {

@@ -110,13 +110,15 @@
         </dl>
         {{end}}
         {{end}}
+        {{if or (not .State.DiscoveryRun) (eq .State.DiscoveryRun.Status "completed") (eq .State.DiscoveryRun.Status "ended_early")}}
         <form method="post" action="/discovery-runs">
-        {{if .State.Actions.StartDiscovery.Allowed}}
-        <button type="submit">确认并开始岗位发现</button>
-        {{else}}
-        <button type="button" disabled aria-describedby="start-discovery-reason">开始岗位发现</button>
-        {{end}}
+          {{if .State.Actions.StartDiscovery.Allowed}}
+          <button type="submit">确认并开始岗位发现</button>
+          {{else}}
+          <button type="button" disabled aria-describedby="start-discovery-reason">开始岗位发现</button>
+          {{end}}
         </form>
+        {{end}}
         <p id="start-discovery-reason" class="reason">{{.State.Actions.StartDiscovery.Reason}}</p>
       </div>
     </section>
@@ -140,28 +142,128 @@
         {{end}}
       </ul>
     </section>
+    {{with .State.WorkflowSummary}}
     <section class="summary-grid" aria-label="工作流概况">
-      <article class="metric"><span>岗位发现</span>{{if .State.DiscoveryRun}}<strong>{{.State.DiscoveryRun.CompletedRanges}} / {{.State.DiscoveryRun.TotalRanges}}</strong><div class="progress"><i style="width: {{.State.DiscoveryRun.ProgressPercent}}%"></i></div>{{else}}<strong>0 / 0</strong><div class="progress"><i></i></div>{{end}}</article>
-      <article class="metric"><span>岗位鉴定</span><strong>0 / 0</strong><div class="progress"><i></i></div></article>
-      <article class="metric"><span>打招呼</span><strong>0 / 0</strong><div class="progress"><i></i></div></article>
+      <article class="metric"><span>岗位发现</span><strong>{{.DiscoveryCompleted}} / {{.DiscoveryTotal}}</strong><div class="progress"><i style="width: {{.DiscoveryPercent}}%"></i></div></article>
+      <article class="metric"><span>岗位鉴定</span><strong>{{.AssessmentCompleted}} / {{.AssessmentTotal}}</strong><div class="progress"><i style="width: {{.AssessmentPercent}}%"></i></div><a href="{{.AssessmentIncompleteURL}}">筛出未完成鉴定</a></article>
+      <article class="metric"><span>打招呼</span><strong>{{.OutreachCompleted}} / {{.OutreachTotal}}</strong><div class="progress"><i style="width: {{.OutreachPercent}}%"></i></div><span class="metric-links"><a href="{{.OutreachUncontactedURL}}">筛出未打招呼</a><a href="{{.OutreachContactedURL}}">查看已打招呼</a></span></article>
     </section>
-    {{if .State.Jobs}}
-    <section class="card">
-      <p class="eyebrow">全局岗位列表</p>
-      <table>
-        <thead><tr><th>岗位</th><th>公司</th><th>城市</th><th>薪资</th><th>平台状态</th></tr></thead>
-        <tbody>
-          {{range .State.Jobs}}
-          <tr>
-            <td><a href="/jobs/{{.ID}}">{{.JobTitle}}</a></td>
-            <td>{{.CompanyName}}</td>
-            <td>{{.City}}</td>
-            <td>{{if .Salary}}{{.Salary}}{{else}}薪资仅可在 BOSS 页面查看{{end}}</td>
-            <td>{{platformStatusText .PlatformStatus}}</td>
-          </tr>
-          {{end}}
-        </tbody>
-      </table>
+    {{end}}
+    {{with .State.JobList}}
+    <section class="card job-workbench" id="job-workbench">
+      <div class="job-workbench-heading">
+        <div>
+          <p class="eyebrow">全局岗位列表</p>
+          <h2>按当前状态处理平台岗位</h2>
+        </div>
+        <span class="muted">共 {{.Total}} 个岗位</span>
+      </div>
+      <form class="job-filters" method="get" action="/jobs" data-reset-page="true">
+        <input type="hidden" name="page" value="1">
+        <input type="hidden" name="pageSize" value="{{.PageSize}}">
+        <label>岗位名或公司
+          <input type="search" name="q" value="{{.Search}}" placeholder="搜索岗位名或公司">
+        </label>
+        <label>平台状态
+          <select name="platformStatus">
+            <option value="" {{if eq .PlatformStatus ""}}selected{{end}}>全部</option>
+            <option value="open" {{if selected .PlatformStatus "open"}}selected{{end}}>可沟通</option>
+            <option value="closed" {{if selected .PlatformStatus "closed"}}selected{{end}}>已关闭</option>
+          </select>
+        </label>
+        <label>AI 鉴定
+          <select name="assessmentStatus">
+            <option value="" {{if eq .AssessmentStatus ""}}selected{{end}}>全部</option>
+            <option value="not_queued" {{if selected .AssessmentStatus "not_queued"}}selected{{end}}>尚未安排</option>
+            <option value="pending" {{if selected .AssessmentStatus "pending"}}selected{{end}}>待鉴定</option>
+            <option value="processing" {{if selected .AssessmentStatus "processing"}}selected{{end}}>鉴定中</option>
+            <option value="suitable" {{if selected .AssessmentStatus "suitable"}}selected{{end}}>适合</option>
+            <option value="unsuitable" {{if selected .AssessmentStatus "unsuitable"}}selected{{end}}>不适合</option>
+            <option value="needs_user_confirmation" {{if selected .AssessmentStatus "needs_user_confirmation"}}selected{{end}}>需要人工确认</option>
+            <option value="failed" {{if selected .AssessmentStatus "failed"}}selected{{end}}>鉴定失败</option>
+          </select>
+        </label>
+        <label>人工结论
+          <select name="humanReview">
+            <option value="" {{if eq .HumanReview ""}}selected{{end}}>全部</option>
+            <option value="unreviewed" {{if selected .HumanReview "unreviewed"}}selected{{end}}>未复核</option>
+            <option value="suitable" {{if selected .HumanReview "suitable"}}selected{{end}}>人工适合</option>
+            <option value="unsuitable" {{if selected .HumanReview "unsuitable"}}selected{{end}}>人工不适合</option>
+            <option value="stale" {{if selected .HumanReview "stale"}}selected{{end}}>待重新复核</option>
+          </select>
+        </label>
+        <label>打招呼
+          <select name="outreachStatus">
+            <option value="" {{if eq .OutreachStatus ""}}selected{{end}}>全部</option>
+            <option value="not_queued" {{if selected .OutreachStatus "not_queued"}}selected{{end}}>尚未安排</option>
+            <option value="pending" {{if selected .OutreachStatus "pending"}}selected{{end}}>等待真实打招呼</option>
+            <option value="processing" {{if selected .OutreachStatus "processing"}}selected{{end}}>打招呼中</option>
+            <option value="contacted" {{if selected .OutreachStatus "contacted"}}selected{{end}}>已打招呼</option>
+            <option value="possibly_contacted" {{if selected .OutreachStatus "possibly_contacted"}}selected{{end}}>可能已打招呼</option>
+            <option value="failed" {{if selected .OutreachStatus "failed"}}selected{{end}}>打招呼失败</option>
+          </select>
+        </label>
+        <button type="submit">筛选</button>
+      </form>
+
+      <form id="job-batch-form" class="job-batch-form" method="post" action="/api/jobs/batch" data-greeting="{{with $.State.Automation.OutreachGreeting}}{{.}}{{end}}" data-time-description="{{$.State.Automation.OutreachTimeDescription}}">
+        <div class="job-batch-toolbar">
+          <label for="job-batch-action">批量动作</label>
+          <select id="job-batch-action" name="action" required>
+            <option value="" selected>先选择批量动作</option>
+            <option value="assessment">AI 鉴定</option>
+            <option value="review">人工复核</option>
+            <option value="outreach">真实打招呼</option>
+          </select>
+          <label id="job-batch-verdict-label" for="job-batch-verdict" hidden>统一人工结论</label>
+          <select id="job-batch-verdict" name="verdict" hidden>
+            <option value="suitable">适合</option>
+            <option value="unsuitable">不适合</option>
+          </select>
+          <button type="submit" id="job-batch-submit" disabled>提交所选操作</button>
+          <span id="job-batch-selection" class="muted" role="status">请先选择动作</span>
+        </div>
+        <p class="muted">全选只作用于当前页，并且只会勾选当前动作可执行的岗位；提交时后台会逐项重新校验。</p>
+        <div class="table-scroll">
+          <table class="job-table">
+            <thead><tr><th><input id="job-select-all" type="checkbox" disabled aria-label="全选当前页可执行岗位"></th><th>岗位</th><th>平台</th><th>AI 鉴定</th><th>人工结论</th><th>打招呼</th><th>操作</th></tr></thead>
+            <tbody>
+              {{range $.State.Jobs}}
+              <tr>
+                <td>
+                  <input type="checkbox" class="job-select" name="jobId" value="{{.ID}}" data-job-id="{{.ID}}" data-jd-hash="{{.JDHash}}" data-assessment-allowed="{{.AssessmentAction.Allowed}}" data-review-allowed="{{.ReviewAction.Allowed}}" data-outreach-allowed="{{.OutreachAction.Allowed}}" data-assessment-reason="{{.AssessmentAction.Reason}}" data-review-reason="{{.ReviewAction.Reason}}" data-outreach-reason="{{.OutreachAction.Reason}}" disabled aria-label="选择 {{.JobTitle}}">
+                  <input type="hidden" name="jdHash-{{.ID}}" value="{{.JDHash}}">
+                </td>
+                <td><a href="/jobs/{{.ID}}"><strong>{{.JobTitle}}</strong></a><small>{{.CompanyName}} · {{.City}} · {{if .Salary}}{{.Salary}}{{else}}薪资仅可在 BOSS 页面查看{{end}}</small></td>
+                <td><span class="status-pill">{{platformStatusText .PlatformStatus}}</span></td>
+                <td><span class="status-pill">{{assessmentStatusText .AssessmentStatus}}</span></td>
+                <td><span class="status-pill">{{humanReviewStatusText .HumanReviewStatus}}</span></td>
+                <td><span class="status-pill">{{outreachStatusText .OutreachStatus}}</span></td>
+                <td>
+                  <div class="job-row-actions">
+                    <button type="button" class="quick-action" data-quick-action="assessment" data-job-id="{{.ID}}" {{if not .AssessmentAction.Allowed}}disabled title="{{.AssessmentAction.Reason}}"{{end}}>AI 鉴定</button>
+                    <a class="quick-action link-button" href="/jobs/{{.ID}}#review">人工复核</a>
+                    <button type="button" class="quick-action" data-quick-action="outreach" data-job-id="{{.ID}}" {{if not .OutreachAction.Allowed}}disabled title="{{.OutreachAction.Reason}}"{{end}}>真实打招呼</button>
+                  </div>
+                  {{if not .AssessmentAction.Allowed}}<small class="reason action-reason">AI 鉴定：{{.AssessmentAction.Reason}}</small>{{end}}
+                  {{if not .OutreachAction.Allowed}}<small class="reason action-reason">真实打招呼：{{.OutreachAction.Reason}}</small>{{end}}
+                </td>
+              </tr>
+              {{else}}
+              <tr><td colspan="7" class="empty-state">没有符合当前筛选条件的岗位。</td></tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+        <div id="job-batch-result" class="job-batch-result" role="status" hidden></div>
+      </form>
+      <div class="pagination" aria-label="岗位分页">
+        <span>第 {{.Page}} / {{.TotalPages}} 页</span>
+        {{if .HasPrevious}}<a href="{{.PreviousURL}}">上一页</a>{{end}}
+        {{range .Pages}}{{if .Selected}}<strong>{{.Number}}</strong>{{else}}<a href="{{.URL}}">{{.Number}}</a>{{end}}{{end}}
+        {{if .HasNext}}<a href="{{.NextURL}}">下一页</a>{{end}}
+        <span class="page-size-links">每页：{{range .PageSizes}}{{if .Selected}}<strong>{{.Size}}</strong>{{else}}<a href="{{.URL}}">{{.Size}}</a>{{end}}{{end}}</span>
+      </div>
     </section>
     {{end}}
     {{end}}

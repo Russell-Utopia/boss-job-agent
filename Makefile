@@ -5,13 +5,17 @@ export GOTOOLCHAIN := $(GO_TOOLCHAIN)
 
 GOLANGCI_LINT := .cache/tools/golangci-lint/$(GOLANGCI_LINT_VERSION)/golangci-lint
 
-.PHONY: run check live-online-resume live-job-discovery live-visible-job-discovery live-assessment live-outreach toolchain-check quality-gate-contract-check module-boundary-check ci-check fmt-check mod-check lint test coverage race vuln generate-check
+.PHONY: run check live-online-resume live-job-discovery live-visible-job-discovery live-assessment live-outreach toolchain-check quality-gate-contract-check module-boundary-check ci-check fmt-check mod-check lint test web-test coverage race vuln generate-check
 
 run:
 	go run ./cmd/boss-job-agent
 
 test:
 	go test -count=1 ./...
+	$(MAKE) web-test
+
+web-test:
+	node internal/webui/testdata/app_test.js
 
 live-online-resume:
 	BOSS_ONLINE_RESUME_LIVE=1 go test -count=1 -tags=live ./internal/adapters/boss -run '^TestOnlineResumeLiveReadsTheAuthenticatedBossResume$$' -v

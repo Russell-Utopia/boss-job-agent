@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -60,6 +61,8 @@ var pageTemplate = template.Must(template.New("page.html").Funcs(template.FuncMa
 	},
 	"assessmentStatusText": func(status jobpool.AssessmentStatus) string {
 		switch status {
+		case jobpool.AssessmentStatusNotQueued:
+			return "尚未安排"
 		case jobpool.AssessmentStatusPending:
 			return "待鉴定"
 		case jobpool.AssessmentStatusProcessing:
@@ -74,6 +77,24 @@ var pageTemplate = template.Must(template.New("page.html").Funcs(template.FuncMa
 			return "鉴定失败"
 		default:
 			return "尚未鉴定"
+		}
+	},
+	"outreachStatusText": func(status jobpool.OutreachStatus) string {
+		switch status {
+		case jobpool.OutreachStatusNotQueued:
+			return "尚未安排"
+		case jobpool.OutreachStatusPending:
+			return "等待真实打招呼"
+		case jobpool.OutreachStatusProcessing:
+			return "打招呼中"
+		case jobpool.OutreachStatusContacted:
+			return "已打招呼"
+		case jobpool.OutreachStatusPossiblyContacted:
+			return "可能已打招呼"
+		case jobpool.OutreachStatusFailed:
+			return "打招呼失败"
+		default:
+			return "尚未安排"
 		}
 	},
 	"humanReviewStatusText": func(status jobpool.HumanReviewStatus) string {
@@ -104,6 +125,9 @@ var pageTemplate = template.Must(template.New("page.html").Funcs(template.FuncMa
 	},
 	"jsonText": func(value json.RawMessage) string {
 		return string(value)
+	},
+	"selected": func(actual any, expected string) bool {
+		return fmt.Sprint(actual) == expected
 	},
 }).ParseFS(files, "templates/page.html"))
 
@@ -140,6 +164,8 @@ type startupState struct {
 	ActiveResumeUse       *discovery.ActiveResumeUse               `json:"activeDiscoveryResumeUse,omitempty"`
 	DiscoveryRun          *discovery.RunView                       `json:"discoveryRun,omitempty"`
 	Jobs                  []webJobView                             `json:"jobs"`
+	JobList               *jobListState                            `json:"jobList,omitempty"`
+	WorkflowSummary       *workflowSummary                         `json:"workflowSummary,omitempty"`
 	EligibleOutreachCount int                                      `json:"eligibleOutreachCount,omitempty"`
 	OutreachPreview       automationsettings.OutreachChangeImpact  `json:"outreachPreview,omitempty"`
 	OutreachForm          automationsettings.OutreachChangeImpact  `json:"outreachForm,omitempty"`
@@ -164,27 +190,144 @@ type actionAvailability struct {
 }
 
 type webJobView struct {
-	ID             int64                  `json:"id"`
-	JobTitle       string                 `json:"jobTitle"`
-	CompanyName    string                 `json:"companyName"`
-	City           string                 `json:"city"`
-	Salary         string                 `json:"salary"`
-	PlatformStatus jobpool.PlatformStatus `json:"platformStatus"`
-	OutreachAction actionAvailability     `json:"outreachAction"`
+	ID                int64                     `json:"id"`
+	JobTitle          string                    `json:"jobTitle"`
+	CompanyName       string                    `json:"companyName"`
+	City              string                    `json:"city"`
+	Salary            string                    `json:"salary"`
+	JDHash            string                    `json:"jdHash"`
+	PlatformStatus    jobpool.PlatformStatus    `json:"platformStatus"`
+	AssessmentStatus  jobpool.AssessmentStatus  `json:"assessmentStatus"`
+	HumanReviewStatus jobpool.HumanReviewStatus `json:"humanReviewStatus"`
+	OutreachStatus    jobpool.OutreachStatus    `json:"outreachStatus"`
+	AssessmentAction  actionAvailability        `json:"assessmentAction"`
+	ReviewAction      actionAvailability        `json:"reviewAction"`
+	OutreachAction    actionAvailability        `json:"outreachAction"`
 }
 
-func toWebJobViews(jobs []jobpool.JobView) []webJobView {
+type workflowSummary struct {
+	DiscoveryCompleted      int
+	DiscoveryTotal          int
+	DiscoveryPercent        int
+	AssessmentIncompleteURL string
+	AssessmentCompleted     int
+	AssessmentTotal         int
+	AssessmentPercent       int
+	OutreachUncontactedURL  string
+	OutreachContactedURL    string
+	OutreachCompleted       int
+	OutreachTotal           int
+	OutreachPercent         int
+}
+
+type jobListQuery struct {
+	Search               string
+	PlatformStatus       jobpool.PlatformStatus
+	AssessmentStatus     jobpool.AssessmentStatus
+	AssessmentIncomplete bool
+	HumanReview          jobpool.HumanReviewStatus
+	OutreachStatus       jobpool.OutreachStatus
+	OutreachUncontacted  bool
+	OutreachContacted    bool
+	Page                 int
+	PageSize             int
+}
+
+type jobListState struct {
+	Search               string
+	PlatformStatus       jobpool.PlatformStatus
+	AssessmentStatus     jobpool.AssessmentStatus
+	AssessmentIncomplete bool
+	HumanReview          jobpool.HumanReviewStatus
+	OutreachStatus       jobpool.OutreachStatus
+	OutreachUncontacted  bool
+	OutreachContacted    bool
+	Page                 int
+	PageSize             int
+	Total                int
+	TotalPages           int
+	HasPrevious          bool
+	HasNext              bool
+	PreviousURL          string
+	NextURL              string
+	Pages                []jobPageLink
+	PageSizes            []jobPageSize
+}
+
+type jobPageLink struct {
+	Number   int
+	URL      string
+	Selected bool
+}
+
+type jobPageSize struct {
+	Size     int
+	URL      string
+	Selected bool
+}
+
+func (q jobListQuery) values(page int, pageSize int) url.Values {
+	values := url.Values{}
+	if q.Search != "" {
+		values.Set("q", q.Search)
+	}
+	if q.PlatformStatus != "" {
+		values.Set("platformStatus", string(q.PlatformStatus))
+	}
+	if q.AssessmentStatus != "" {
+		values.Set("assessmentStatus", string(q.AssessmentStatus))
+	}
+	if q.HumanReview != "" {
+		values.Set("humanReview", string(q.HumanReview))
+	}
+	if q.AssessmentIncomplete {
+		values.Set("assessmentIncomplete", "1")
+	}
+	if q.OutreachStatus != "" {
+		values.Set("outreachStatus", string(q.OutreachStatus))
+	}
+	if q.OutreachUncontacted {
+		values.Set("outreachUncontacted", "1")
+	}
+	if q.OutreachContacted {
+		values.Set("outreachContacted", "1")
+	}
+	values.Set("page", strconv.Itoa(page))
+	values.Set("pageSize", strconv.Itoa(pageSize))
+	return values
+}
+
+func toWebJobViews(jobs []jobpool.JobView, greetingConfigured bool) []webJobView {
 	views := make([]webJobView, 0, len(jobs))
 	for _, job := range jobs {
-		views = append(views, webJobView{
-			ID: job.ID, JobTitle: job.JobTitle, CompanyName: job.CompanyName,
-			City: job.City, Salary: job.Salary, PlatformStatus: job.PlatformStatus,
-			OutreachAction: actionAvailability{
-				Allowed: job.OutreachAction.Allowed, Code: job.OutreachAction.Code, Reason: job.OutreachAction.Reason,
-			},
-		})
+		view := webJobView{
+			ID:                job.ID,
+			JobTitle:          job.JobTitle,
+			CompanyName:       job.CompanyName,
+			City:              job.City,
+			Salary:            job.Salary,
+			JDHash:            job.JDHash,
+			PlatformStatus:    job.PlatformStatus,
+			AssessmentStatus:  job.AssessmentStatus,
+			HumanReviewStatus: job.HumanReviewStatus,
+			OutreachStatus:    job.OutreachStatus,
+			AssessmentAction:  toActionAvailability(job.AssessmentAction),
+			ReviewAction:      toActionAvailability(job.ReviewAction),
+			OutreachAction:    toActionAvailability(job.OutreachAction),
+		}
+		if !greetingConfigured && view.OutreachAction.Allowed {
+			view.OutreachAction = actionAvailability{
+				Code:   "outreach_greeting_required",
+				Reason: "请先配置固定招呼语，再真实打招呼",
+			}
+		}
+		views = append(views, view)
 	}
 	return views
+}
+
+func toActionAvailability(value jobpool.ActionAvailability) actionAvailability {
+	return actionAvailability{Allowed: value.Allowed, Code: value.Code, Reason: value.Reason}
 }
 
 type stateQuery func(context.Context) (startupState, error)
@@ -195,7 +338,7 @@ func New(dependencies Dependencies) http.Handler {
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/jobs", http.StatusSeeOther)
 	})
-	mux.HandleFunc("GET /jobs", h.renderPage("jobs", "岗位工作台", h.jobsState))
+	mux.HandleFunc("GET /jobs", h.jobsPage)
 	mux.HandleFunc("GET /jobs/{jobID}", h.jobDetailPage)
 	mux.HandleFunc("POST /jobs/{jobID}/review", h.reviewJobPage)
 	mux.HandleFunc("POST /jobs/{jobID}/assessment", h.assessmentCommandPage(h.dependencies.Jobs.QueueAssessments, "queued"))
@@ -223,6 +366,7 @@ func New(dependencies Dependencies) http.Handler {
 	mux.HandleFunc("POST /api/discovery-runs/{runID}/end-early", h.discoveryCommandAPI(h.dependencies.Discovery.EndEarly))
 	mux.HandleFunc("POST /api/assessments", h.assessmentCommandAPI(h.dependencies.Jobs.QueueAssessments))
 	mux.HandleFunc("POST /api/assessments/retry", h.assessmentCommandAPI(h.dependencies.Jobs.RetryAssessmentFailures))
+	mux.HandleFunc("POST /api/jobs/batch", h.batchJobsAPI)
 	mux.HandleFunc("POST /api/outreach/real", h.queueReal)
 	mux.HandleFunc("POST /api/outreach/settings", h.configureOutreach)
 	mux.HandleFunc("POST /api/policy/draft", h.generatePolicyDraft)
@@ -339,7 +483,16 @@ func platformJobID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	return jobID, true
 }
 
-func (h *handler) jobsState(ctx context.Context) (startupState, error) {
+func (h *handler) jobsPage(w http.ResponseWriter, r *http.Request) {
+	state, err := h.jobsStateForQuery(r.Context(), parseJobListQuery(r.URL.Query()))
+	if err != nil {
+		http.Error(w, "无法读取当前业务状态", http.StatusInternalServerError)
+		return
+	}
+	h.executePage(w, http.StatusOK, pageData{Page: "jobs", PageTitle: "岗位工作台", State: state})
+}
+
+func (h *handler) jobsStateForQuery(ctx context.Context, query jobListQuery) (startupState, error) {
 	resume, err := h.dependencies.Resume.GetCurrent(ctx)
 	if err != nil {
 		return startupState{}, err
@@ -360,16 +513,266 @@ func (h *handler) jobsState(ctx context.Context) (startupState, error) {
 	if err != nil {
 		return startupState{}, err
 	}
+	views := toWebJobViews(jobs, settings.OutreachGreeting != nil)
+	filtered := filterJobViews(views, query)
+	list, pageJobs := buildJobListState(query, filtered)
+	summary := summarizeWorkflow(run, views, query)
 	return startupState{
-		CurrentResume: resume,
-		DiscoveryRun:  run,
-		Jobs:          toWebJobViews(jobs),
-		Automation:    settings,
+		CurrentResume:   resume,
+		DiscoveryRun:    run,
+		Jobs:            pageJobs,
+		JobList:         list,
+		WorkflowSummary: summary,
+		Automation:      settings,
 		Actions: firstUseActions{
 			StartDiscovery: fromDiscoveryAvailability(availability),
 		},
 		RunlogHealth: h.dependencies.Runlog.Health(),
 	}, nil
+}
+
+func defaultJobListQuery() jobListQuery {
+	return jobListQuery{Page: 1, PageSize: 10}
+}
+
+func parseJobListQuery(values url.Values) jobListQuery {
+	query := defaultJobListQuery()
+	query.Search = strings.TrimSpace(values.Get("q"))
+	if query.Search == "" {
+		query.Search = strings.TrimSpace(values.Get("search"))
+	}
+	query.PlatformStatus = parsePlatformStatus(values.Get("platformStatus"))
+	query.AssessmentStatus = parseAssessmentStatus(values.Get("assessmentStatus"))
+	query.AssessmentIncomplete = values.Get("assessmentIncomplete") == "1"
+	query.HumanReview = parseHumanReviewStatus(values.Get("humanReview"))
+	query.OutreachStatus = parseOutreachStatus(values.Get("outreachStatus"))
+	query.OutreachUncontacted = values.Get("outreachUncontacted") == "1"
+	query.OutreachContacted = values.Get("outreachContacted") == "1"
+	if page, err := strconv.Atoi(values.Get("page")); err == nil && page > 0 {
+		query.Page = page
+	}
+	if pageSize, err := strconv.Atoi(values.Get("pageSize")); err == nil && validJobPageSize(pageSize) {
+		query.PageSize = pageSize
+	}
+	return query
+}
+
+func parsePlatformStatus(value string) jobpool.PlatformStatus {
+	status := jobpool.PlatformStatus(value)
+	if status == jobpool.PlatformStatusOpen || status == jobpool.PlatformStatusClosed {
+		return status
+	}
+	return ""
+}
+
+func parseAssessmentStatus(value string) jobpool.AssessmentStatus {
+	status := jobpool.AssessmentStatus(value)
+	switch status {
+	case jobpool.AssessmentStatusNotQueued, jobpool.AssessmentStatusPending,
+		jobpool.AssessmentStatusProcessing, jobpool.AssessmentStatusSuitable,
+		jobpool.AssessmentStatusUnsuitable, jobpool.AssessmentStatusNeedsUserConfirmation,
+		jobpool.AssessmentStatusFailed:
+		return status
+	default:
+		return ""
+	}
+}
+
+func parseHumanReviewStatus(value string) jobpool.HumanReviewStatus {
+	status := jobpool.HumanReviewStatus(value)
+	switch status {
+	case jobpool.HumanReviewStatusUnreviewed, jobpool.HumanReviewStatusSuitable,
+		jobpool.HumanReviewStatusUnsuitable, jobpool.HumanReviewStatusStale:
+		return status
+	default:
+		return ""
+	}
+}
+
+func parseOutreachStatus(value string) jobpool.OutreachStatus {
+	status := jobpool.OutreachStatus(value)
+	switch status {
+	case jobpool.OutreachStatusNotQueued, jobpool.OutreachStatusPending,
+		jobpool.OutreachStatusProcessing, jobpool.OutreachStatusContacted,
+		jobpool.OutreachStatusPossiblyContacted, jobpool.OutreachStatusFailed:
+		return status
+	default:
+		return ""
+	}
+}
+
+func validJobPageSize(value int) bool {
+	switch value {
+	case 10, 20, 50, 100:
+		return true
+	default:
+		return false
+	}
+}
+
+func filterJobViews(jobs []webJobView, query jobListQuery) []webJobView {
+	filtered := make([]webJobView, 0, len(jobs))
+	for _, job := range jobs {
+		if matchesJobFilter(job, query) {
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered
+}
+
+func matchesJobFilter(job webJobView, query jobListQuery) bool {
+	return matchesJobSearch(job, query.Search) &&
+		matchesPlatformStatus(job, query.PlatformStatus) &&
+		matchesAssessmentStatus(job, query.AssessmentStatus) &&
+		matchesAssessmentIncomplete(job, query.AssessmentIncomplete) &&
+		matchesHumanReviewStatus(job, query.HumanReview) &&
+		matchesOutreachStatus(job, query.OutreachStatus) &&
+		matchesOutreachScope(job, query.OutreachUncontacted, query.OutreachContacted)
+}
+
+func matchesJobSearch(job webJobView, search string) bool {
+	needle := strings.ToLower(search)
+	return needle == "" || strings.Contains(strings.ToLower(job.JobTitle), needle) ||
+		strings.Contains(strings.ToLower(job.CompanyName), needle)
+}
+
+func matchesPlatformStatus(job webJobView, expected jobpool.PlatformStatus) bool {
+	return expected == "" || expected == job.PlatformStatus
+}
+
+func matchesAssessmentStatus(job webJobView, expected jobpool.AssessmentStatus) bool {
+	return expected == "" || expected == job.AssessmentStatus
+}
+
+func matchesAssessmentIncomplete(job webJobView, incomplete bool) bool {
+	if !incomplete {
+		return true
+	}
+	switch job.AssessmentStatus {
+	case jobpool.AssessmentStatusSuitable, jobpool.AssessmentStatusUnsuitable, jobpool.AssessmentStatusNeedsUserConfirmation:
+		return false
+	default:
+		return true
+	}
+}
+
+func matchesHumanReviewStatus(job webJobView, expected jobpool.HumanReviewStatus) bool {
+	return expected == "" || expected == job.HumanReviewStatus
+}
+
+func matchesOutreachStatus(job webJobView, expected jobpool.OutreachStatus) bool {
+	return expected == "" || expected == job.OutreachStatus
+}
+
+func matchesOutreachScope(job webJobView, uncontacted, contacted bool) bool {
+	if uncontacted && job.OutreachStatus == jobpool.OutreachStatusContacted {
+		return false
+	}
+	if contacted && job.OutreachStatus != jobpool.OutreachStatusContacted {
+		return false
+	}
+	return true
+}
+
+func buildJobListState(query jobListQuery, jobs []webJobView) (*jobListState, []webJobView) {
+	totalPages := (len(jobs) + query.PageSize - 1) / query.PageSize
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	if query.Page > totalPages {
+		query.Page = totalPages
+	}
+	start := (query.Page - 1) * query.PageSize
+	end := start + query.PageSize
+	if start > len(jobs) {
+		start = len(jobs)
+	}
+	if end > len(jobs) {
+		end = len(jobs)
+	}
+	pageJobs := jobs[start:end]
+	list := &jobListState{
+		Search: query.Search, PlatformStatus: query.PlatformStatus,
+		AssessmentStatus: query.AssessmentStatus, AssessmentIncomplete: query.AssessmentIncomplete,
+		HumanReview: query.HumanReview, OutreachStatus: query.OutreachStatus,
+		OutreachUncontacted: query.OutreachUncontacted, OutreachContacted: query.OutreachContacted,
+		Page: query.Page, PageSize: query.PageSize, Total: len(jobs), TotalPages: totalPages,
+		HasPrevious: query.Page > 1, HasNext: query.Page < totalPages,
+	}
+	if list.HasPrevious {
+		list.PreviousURL = jobListURL(query, query.Page-1, query.PageSize)
+	}
+	if list.HasNext {
+		list.NextURL = jobListURL(query, query.Page+1, query.PageSize)
+	}
+	for page := 1; page <= totalPages; page++ {
+		list.Pages = append(list.Pages, jobPageLink{
+			Number: page, URL: jobListURL(query, page, query.PageSize), Selected: page == query.Page,
+		})
+	}
+	for _, pageSize := range []int{10, 20, 50, 100} {
+		list.PageSizes = append(list.PageSizes, jobPageSize{
+			Size: pageSize, URL: jobListURL(query, 1, pageSize), Selected: pageSize == query.PageSize,
+		})
+	}
+	return list, pageJobs
+}
+
+func jobListURL(query jobListQuery, page, pageSize int) string {
+	return "/jobs?" + query.values(page, pageSize).Encode()
+}
+
+func summarizeWorkflow(run *discovery.RunView, jobs []webJobView, query jobListQuery) *workflowSummary {
+	summary := &workflowSummary{AssessmentTotal: len(jobs), OutreachTotal: len(jobs)}
+	if run != nil {
+		summary.DiscoveryCompleted = run.CompletedRanges
+		summary.DiscoveryTotal = run.TotalRanges
+		summary.DiscoveryPercent = progressPercent(summary.DiscoveryCompleted, summary.DiscoveryTotal)
+	}
+	for _, job := range jobs {
+		switch job.AssessmentStatus {
+		case jobpool.AssessmentStatusSuitable, jobpool.AssessmentStatusUnsuitable, jobpool.AssessmentStatusNeedsUserConfirmation:
+			summary.AssessmentCompleted++
+		}
+		if job.OutreachStatus == jobpool.OutreachStatusContacted {
+			summary.OutreachCompleted++
+		}
+	}
+	summary.AssessmentPercent = progressPercent(summary.AssessmentCompleted, summary.AssessmentTotal)
+	summary.OutreachPercent = progressPercent(summary.OutreachCompleted, summary.OutreachTotal)
+	pageSize := query.PageSize
+	if !validJobPageSize(pageSize) {
+		pageSize = defaultJobListQuery().PageSize
+	}
+	incomplete := query
+	incomplete.AssessmentStatus = ""
+	incomplete.AssessmentIncomplete = true
+	incomplete.OutreachUncontacted = false
+	incomplete.OutreachContacted = false
+	summary.AssessmentIncompleteURL = jobListURL(incomplete, 1, pageSize)
+	uncontacted := query
+	uncontacted.AssessmentIncomplete = false
+	uncontacted.OutreachStatus = ""
+	uncontacted.OutreachUncontacted = true
+	uncontacted.OutreachContacted = false
+	summary.OutreachUncontactedURL = jobListURL(uncontacted, 1, pageSize)
+	contacted := query
+	contacted.AssessmentIncomplete = false
+	contacted.OutreachStatus = ""
+	contacted.OutreachUncontacted = false
+	contacted.OutreachContacted = true
+	summary.OutreachContactedURL = jobListURL(contacted, 1, pageSize)
+	return summary
+}
+
+func progressPercent(completed, total int) int {
+	if total <= 0 || completed <= 0 {
+		return 0
+	}
+	if completed >= total {
+		return 100
+	}
+	return completed * 100 / total
 }
 
 func (h *handler) assessmentsState(ctx context.Context) (startupState, error) {
@@ -680,7 +1083,7 @@ func (h *handler) outreachState(ctx context.Context) (startupState, error) {
 		form.GreetingText = *settings.OutreachGreeting
 	}
 	return startupState{
-		Automation: settings, Jobs: toWebJobViews(jobs), EligibleOutreachCount: preview.EligibleJobCount,
+		Automation: settings, Jobs: toWebJobViews(jobs, settings.OutreachGreeting != nil), EligibleOutreachCount: preview.EligibleJobCount,
 		OutreachPreview: preview, OutreachForm: form,
 		OutreachSettingsNote: "自动打招呼开关只控制之后新符合条件的岗位入队；关闭后，已经安排的岗位仍会继续。",
 		Actions: firstUseActions{
@@ -1005,6 +1408,78 @@ func (h *handler) assessmentCommandAPI(command assessmentBatchCommand) http.Hand
 		}
 		writeJSON(w, http.StatusOK, result)
 	}
+}
+
+type jobsBatchRequest struct {
+	Action       string                                      `json:"action"`
+	JobIDs       []int64                                     `json:"jobIds"`
+	Decisions    []jobReviewDecisionRequest                  `json:"decisions"`
+	Confirmation automationsettings.RealOutreachConfirmation `json:"confirmation"`
+}
+
+type jobReviewDecisionRequest struct {
+	JobID          int64  `json:"jobId"`
+	ExpectedJDHash string `json:"expectedJdHash"`
+	Verdict        string `json:"verdict"`
+	Note           string `json:"note"`
+}
+
+func (h *handler) batchJobsAPI(w http.ResponseWriter, r *http.Request) {
+	var request jobsBatchRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	var (
+		result jobpool.BatchActionResult
+		err    error
+	)
+	switch request.Action {
+	case "assessment":
+		result, err = h.dependencies.Jobs.QueueAssessments(r.Context(), request.JobIDs)
+	case "review":
+		decisions, conversionErr := toReviewDecisions(request.Decisions)
+		if conversionErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"reason": conversionErr.Error()})
+			return
+		}
+		result, err = h.dependencies.Jobs.ReviewBatch(r.Context(), decisions)
+	case "outreach":
+		result, err = h.dependencies.Settings.QueueRealOutreach(r.Context(), request.JobIDs, request.Confirmation)
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"reason": "批量操作类型无效"})
+		return
+	}
+	if err != nil {
+		h.writeBatchCommandResult(w, result, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func toReviewDecisions(requests []jobReviewDecisionRequest) ([]jobpool.ReviewDecision, error) {
+	if len(requests) == 0 {
+		return nil, errors.New("请选择要人工复核的岗位")
+	}
+	decisions := make([]jobpool.ReviewDecision, 0, len(requests))
+	for _, request := range requests {
+		decisions = append(decisions, jobpool.ReviewDecision{
+			JobID: request.JobID, ExpectedJDHash: request.ExpectedJDHash,
+			Verdict: jobpool.HumanVerdict(request.Verdict), Note: request.Note,
+		})
+	}
+	return decisions, nil
+}
+
+func (h *handler) writeBatchCommandResult(w http.ResponseWriter, result jobpool.BatchActionResult, err error) {
+	var rejection businessRejection
+	if errors.As(err, &rejection) {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"code": rejection.RejectionCode(), "reason": rejection.RejectionReason(),
+			"succeeded": result.Succeeded, "skipped": result.Skipped,
+		})
+		return
+	}
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"reason": "批量操作失败，请稍后重试"})
 }
 
 func (h *handler) writeCommandResult(w http.ResponseWriter, err error) {

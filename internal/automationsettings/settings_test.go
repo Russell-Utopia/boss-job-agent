@@ -21,6 +21,20 @@ func openTestSettings(t *testing.T) (*Settings, *sql.DB) {
 	return New(db, jobpool.New(db)), db
 }
 
+func mustObserveOutreachJob(t *testing.T, pool *jobpool.Pool, platformJobID, title, company string, observedAt time.Time) jobpool.JobView {
+	t.Helper()
+	job, err := pool.Observe(t.Context(), 1, jobpool.Observation{
+		PlatformJobID: platformJobID, CanonicalURL: "https://www.zhipin.com/job_detail/" + platformJobID + ".html",
+		JobTitle: title, CompanyName: company, City: "福州", Salary: "20-30K",
+		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: observedAt,
+	})
+	if err != nil {
+		t.Fatalf("observe outreach job %q: %v", platformJobID, err)
+	}
+	return job
+}
+
 func TestSafeAutomationSettingsAreReadyOnFirstUse(t *testing.T) {
 	t.Parallel()
 
@@ -219,7 +233,7 @@ func TestQueueRealOutreachReturnsTheJobPoolBatchResult(t *testing.T) {
 
 	result, err := settings.QueueRealOutreach(
 		t.Context(), []int64{job.ID, 999}, RealOutreachConfirmation{
-			JobCount:        1,
+			JobCount:        2,
 			GreetingText:    "您好，想和您聊聊这个岗位",
 			TimeDescription: "全天可打招呼",
 			Confirmed:       true,
@@ -230,6 +244,40 @@ func TestQueueRealOutreachReturnsTheJobPoolBatchResult(t *testing.T) {
 	}
 	if result.Succeeded != 1 || len(result.Skipped) != 1 || result.Skipped[0].JobID != 999 {
 		t.Errorf("queue real outreach result = %#v, want one success and missing job 999", result)
+	}
+}
+
+func TestQueueRealOutreachRechecksEachSelectedJobAfterConfirmation(t *testing.T) {
+	t.Parallel()
+
+	settings, db := openTestSettings(t)
+	if err := settings.EnsureSafeDefaults(t.Context(), time.UnixMilli(1000)); err != nil {
+		t.Fatalf("ensure safe defaults: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(), `
+		UPDATE automation_settings
+		SET outreach_greeting_text = '您好，想和您聊聊这个岗位'
+		WHERE id = 1
+	`); err != nil {
+		t.Fatalf("configure greeting fixture: %v", err)
+	}
+	first := mustObserveOutreachJob(t, settings.pool, "boss-job-batch-first", "Go 后端工程师", "示例科技", time.UnixMilli(1000))
+	second := mustObserveOutreachJob(t, settings.pool, "boss-job-batch-second", "Go 平台工程师", "另一科技", time.UnixMilli(1001))
+	if err := settings.pool.Review(t.Context(), []jobpool.ReviewDecision{
+		{JobID: first.ID, ExpectedJDHash: first.JDHash, Verdict: jobpool.HumanVerdictSuitable},
+		{JobID: second.ID, ExpectedJDHash: second.JDHash, Verdict: jobpool.HumanVerdictUnsuitable},
+	}); err != nil {
+		t.Fatalf("review batch jobs: %v", err)
+	}
+
+	result, err := settings.QueueRealOutreach(t.Context(), []int64{first.ID, second.ID}, RealOutreachConfirmation{
+		JobCount: 2, GreetingText: "您好，想和您聊聊这个岗位", TimeDescription: "全天可打招呼", Confirmed: true,
+	})
+	if err != nil {
+		t.Fatalf("queue rechecked outreach: %v", err)
+	}
+	if result.Succeeded != 1 || len(result.Skipped) != 1 || result.Skipped[0].JobID != second.ID || result.Skipped[0].Code != "current_judgment_unsuitable" {
+		t.Fatalf("queue rechecked outreach result = %#v, want one success and one per-item skip", result)
 	}
 }
 

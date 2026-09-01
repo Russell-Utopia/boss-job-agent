@@ -152,6 +152,8 @@ button:disabled { background: #dce4e0; color: #74817b; cursor: not-allowed; }
 .metric strong { display: block; margin: 10px 0; font-size: 24px; }
 .progress { height: 6px; overflow: hidden; border-radius: 99px; background: #e9eeeb; }
 .progress i { display: block; width: 0; height: 100%; background: #24b57d; }
+.metric a { color: #147956; font-size: 13px; font-weight: 700; }
+.metric-links { display: flex !important; flex-wrap: wrap; gap: 10px; }
 
 dl { margin: 0; }
 dl div { padding: 13px 0; display: flex; justify-content: space-between; gap: 20px; border-bottom: 1px solid #edf0ee; }
@@ -214,6 +216,36 @@ dd { margin: 0; font-weight: 720; text-align: right; }
 .policy-report-status.tradeoff { color: #9b3d2f; }
 .policy-report-table { width: 100%; margin-top: 12px; border-collapse: collapse; font-size: 13px; }
 .policy-report-table th, .policy-report-table td { padding: 7px; border-bottom: 1px solid #edf0ee; text-align: left; }
+.job-workbench { overflow: hidden; }
+.job-workbench-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; }
+.job-workbench-heading h2 { margin-bottom: 0; }
+.job-filters { margin: 20px 0; padding: 16px; display: grid; grid-template-columns: minmax(180px, 1.4fr) repeat(4, minmax(120px, 1fr)) auto; align-items: end; gap: 10px; border: 1px solid #e0e9e3; border-radius: 12px; background: #f7f9f8; }
+.job-filters label, .job-batch-toolbar label { display: grid; gap: 6px; color: #4c5b55; font-size: 13px; font-weight: 700; }
+.job-filters input, .job-filters select, .job-batch-toolbar select { width: 100%; padding: 9px 10px; border: 1px solid #cad6d0; border-radius: 9px; background: white; font: inherit; }
+.job-filters button { white-space: nowrap; }
+.job-batch-form { margin-top: 20px; }
+.job-batch-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.job-batch-toolbar select { width: auto; min-width: 150px; }
+.job-batch-toolbar button { margin-left: auto; }
+.table-scroll { overflow-x: auto; margin-top: 10px; }
+.job-table { min-width: 980px; }
+.job-table th:first-child, .job-table td:first-child { width: 42px; text-align: center; }
+.job-table td:nth-child(2) { min-width: 220px; }
+.job-table td:nth-child(2) small { display: block; margin-top: 4px; color: #64736d; }
+.status-pill { display: inline-block; padding: 4px 8px; border-radius: 999px; background: #edf4ef; color: #3e5a4b; font-size: 12px; white-space: nowrap; }
+.job-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.quick-action { padding: 7px 9px; border-radius: 8px; font-size: 12px; }
+.link-button { display: inline-block; background: #566760; color: white; text-decoration: none; }
+.action-reason { display: block; max-width: 220px; margin-top: 6px; }
+.job-batch-result { margin-top: 14px; padding: 12px 14px; border-radius: 10px; background: #f1f7f3; color: #3e4c46; }
+.job-batch-result p { margin: 0; font-weight: 700; }
+.job-batch-result ul { margin: 8px 0 0; padding-left: 20px; }
+.empty-state { padding: 32px !important; text-align: center; color: #64736d; }
+.pagination { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 18px; color: #64736d; }
+.pagination a, .pagination strong { display: inline-block; min-width: 28px; padding: 5px 8px; border-radius: 7px; text-align: center; }
+.pagination a { color: #147956; background: #eef6f1; text-decoration: none; }
+.pagination strong { background: #147956; color: white; }
+.page-size-links { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; }
 
 @media (max-width: 760px) {
   body { display: block; }
@@ -226,6 +258,9 @@ dd { margin: 0; font-weight: 720; text-align: right; }
   .health-actions { margin-top: 18px; justify-content: flex-start; }
   .hero-card { display: block; }
   .action-block { margin-top: 24px; max-width: none; text-align: left; }
-  .summary-grid, .settings-grid, .detail-grid, .jd-grid, .policy-session { grid-template-columns: 1fr; }
+  .summary-grid, .settings-grid, .detail-grid, .jd-grid, .policy-session, .job-filters { grid-template-columns: 1fr; }
   .detail-heading { display: block; }
+  .job-workbench-heading { display: block; }
+  .job-batch-toolbar button { margin-left: 0; }
+  .page-size-links { margin-left: 0; }
 }

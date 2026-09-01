@@ -22,6 +22,145 @@
     outreachForm.querySelector("input[name='confirmed']").value = "true";
   });
 
+  const workbench = document.querySelector("#job-workbench");
+  if (workbench) {
+    const batchForm = workbench.querySelector("#job-batch-form");
+    const actionSelect = workbench.querySelector("#job-batch-action");
+    const verdictLabel = workbench.querySelector("#job-batch-verdict-label");
+    const verdictSelect = workbench.querySelector("#job-batch-verdict");
+    const submitButton = workbench.querySelector("#job-batch-submit");
+    const selectAll = workbench.querySelector("#job-select-all");
+    const selectionText = workbench.querySelector("#job-batch-selection");
+    const resultPanel = workbench.querySelector("#job-batch-result");
+    const boxes = () => Array.from(workbench.querySelectorAll(".job-select"));
+
+    function selectedBoxes() {
+      return boxes().filter((box) => box.checked && !box.disabled);
+    }
+
+    function allowed(box, action) {
+      return action !== "" && box.dataset[action + "Allowed"] === "true";
+    }
+
+    function updateBatchSelection() {
+      const action = actionSelect.value;
+      const enabledBoxes = boxes().filter((box) => allowed(box, action));
+      boxes().forEach((box) => {
+        box.disabled = !allowed(box, action);
+        if (box.disabled) box.checked = false;
+      });
+      selectAll.disabled = !action || !enabledBoxes.length;
+      selectAll.checked = enabledBoxes.length > 0 && enabledBoxes.every((box) => box.checked);
+      const selected = selectedBoxes();
+      submitButton.disabled = !action || !selected.length;
+      selectionText.textContent = action ? ("已选择 " + selected.length + " 个岗位") : "请先选择动作";
+      const review = action === "review";
+      verdictLabel.hidden = !review;
+      verdictSelect.hidden = !review;
+    }
+
+    actionSelect.addEventListener("change", () => {
+      boxes().forEach((box) => { box.checked = false; });
+      updateBatchSelection();
+    });
+    selectAll.addEventListener("change", () => {
+      boxes().forEach((box) => {
+        if (!box.disabled) box.checked = selectAll.checked;
+      });
+      updateBatchSelection();
+    });
+    boxes().forEach((box) => box.addEventListener("change", updateBatchSelection));
+
+    workbench.querySelectorAll(".quick-action[data-quick-action]").forEach((button) => {
+      button.addEventListener("click", () => {
+        actionSelect.value = button.dataset.quickAction;
+        updateBatchSelection();
+        const box = boxes().find((item) => item.dataset.jobId === button.dataset.jobId);
+        if (!box || box.disabled) return;
+        box.checked = true;
+        updateBatchSelection();
+        batchForm.requestSubmit();
+      });
+    });
+
+    function showBatchResult(payload) {
+      resultPanel.replaceChildren();
+      resultPanel.hidden = false;
+      const summary = document.createElement("p");
+      summary.textContent = "本次成功 " + (payload.succeeded || 0) + " 个，跳过 " + ((payload.skipped || []).length) + " 个。";
+      resultPanel.appendChild(summary);
+      if (payload.skipped?.length) {
+        const list = document.createElement("ul");
+        payload.skipped.forEach((item) => {
+          const row = document.createElement("li");
+          row.textContent = "岗位 #" + item.jobId + "：" + item.reason;
+          list.appendChild(row);
+        });
+        resultPanel.appendChild(list);
+      }
+    }
+
+    batchForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const action = actionSelect.value;
+      const selected = selectedBoxes();
+      if (!action || !selected.length) {
+        window.alert("请先选择一个动作和至少一个可执行岗位。");
+        return;
+      }
+      const body = {
+        action,
+        jobIds: selected.map((box) => Number(box.dataset.jobId)),
+      };
+      if (action === "review") {
+        body.decisions = selected.map((box) => ({
+          jobId: Number(box.dataset.jobId),
+          expectedJdHash: box.dataset.jdHash,
+          verdict: verdictSelect.value,
+        }));
+        if (!window.confirm("本批将人工复核 " + selected.length + " 个岗位为“" + (verdictSelect.value === "suitable" ? "适合" : "不适合") + "”。提交时后台仍会逐项检查陈旧 JD。继续吗？")) return;
+      }
+      if (action === "outreach") {
+        const greeting = batchForm.dataset.greeting || "";
+        const timeDescription = batchForm.dataset.timeDescription || "";
+        body.confirmation = {
+          jobCount: selected.length,
+          greetingText: greeting,
+          timeDescription,
+          confirmed: window.confirm("本批将授权 " + selected.length + " 个岗位。\n\n完整招呼语：" + greeting + "\n当前时间规则：" + timeDescription + "\n\n确认后只加入本批真实打招呼队列，不会开启自动打招呼。"),
+        };
+        if (!body.confirmation.confirmed) return;
+      }
+      submitButton.disabled = true;
+      try {
+        const response = await fetch(batchForm.action, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.reason || "批量操作失败，请稍后重试");
+        showBatchResult(payload);
+        selected.forEach((box) => { box.checked = false; });
+        updateBatchSelection();
+      } catch (error) {
+        resultPanel.hidden = false;
+        resultPanel.textContent = error.message;
+      } finally {
+        updateBatchSelection();
+      }
+    });
+
+    workbench.querySelectorAll(".job-filters input, .job-filters select").forEach((control) => {
+      control.addEventListener("change", () => {
+        workbench.querySelector(".job-filters input[name='page']").value = "1";
+        boxes().forEach((box) => { box.checked = false; });
+        updateBatchSelection();
+      });
+    });
+    updateBatchSelection();
+  }
+
   const root = document.querySelector("#policy-optimization");
   if (!root) return;
 
@@ -29,6 +168,7 @@
     draft: null,
     report: null,
     validationEnabled: false,
+    sampleSelectionDirty: false,
   };
   const generateButton = root.querySelector("#policy-generate");
   const validateButton = root.querySelector("#policy-validate");
@@ -45,6 +185,12 @@
   const checkboxes = () => Array.from(root.querySelectorAll(".policy-sample-checkbox"));
   const selectedIDs = () => checkboxes().filter((box) => box.checked).map((box) => Number(box.value));
   const allIDs = () => checkboxes().map((box) => Number(box.value));
+  const initialSampleSelection = () => selectedIDs().join(",");
+  const initialSelection = initialSampleSelection();
+
+  function updateSampleSelectionDirty() {
+    session.sampleSelectionDirty = initialSampleSelection() !== initialSelection;
+  }
 
   function showMessage(text) {
     message.textContent = text || "";
@@ -232,7 +378,9 @@
       return;
     }
     if (event.target.checked) randomHalf();
+    updateSampleSelectionDirty();
   });
+  checkboxes().forEach((box) => box.addEventListener("change", updateSampleSelectionDirty));
   draftText?.addEventListener("input", () => {
     if (!session.draft) return;
     session.report = null;
@@ -271,6 +419,7 @@
     try {
       await requestJSON("/api/policy/adopt", { text: draftText.value, changeNote: "用户采用策略候选稿", policyVersionId: session.draft.policyVersionId });
       discardDraft();
+      session.sampleSelectionDirty = false;
       window.location.href = "/assessments";
     } catch (error) {
       adopting = false;
@@ -282,13 +431,14 @@
   root.querySelector("#policy-discard")?.addEventListener("click", () => {
     if (!session.draft || !confirmDiscard("取消")) return;
     discardDraft();
+    session.sampleSelectionDirty = false;
     window.location.reload();
   });
 
   root.querySelector("#policy-regenerate")?.addEventListener("click", generate);
   window.addEventListener("beforeunload", (event) => {
-    if (!session.draft) return;
+    if (!session.draft && !session.sampleSelectionDirty) return;
     event.preventDefault();
-    event.returnValue = "候选稿和验收报告会永久丢失。";
+    event.returnValue = "候选稿、样本选择和验收报告会永久丢失。";
   });
 })();
