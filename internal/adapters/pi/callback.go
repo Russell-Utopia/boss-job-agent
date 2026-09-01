@@ -118,6 +118,12 @@ func (s *confirmationServer) result() error {
 	return nil
 }
 
+func (s *confirmationServer) called() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls > 0
+}
+
 func (s *confirmationServer) close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

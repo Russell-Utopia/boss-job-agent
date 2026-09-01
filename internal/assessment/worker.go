@@ -132,7 +132,13 @@ func (s *Service) admitAutomaticAssessments(ctx context.Context) error {
 // more than one Pi submission in flight for this local instance.
 func (s *Service) Run(ctx context.Context) {
 	if s.submitter != nil {
-		defer func() { _ = s.submitter.Close(context.Background()) }()
+		defer func() {
+			if err := s.submitter.Close(context.Background()); err != nil && s.logs != nil {
+				_ = s.logs.RecordTechnicalError(context.Background(), runlog.TechnicalError{
+					Flow: runlog.FlowAssessment, Stage: "close_pi_process", Err: err,
+				})
+			}
+		}()
 	}
 	runCycle := func() {
 		if err := s.runSchedulingCycle(ctx, s.now()); err != nil {

@@ -40,6 +40,7 @@ printf '%s\n' '{"type":"agent_end"}'
 	adapter := NewWithConfig(Config{
 		Executable: executable,
 		Arguments:  []string{promptPath},
+		RuntimeDir: filepath.Join(directory, "runtime"),
 	}, func(_ context.Context, batch assessment.ConfirmationBatch) (assessment.ConfirmationReceipt, error) {
 		confirmed <- batch
 		return assessment.ConfirmationReceipt{Results: []assessment.ConfirmationItemReceipt{{
@@ -117,7 +118,7 @@ printf '%s\n' '{"id":"assessment-submit","type":"response","command":"prompt","s
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"suitable"}]}}'
 printf '%s\n' '{"type":"agent_end"}'
 `)
-	adapter := NewWithConfig(Config{Executable: executable}, func(
+	adapter := NewWithConfig(Config{Executable: executable, RuntimeDir: filepath.Join(directory, "runtime")}, func(
 		context.Context,
 		assessment.ConfirmationBatch,
 	) (assessment.ConfirmationReceipt, error) {
@@ -152,7 +153,7 @@ status=$(curl -sS -o /dev/null -w '%{http_code}' \
 test "$status" = 400
 printf '%s\n' '{"type":"agent_end"}'
 `)
-	adapter := NewWithConfig(Config{Executable: executable}, func(
+	adapter := NewWithConfig(Config{Executable: executable, RuntimeDir: filepath.Join(directory, "runtime")}, func(
 		context.Context,
 		assessment.ConfirmationBatch,
 	) (assessment.ConfirmationReceipt, error) {
@@ -175,7 +176,7 @@ func TestAdapterClassifiesProcessStartFailureAsTransient(t *testing.T) {
 	t.Parallel()
 
 	adapter := NewWithConfig(
-		Config{Executable: filepath.Join(t.TempDir(), "missing-pi")},
+		Config{Executable: filepath.Join(t.TempDir(), "missing-pi"), RuntimeDir: filepath.Join(t.TempDir(), "runtime")},
 		func(context.Context, assessment.ConfirmationBatch) (assessment.ConfirmationReceipt, error) {
 			return assessment.ConfirmationReceipt{}, nil
 		},
@@ -187,6 +188,257 @@ func TestAdapterClassifiesProcessStartFailureAsTransient(t *testing.T) {
 		Jobs:    []assessment.AssessmentJobInput{{JobID: 1, AttemptNo: 1}},
 	})
 	assertSubmissionErrorCategory(t, err, assessment.SubmissionErrorTransient)
+}
+
+func TestAdapterTreatsContextInterruptionAsTransientAndRemovesItsProcessMarker(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	runtimeDirectory := filepath.Join(directory, "runtime")
+	executable := writeFakePi(t, directory, `
+set -eu
+IFS= read -r prompt
+while IFS= read -r ignored; do :; done
+`)
+	adapter := NewWithConfig(Config{
+		Executable: executable,
+		RuntimeDir: runtimeDirectory,
+	}, func(context.Context, assessment.ConfirmationBatch) (assessment.ConfirmationReceipt, error) {
+		return assessment.ConfirmationReceipt{}, nil
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	err := adapter.Submit(ctx, assessment.AssessmentRequest{
+		TraceID: "0123456789abcdef0123456789abcdef",
+		Jobs:    []assessment.AssessmentJobInput{{JobID: 1, AttemptNo: 1}},
+	})
+	assertSubmissionErrorCategory(t, err, assessment.SubmissionErrorTransient)
+	assertNoProcessMarkers(t, runtimeDirectory)
+}
+
+func TestAdapterCloseLetsAnOwnedPiExitGracefullyBeforeItEscalates(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	runtimeDirectory := filepath.Join(directory, "runtime")
+	gracefulPath := filepath.Join(directory, "graceful")
+	executable := writeFakePi(t, directory, fmt.Sprintf(`
+set -eu
+IFS= read -r prompt
+while IFS= read -r ignored; do :; done
+printf 'graceful' > %q
+`, gracefulPath))
+	adapter := NewWithConfig(Config{
+		Executable: executable,
+		RuntimeDir: runtimeDirectory,
+	}, func(context.Context, assessment.ConfirmationBatch) (assessment.ConfirmationReceipt, error) {
+		return assessment.ConfirmationReceipt{}, nil
+	})
+
+	result := make(chan error, 1)
+	go func() {
+		result <- adapter.Submit(t.Context(), assessment.AssessmentRequest{
+			TraceID: "0123456789abcdef0123456789abcdef",
+			Jobs:    []assessment.AssessmentJobInput{{JobID: 1, AttemptNo: 1}},
+		})
+	}()
+	waitForProcessMarker(t, runtimeDirectory)
+	if err := adapter.Close(t.Context()); err != nil {
+		t.Fatalf("close owned Pi: %v", err)
+	}
+	if err := <-result; err == nil {
+		t.Fatal("submit after graceful Pi shutdown succeeded, want interruption failure")
+	}
+	if _, err := os.Stat(gracefulPath); err != nil {
+		t.Fatalf("graceful shutdown marker: %v", err)
+	}
+	assertNoProcessMarkers(t, runtimeDirectory)
+}
+
+func TestAdapterCloseEscalatesOnlyAfterGracefulShutdownFails(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	runtimeDirectory := filepath.Join(directory, "runtime")
+	executable := writeFakePi(t, directory, `
+set -eu
+trap '' INT
+IFS= read -r prompt
+while :; do :; done
+`)
+	adapter := NewWithConfig(Config{
+		Executable: executable,
+		RuntimeDir: runtimeDirectory,
+	}, func(context.Context, assessment.ConfirmationBatch) (assessment.ConfirmationReceipt, error) {
+		return assessment.ConfirmationReceipt{}, nil
+	})
+
+	result := make(chan error, 1)
+	go func() {
+		result <- adapter.Submit(t.Context(), assessment.AssessmentRequest{
+			TraceID: "0123456789abcdef0123456789abcdef",
+			Jobs:    []assessment.AssessmentJobInput{{JobID: 1, AttemptNo: 1}},
+		})
+	}()
+	waitForProcessMarker(t, runtimeDirectory)
+	if err := adapter.Close(t.Context()); err != nil {
+		t.Fatalf("close Pi after escalation: %v", err)
+	}
+	if err := <-result; err == nil {
+		t.Fatal("submit after forced Pi shutdown succeeded, want interruption failure")
+	}
+	assertNoProcessMarkers(t, runtimeDirectory)
+}
+
+func TestAdapterRecoveryPreservesAProcessWhoseIdentityCannotBeVerified(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	runtimeDirectory := filepath.Join(directory, "runtime")
+	executable := writeFakePi(t, directory, `
+set -eu
+IFS= read -r prompt
+while IFS= read -r ignored; do :; done
+`)
+	owner := NewWithConfig(Config{
+		Executable: executable,
+		RuntimeDir: runtimeDirectory,
+	}, func(context.Context, assessment.ConfirmationBatch) (assessment.ConfirmationReceipt, error) {
+		return assessment.ConfirmationReceipt{}, nil
+	})
+	result := make(chan error, 1)
+	go func() {
+		result <- owner.Submit(t.Context(), assessment.AssessmentRequest{
+			TraceID: "0123456789abcdef0123456789abcdef",
+			Jobs:    []assessment.AssessmentJobInput{{JobID: 1, AttemptNo: 1}},
+		})
+	}()
+	markerPath := waitForProcessMarker(t, runtimeDirectory)
+	marker := readOwnedProcessMarker(t, markerPath)
+
+	restarted := NewWithConfig(Config{
+		RuntimeDir: runtimeDirectory,
+		Inspector: fixedProcessInspector{identity: ProcessIdentity{
+			StartTime:  marker.ProcessStartTime,
+			Executable: marker.Executable + ".different",
+		}},
+	}, func(context.Context, assessment.ConfirmationBatch) (assessment.ConfirmationReceipt, error) {
+		return assessment.ConfirmationReceipt{}, nil
+	})
+	if err := restarted.Recover(t.Context()); err == nil {
+		t.Fatal("recovery with mismatched executable succeeded, want ownership error")
+	}
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("mismatched marker was removed: %v", err)
+	}
+
+	if err := owner.Close(t.Context()); err != nil {
+		t.Fatalf("clean up owned Pi after failed recovery: %v", err)
+	}
+	if err := <-result; err == nil {
+		t.Fatal("owner submission succeeded after close, want interruption failure")
+	}
+}
+
+func readOwnedProcessMarker(t *testing.T, path string) processMarker {
+	t.Helper()
+	markerBytes, err := os.ReadFile(path) //nolint:gosec // The marker is created inside this test's private temporary directory.
+	if err != nil {
+		t.Fatalf("read owned Pi marker: %v", err)
+	}
+	var marker processMarker
+	if err := json.Unmarshal(markerBytes, &marker); err != nil {
+		t.Fatalf("decode owned Pi marker: %v", err)
+	}
+	if marker.ApplicationInstance == "" || marker.Worker == "" || marker.PID <= 0 ||
+		marker.ProcessStartTime == "" || marker.Executable == "" || marker.RunToken == "" {
+		t.Fatalf("owned Pi marker is incomplete: %#v", marker)
+	}
+	return marker
+}
+
+func TestAdapterRecoveryStopsTheMatchingOwnedProcessAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	runtimeDirectory := filepath.Join(directory, "runtime")
+	executable := writeFakePi(t, directory, `
+set -eu
+trap '' INT
+IFS= read -r prompt || true
+while :; do :; done
+`)
+	owner := NewWithConfig(Config{
+		Executable: executable,
+		RuntimeDir: runtimeDirectory,
+	}, func(context.Context, assessment.ConfirmationBatch) (assessment.ConfirmationReceipt, error) {
+		return assessment.ConfirmationReceipt{}, nil
+	})
+	result := make(chan error, 1)
+	go func() {
+		result <- owner.Submit(t.Context(), assessment.AssessmentRequest{
+			TraceID: "0123456789abcdef0123456789abcdef",
+			Jobs:    []assessment.AssessmentJobInput{{JobID: 1, AttemptNo: 1}},
+		})
+	}()
+	markerPath := waitForProcessMarker(t, runtimeDirectory)
+
+	restarted := NewWithConfig(Config{RuntimeDir: runtimeDirectory}, func(
+		context.Context,
+		assessment.ConfirmationBatch,
+	) (assessment.ConfirmationReceipt, error) {
+		return assessment.ConfirmationReceipt{}, nil
+	})
+	if err := restarted.Recover(t.Context()); err != nil {
+		t.Fatalf("recover matching owned Pi: %v", err)
+	}
+	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("matching marker after recovery = %v, want removed", err)
+	}
+	if err := <-result; err == nil {
+		t.Fatal("owner submission succeeded after restart recovery, want interruption failure")
+	}
+}
+
+type fixedProcessInspector struct {
+	identity ProcessIdentity
+	err      error
+}
+
+func (i fixedProcessInspector) Inspect(int) (ProcessIdentity, error) {
+	return i.identity, i.err
+}
+
+func waitForProcessMarker(t *testing.T, directory string) string {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := os.ReadDir(directory)
+		if err == nil {
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), processMarkerPrefix) && strings.HasSuffix(entry.Name(), processMarkerSuffix) {
+					return filepath.Join(directory, entry.Name())
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for a Pi process marker in %s", directory)
+	return ""
+}
+
+func assertNoProcessMarkers(t *testing.T, directory string) {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatalf("read Pi runtime directory: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), processMarkerPrefix) && strings.HasSuffix(entry.Name(), processMarkerSuffix) {
+			t.Errorf("Pi process marker %q remains after process exit", entry.Name())
+		}
+	}
 }
 
 func assertSubmissionErrorCategory(
@@ -299,7 +551,7 @@ curl -fsS \
   "$BOSS_JOB_AGENT_CONFIRM_URL" >/dev/null
 printf '%%s\n' '{"type":"agent_end"}'
 `, fixture.jobs[0].ID, fixture.jobs[1].ID, fixture.jobs[2].ID))
-	adapter := NewWithConfig(Config{Executable: executable}, fixture.service.Confirm)
+	adapter := NewWithConfig(Config{Executable: executable, RuntimeDir: filepath.Join(directory, "runtime")}, fixture.service.Confirm)
 	t.Cleanup(func() { _ = adapter.Close(context.Background()) })
 
 	if err := adapter.Submit(t.Context(), assessment.AssessmentRequest{

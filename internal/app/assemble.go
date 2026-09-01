@@ -66,6 +66,11 @@ func assemble(ctx context.Context, config Config) (*assembled, error) {
 	if err := settings.EnsureSafeDefaults(ctx, now); err != nil {
 		return nil, closeApplicationStorageAfterError(database, logs, err)
 	}
+	if err := assessmentAdapter.Recover(ctx); err != nil {
+		_ = logs.RecordTechnicalError(ctx, runlog.TechnicalError{
+			Flow: runlog.FlowAssessment, Stage: "recover_pi_process", Err: err,
+		})
+	}
 
 	discoveryService := discovery.New(
 		database,
