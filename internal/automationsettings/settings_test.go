@@ -238,9 +238,19 @@ func TestConfigureOutreachSortsWindowsAndUsesAsiaShanghai(t *testing.T) {
 
 	settings, _ := openTestSettings(t)
 	mustEnsureSettingsDefaults(t, settings)
-	if err := settings.ConfigureOutreach(t.Context(), true, "  您好，想聊聊  ", []OutreachTimeWindow{
+	impact, err := settings.PreviewOutreachConfiguration(t.Context(), true, "  您好，想聊聊  ", []OutreachTimeWindow{
 		{Start: "14:00", End: "18:00"},
 		{Start: "09:00", End: "12:00"},
+	})
+	if err != nil {
+		t.Fatalf("preview outreach: %v", err)
+	}
+	if err := settings.ConfigureOutreachWithConfirmation(t.Context(), true, "  您好，想聊聊  ", []OutreachTimeWindow{
+		{Start: "14:00", End: "18:00"},
+		{Start: "09:00", End: "12:00"},
+	}, OutreachSettingsConfirmation{
+		EligibleJobCount: impact.EligibleJobCount, GreetingText: impact.GreetingText,
+		TimeDescription: impact.TimeDescription, Confirmed: true,
 	}); err != nil {
 		t.Fatalf("configure outreach: %v", err)
 	}
@@ -283,13 +293,51 @@ func TestConfigureOutreachRejectsOverlappingWindowsAndMissingGreetingWhenEnabled
 		t.Fatalf("ensure safe defaults: %v", err)
 	}
 
-	err := settings.ConfigureOutreach(t.Context(), true, "", []OutreachTimeWindow{{Start: "09:00", End: "12:00"}})
+	err := settings.ConfigureOutreachWithConfirmation(t.Context(), true, "", []OutreachTimeWindow{{Start: "09:00", End: "12:00"}}, OutreachSettingsConfirmation{})
 	assertSettingsRejectionCode(t, err, "outreach_greeting_required")
 	err = settings.ConfigureOutreach(t.Context(), false, "您好", []OutreachTimeWindow{
 		{Start: "09:00", End: "12:00"}, {Start: "11:59", End: "13:00"},
 	})
 	assertSettingsRejectionCode(t, err, "outreach_time_windows_overlap")
 	assertSafeDefaults(t, mustGetSettingsView(t, settings))
+}
+
+func TestConfigureOutreachWithConfirmationRequiresCurrentImpactConfirmation(t *testing.T) {
+	t.Parallel()
+
+	settings, _ := openTestSettings(t)
+	if err := settings.EnsureSafeDefaults(t.Context(), time.UnixMilli(1000)); err != nil {
+		t.Fatalf("ensure safe defaults: %v", err)
+	}
+	assertSettingsRejectionCode(t, settings.ConfigureOutreach(t.Context(), true, "您好，想聊聊", nil), "outreach_confirmation_required")
+
+	err := settings.ConfigureOutreachWithConfirmation(
+		t.Context(), true, "您好，想聊聊", nil, OutreachSettingsConfirmation{},
+	)
+	assertSettingsRejectionCode(t, err, "outreach_confirmation_required")
+	assertSafeDefaults(t, mustGetSettingsView(t, settings))
+
+	err = settings.ConfigureOutreachWithConfirmation(
+		t.Context(), true, "您好，想聊聊", nil, OutreachSettingsConfirmation{
+			EligibleJobCount: 0, GreetingText: "您好，想聊聊", TimeDescription: "全天可打招呼", Confirmed: true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("configure outreach with confirmed impact: %v", err)
+	}
+	view := mustGetSettingsView(t, settings)
+	if !view.AutomaticOutreachEnabled || view.OutreachGreeting == nil || *view.OutreachGreeting != "您好，想聊聊" {
+		t.Errorf("confirmed outreach settings = %#v, want enabled greeting", view)
+	}
+	if err := settings.ConfigureOutreachWithConfirmation(
+		t.Context(), true, "新的招呼语", nil, OutreachSettingsConfirmation{},
+	); err != nil {
+		t.Fatalf("edit enabled outreach without re-confirming authorization: %v", err)
+	}
+	view = mustGetSettingsView(t, settings)
+	if view.OutreachGreeting == nil || *view.OutreachGreeting != "新的招呼语" {
+		t.Errorf("edited outreach greeting = %#v, want new greeting", view.OutreachGreeting)
+	}
 }
 
 func TestQueueRealOutreachRequiresCurrentExplicitConfirmation(t *testing.T) {

@@ -136,8 +136,9 @@ func newService(
 }
 
 // Run performs an immediate scheduling cycle and then scans once per minute.
-// This service consumes only work already authorized by Settings and persisted
-// by JobPool; it never changes the automatic-outreach setting itself.
+// When automatic outreach is enabled, it admits newly eligible work through
+// Settings and consumes all work already persisted by JobPool. It never
+// changes the automatic-outreach setting itself.
 func (s *Service) Run(ctx context.Context) {
 	runCycle := func() {
 		if s.logs != nil && !s.logs.Health().Healthy {
@@ -166,18 +167,18 @@ func (s *Service) runSchedulingCycle(ctx context.Context, now time.Time) error {
 	if err := validateSchedulingCycle(s, now); err != nil {
 		return err
 	}
-	settings, err := s.settings.Get(ctx)
-	if err != nil {
-		return fmt.Errorf("read automation settings for outreach: %w", err)
+	settings, admissionErr := s.settings.AdmitAutomaticOutreach(ctx, outreachBatchSize)
+	if admissionErr != nil && settings == nil {
+		return fmt.Errorf("read automation settings for outreach: %w", admissionErr)
 	}
 	work, err := s.pool.ClaimOutreachWithinWindow(ctx, jobpool.OutreachClaim{
 		Worker: "outreach-worker-1", Limit: outreachBatchSize,
 		ClaimedAt: now, LeaseUntil: now.Add(outreachWorkerLease),
 	}, settings.AllowsOutreachAt(now))
 	if err != nil {
-		return fmt.Errorf("claim outreach work: %w", err)
+		return errors.Join(admissionErr, fmt.Errorf("claim outreach work: %w", err))
 	}
-	return s.processWorkBatch(ctx, work)
+	return errors.Join(admissionErr, s.processWorkBatch(ctx, work))
 }
 
 func validateSchedulingCycle(s *Service, now time.Time) error {

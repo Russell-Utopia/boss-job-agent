@@ -391,6 +391,189 @@ func TestAssessmentPageRejectsANonPositiveProcessingLimit(t *testing.T) {
 	assertTextContains(t, body, []string{"AI 同时鉴定数必须是正整数"})
 }
 
+func TestOutreachSettingsPreviewAndRequireExplicitConfirmation(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	jobID := seedOutreachSettingsPageFixtures(t, runtime)
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	client := server.Client()
+
+	assertPageContains(t, client, server.URL+"/outreach", []string{
+		"开启前影响预览", "当前可入队岗位：1", "完整固定招呼语", "全天可打招呼",
+		`action="/outreach/settings"`, `name="automaticOutreachEnabled"`, `name="outreachGreetingText"`,
+		"时间窗预设", "上午 09:00", "自定义时间窗",
+	})
+	preview := postFormResponse(t, client, server.URL+"/outreach/settings", url.Values{
+		"automaticOutreachEnabled": {"on"}, "outreachGreetingText": {"您好，想和您聊聊"},
+		"outreachTimeWindowStart": {"09:00"}, "outreachTimeWindowEnd": {"10:00"},
+		"confirmed": {"false"},
+	})
+	previewBody := readResponseBody(t, preview)
+	if preview.StatusCode != http.StatusOK {
+		t.Fatalf("outreach settings preview status = %d; body=%s", preview.StatusCode, previewBody)
+	}
+	assertTextContains(t, previewBody, []string{
+		"请确认开启自动打招呼", "1 个岗位", "您好，想和您聊聊", "09:00-10:00（Asia/Shanghai）",
+	})
+	var enabled int
+	if err := runtime.db.QueryRowContext(t.Context(), `SELECT automatic_outreach_enabled FROM automation_settings WHERE id = 1`).Scan(&enabled); err != nil {
+		t.Fatalf("read outreach setting after preview: %v", err)
+	}
+	if enabled != 0 {
+		t.Fatalf("automatic outreach enabled after preview = %d, want 0", enabled)
+	}
+	assertQueuedOutreachUnchanged(t, runtime, jobID)
+
+	noRedirectClient := *client
+	noRedirectClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	confirmed := postFormResponse(t, &noRedirectClient, server.URL+"/outreach/settings", url.Values{
+		"automaticOutreachEnabled": {"on"}, "outreachGreetingText": {"您好，想和您聊聊"},
+		"outreachTimeWindowStart": {"09:00"}, "outreachTimeWindowEnd": {"10:00"},
+		"confirmed": {"true"}, "confirmedEligibleJobCount": {"1"},
+		"confirmedGreetingText":    {"您好，想和您聊聊"},
+		"confirmedTimeDescription": {"09:00-10:00（Asia/Shanghai）"},
+	})
+	defer closeResponseBody(t, confirmed.Body)
+	if confirmed.StatusCode != http.StatusSeeOther || confirmed.Header.Get("Location") != "/outreach" {
+		t.Fatalf("confirmed outreach settings response = %d location %q, want redirect to /outreach", confirmed.StatusCode, confirmed.Header.Get("Location"))
+	}
+	if err := runtime.db.QueryRowContext(t.Context(), `SELECT automatic_outreach_enabled FROM automation_settings WHERE id = 1`).Scan(&enabled); err != nil {
+		t.Fatalf("read outreach setting after confirmation: %v", err)
+	}
+	if enabled != 1 {
+		t.Errorf("automatic outreach enabled after confirmation = %d, want 1", enabled)
+	}
+}
+
+func assertQueuedOutreachUnchanged(t *testing.T, runtime *testWeb, jobID int64) {
+	t.Helper()
+	queuedView, err := runtime.pool.GetJob(t.Context(), jobID)
+	if err != nil {
+		t.Fatalf("get existing outreach after preview: %v", err)
+	}
+	if queuedView.OutreachStatus != jobpool.OutreachStatusPending || queuedView.OutreachGreetingText != "已有岗位的冻结招呼语" {
+		t.Fatalf("existing outreach after preview = %#v, want unchanged pending queue", queuedView)
+	}
+}
+
+func seedOutreachSettingsPageFixtures(t *testing.T, runtime *testWeb) int64 {
+	t.Helper()
+	job := mustObserveWebJob(t, runtime.pool, jobpool.Observation{
+		PlatformJobID: "boss-job-automatic-settings",
+		CanonicalURL:  "https://www.zhipin.com/job_detail/boss-job-automatic-settings.html",
+		JobTitle:      "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
+	})
+	if err := runtime.pool.Review(t.Context(), []jobpool.ReviewDecision{{
+		JobID: job.ID, ExpectedJDHash: job.JDHash, Verdict: jobpool.HumanVerdictSuitable,
+	}}); err != nil {
+		t.Fatalf("review eligible outreach job: %v", err)
+	}
+	queuedResult, err := runtime.pool.QueueAuthorizedOutreach(t.Context(), []int64{job.ID}, jobpool.OutreachAuthorization{
+		GreetingText: "已有岗位的冻结招呼语", TimeDescription: "全天可打招呼",
+	})
+	if err != nil || queuedResult.Succeeded != 1 {
+		t.Fatalf("queue existing outreach job: result=%#v err=%v", queuedResult, err)
+	}
+	previewJob := mustObserveWebJob(t, runtime.pool, jobpool.Observation{
+		PlatformJobID: "boss-job-automatic-settings-preview",
+		CanonicalURL:  "https://www.zhipin.com/job_detail/boss-job-automatic-settings-preview.html",
+		JobTitle:      "Go 应用工程师", CompanyName: "预览科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责 Go 应用开发", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
+	})
+	if err := runtime.pool.Review(t.Context(), []jobpool.ReviewDecision{{
+		JobID: previewJob.ID, ExpectedJDHash: previewJob.JDHash, Verdict: jobpool.HumanVerdictSuitable,
+	}}); err != nil {
+		t.Fatalf("review preview outreach job: %v", err)
+	}
+	return job.ID
+}
+
+func TestOutreachSettingsAPIRefusesUnconfirmedEnableAndAcceptsFreshConfirmation(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	client := server.Client()
+
+	response := postJSONResponse(t, client, server.URL+"/api/outreach/settings", `{
+		"automaticOutreachEnabled":true,
+		"greetingText":"您好，想和您聊聊",
+		"timeWindows":[],
+		"confirmation":{"confirmed":false}
+	}`)
+	defer closeResponseBody(t, response.Body)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("unconfirmed outreach settings status = %d, want 409", response.StatusCode)
+	}
+	var rejection struct {
+		Code    string                                  `json:"code"`
+		Preview automationsettings.OutreachChangeImpact `json:"preview"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&rejection); err != nil {
+		t.Fatalf("decode unconfirmed outreach settings: %v", err)
+	}
+	if rejection.Code != "outreach_confirmation_required" || rejection.Preview.GreetingText != "您好，想和您聊聊" {
+		t.Errorf("unconfirmed outreach settings response = %#v", rejection)
+	}
+
+	response = postJSONResponse(t, client, server.URL+"/api/outreach/settings", `{
+		"automaticOutreachEnabled":true,
+		"greetingText":"您好，想和您聊聊",
+		"timeWindows":[],
+		"confirmation":{"eligibleJobCount":0,"greetingText":"您好，想和您聊聊","timeDescription":"全天可打招呼","confirmed":true}
+	}`)
+	defer closeResponseBody(t, response.Body)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("confirmed outreach settings API status = %d, want 200", response.StatusCode)
+	}
+	var enabled int
+	if err := runtime.db.QueryRowContext(t.Context(), `SELECT automatic_outreach_enabled FROM automation_settings WHERE id = 1`).Scan(&enabled); err != nil {
+		t.Fatalf("read outreach setting after API confirmation: %v", err)
+	}
+	if enabled != 1 {
+		t.Errorf("automatic outreach enabled after API confirmation = %d, want 1", enabled)
+	}
+}
+
+func TestOutreachSettingsAddsPresetWindowWithoutEnablingAutomation(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	client := server.Client()
+
+	response := postFormResponse(t, client, server.URL+"/outreach/settings", url.Values{
+		"automaticOutreachEnabled": {""}, "outreachGreetingText": {""},
+		"outreachTimeWindowStart": {"14:00"}, "outreachTimeWindowEnd": {"18:00"},
+		"outreachWindowPreset": {"morning"},
+	})
+	defer closeResponseBody(t, response.Body)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("add preset window status = %d, want 200", response.StatusCode)
+	}
+	settings := automationsettings.New(runtime.db, runtime.pool)
+	view, err := settings.Get(t.Context())
+	if err != nil {
+		t.Fatalf("read settings after preset window: %v", err)
+	}
+	if view.AutomaticOutreachEnabled {
+		t.Fatal("adding a preset window enabled automatic outreach")
+	}
+	if view.OutreachTimeDescription != "09:00-12:00、14:00-18:00（Asia/Shanghai）" {
+		t.Errorf("preset outreach time description = %q", view.OutreachTimeDescription)
+	}
+}
+
 func TestOnlineResumePageRunsTheCompleteControlledRefreshFlow(t *testing.T) {
 	t.Parallel()
 

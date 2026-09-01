@@ -170,6 +170,7 @@ dd { margin: 0; font-weight: 720; text-align: right; }
 .outreach-job span { display: grid; gap: 3px; }
 .outreach-job small { color: #64736d; }
 .button-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+[popover] { max-width: 620px; border: 1px solid #dee6e1; border-radius: 18px; box-shadow: 0 16px 45px rgba(30, 55, 45, .14); }
 .inline-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
 .inline-actions form { margin: 0; }
 .detail-card, .detail-grid, .review-card { max-width: 1080px; margin: 22px auto 0; }

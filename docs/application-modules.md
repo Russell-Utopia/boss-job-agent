@@ -130,11 +130,14 @@ Run(ctx)                         // 只由后台进程启动
 Get(ctx) -> AutomationSettingsView
 ConfigureAssessment(ctx, enabled, processingLimit)
 PreviewOutreachChange(ctx, enabled) -> OutreachChangeImpact
+PreviewOutreachConfiguration(ctx, enabled, greetingText, timeWindows) -> OutreachChangeImpact
 ConfigureOutreach(ctx, enabled, greetingText, timeWindows)
+ConfigureOutreachWithConfirmation(ctx, enabled, greetingText, timeWindows, confirmation)
+AdmitAutomaticOutreach(ctx, limit) -> AutomationSettingsView
 QueueRealOutreach(ctx, jobIDs, confirmation) -> BatchActionResult
 ```
 
-设置模块只暴露两组业务配置、一个真实打招呼影响预览和一个手工真实打招呼命令，不提供通用键值写入接口。它校验鉴定上限、固定招呼语和打招呼时间窗，并只更新 `automation_settings` 的单行记录；`AdviceService` 和 `PostService` 读取当前设置决定是否自动入队或能否领取真实打招呼。`PreviewOutreachChange` 统一计算当前可以进入真实队列的岗位数，Web 不得复制这套筛选规则。`QueueRealOutreach` 重新读取当前设置、验证页面确认仍与当前岗位数量、完整招呼语和时间窗一致，再调用 `JobPool.QueueAuthorizedOutreach` 交付可信授权；后者重新校验每个岗位并冻结招呼语。配置变化如何唤醒后台循环属于模块内部实现，不要求界面管理 Worker。
+设置模块只暴露两组业务配置、一个真实打招呼影响预览、自动入队和一个手工真实打招呼命令，不提供通用键值写入接口。它校验鉴定上限、固定招呼语和打招呼时间窗，并只更新 `automation_settings` 的单行记录；`AdviceService` 和 `PostService` 读取当前设置决定是否自动入队或能否领取真实打招呼。首次开启自动打招呼必须通过 `ConfigureOutreachWithConfirmation` 预览并确认当前岗位数量、完整招呼语和时间规则；旧的 `ConfigureOutreach` 只允许关闭或修改已经开启的设置，不能绕过首次确认。`AdmitAutomaticOutreach` 在读取设置和自动入队之间保持模块内的串行保护，关闭开关不会撤回已经入队的工作。`PreviewOutreachChange` 统一计算当前可以进入真实队列的岗位数，Web 不得复制这套筛选规则。`QueueRealOutreach` 重新读取当前设置、验证页面确认仍与当前岗位数量、完整招呼语和时间窗一致，再调用 `JobPool.QueueAuthorizedOutreach` 交付可信授权；后者重新校验每个岗位并冻结招呼语。配置变化如何唤醒后台循环属于模块内部实现，不要求界面管理后台处理。
 
 应用第一次创建 `automation_settings` 时使用安全默认值：自动岗位鉴定关闭、同时鉴定岗位上限为 5、自动打招呼关闭、固定招呼语尚未配置、打招呼时间不受限制。这些默认值只用于第一次初始化；之后每次启动都读取用户上次保存的同一行，不能重新覆盖设置。
 

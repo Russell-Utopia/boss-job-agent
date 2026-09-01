@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Russell-Utopia/boss-job-agent/internal/automationsettings/internal/sqlitedb"
@@ -18,6 +19,7 @@ import (
 type Settings struct {
 	queries *sqlitedb.Queries
 	pool    *jobpool.Pool
+	mu      sync.RWMutex
 }
 
 type View struct {
@@ -49,6 +51,15 @@ type RealOutreachConfirmation struct {
 	Confirmed       bool   `json:"confirmed"`
 }
 
+// OutreachSettingsConfirmation proves that the user saw the current impact
+// of enabling automatic outreach before the setting is persisted.
+type OutreachSettingsConfirmation struct {
+	EligibleJobCount int    `json:"eligibleJobCount"`
+	GreetingText     string `json:"greetingText"`
+	TimeDescription  string `json:"timeDescription"`
+	Confirmed        bool   `json:"confirmed"`
+}
+
 type ActionAvailability struct {
 	Allowed bool   `json:"allowed"`
 	Code    string `json:"code,omitempty"`
@@ -78,6 +89,8 @@ func New(db *sql.DB, pool *jobpool.Pool) *Settings {
 
 // EnsureSafeDefaults creates the singleton row without changing saved settings.
 func (s *Settings) EnsureSafeDefaults(ctx context.Context, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.queries.EnsureSafeDefaults(ctx, now.UnixMilli()); err != nil {
 		return fmt.Errorf("create safe automation settings: %w", err)
 	}
@@ -85,31 +98,7 @@ func (s *Settings) EnsureSafeDefaults(ctx context.Context, now time.Time) error 
 }
 
 func (s *Settings) Get(ctx context.Context) (View, error) {
-	row, err := s.queries.GetAutomationSettings(ctx)
-	if err != nil {
-		return View{}, fmt.Errorf("query automation settings: %w", err)
-	}
-	var windows []OutreachTimeWindow
-	if err := json.Unmarshal([]byte(row.OutreachTimeWindowsJson), &windows); err != nil {
-		return View{}, fmt.Errorf("decode outreach time windows: %w", err)
-	}
-	windows, err = normalizeOutreachTimeWindows(windows)
-	if err != nil {
-		return View{}, fmt.Errorf("validate saved outreach time windows: %w", err)
-	}
-	var greeting *string
-	if row.OutreachGreetingText.Valid {
-		greeting = &row.OutreachGreetingText.String
-	}
-	timeDescription := outreachTimeDescription(windows)
-	return View{
-		AutomaticAssessmentEnabled: row.AutomaticAssessmentEnabled == 1,
-		AssessmentProcessingLimit:  int(row.AssessmentProcessingLimit),
-		AutomaticOutreachEnabled:   row.AutomaticOutreachEnabled == 1,
-		OutreachGreeting:           greeting,
-		OutreachTimeWindows:        windows,
-		OutreachTimeDescription:    timeDescription,
-	}, nil
+	return s.get(ctx)
 }
 
 // AllowsOutreachAt evaluates the configured daily half-open windows in the
@@ -157,6 +146,98 @@ func (s *Settings) ConfigureAssessment(ctx context.Context, enabled bool, proces
 // authorization settings. A greeting is retained while automatic outreach is
 // disabled, so a later explicit enable does not need to recreate it.
 func (s *Settings) ConfigureOutreach(
+	ctx context.Context,
+	enabled bool,
+	greetingText string,
+	windows []OutreachTimeWindow,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if enabled {
+		current, err := s.get(ctx)
+		if err != nil {
+			return err
+		}
+		if !current.AutomaticOutreachEnabled {
+			return &Rejection{
+				Code:   "outreach_confirmation_required",
+				Reason: "首次开启自动打招呼必须先预览并确认影响",
+			}
+		}
+	}
+	return s.configureOutreach(ctx, enabled, greetingText, windows)
+}
+
+// ConfigureOutreachWithConfirmation is the user-facing configuration seam.
+// Enabling automatic outreach requires a fresh confirmation of the current
+// eligible-job count, complete greeting and time rule. Disabling or editing
+// an already enabled setting does not revoke work that is already queued.
+func (s *Settings) ConfigureOutreachWithConfirmation(
+	ctx context.Context,
+	enabled bool,
+	greetingText string,
+	windows []OutreachTimeWindow,
+	confirmation OutreachSettingsConfirmation,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if enabled {
+		current, err := s.get(ctx)
+		if err != nil {
+			return err
+		}
+		if current.AutomaticOutreachEnabled {
+			return s.configureOutreach(ctx, enabled, greetingText, windows)
+		}
+		impact, err := s.PreviewOutreachConfiguration(ctx, enabled, greetingText, windows)
+		if err != nil {
+			return err
+		}
+		if !confirmation.Confirmed {
+			return &Rejection{
+				Code:   "outreach_confirmation_required",
+				Reason: "开启自动打招呼前必须确认当前可入队岗位、完整招呼语和时间规则",
+			}
+		}
+		if confirmation.EligibleJobCount != impact.EligibleJobCount ||
+			strings.Join(strings.Fields(confirmation.GreetingText), " ") != impact.GreetingText ||
+			strings.TrimSpace(confirmation.TimeDescription) != impact.TimeDescription {
+			return &Rejection{
+				Code:   "outreach_confirmation_stale",
+				Reason: "岗位资格、完整招呼语或时间规则已变化，请刷新后重新确认",
+			}
+		}
+	}
+	return s.configureOutreach(ctx, enabled, greetingText, windows)
+}
+
+// AdmitAutomaticOutreach reads the current setting and, while holding the
+// same lock used by configuration, admits only newly eligible automatic work.
+// A non-nil view is returned with an admission error so the caller can still
+// process already queued work using the current time rule.
+func (s *Settings) AdmitAutomaticOutreach(ctx context.Context, limit int) (*View, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	view, err := s.get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !view.AutomaticOutreachEnabled {
+		return &view, nil
+	}
+	if view.OutreachGreeting == nil {
+		return &view, errors.New("automatic outreach is enabled without a fixed greeting")
+	}
+	if _, err := s.pool.AdmitOutreach(ctx, jobpool.OutreachAuthorization{
+		GreetingText:    *view.OutreachGreeting,
+		TimeDescription: view.OutreachTimeDescription,
+	}, limit); err != nil {
+		return &view, fmt.Errorf("admit automatic outreach: %w", err)
+	}
+	return &view, nil
+}
+
+func (s *Settings) configureOutreach(
 	ctx context.Context,
 	enabled bool,
 	greetingText string,
@@ -306,14 +387,62 @@ func (s *Settings) QueueRealOutreach(
 }
 
 func (s *Settings) PreviewOutreachChange(ctx context.Context, automaticEnabled bool) (OutreachChangeImpact, error) {
-	view, err := s.Get(ctx)
+	view, err := s.get(ctx)
 	if err != nil {
 		return OutreachChangeImpact{}, err
 	}
-	if automaticEnabled && view.OutreachGreeting == nil {
+	greeting := ""
+	if view.OutreachGreeting != nil {
+		greeting = *view.OutreachGreeting
+	}
+	return s.PreviewOutreachConfiguration(ctx, automaticEnabled, greeting, view.OutreachTimeWindows)
+}
+
+func (s *Settings) get(ctx context.Context) (View, error) {
+	row, err := s.queries.GetAutomationSettings(ctx)
+	if err != nil {
+		return View{}, fmt.Errorf("query automation settings: %w", err)
+	}
+	var windows []OutreachTimeWindow
+	if err := json.Unmarshal([]byte(row.OutreachTimeWindowsJson), &windows); err != nil {
+		return View{}, fmt.Errorf("decode outreach time windows: %w", err)
+	}
+	windows, err = normalizeOutreachTimeWindows(windows)
+	if err != nil {
+		return View{}, fmt.Errorf("validate saved outreach time windows: %w", err)
+	}
+	var greeting *string
+	if row.OutreachGreetingText.Valid {
+		greeting = &row.OutreachGreetingText.String
+	}
+	timeDescription := outreachTimeDescription(windows)
+	return View{
+		AutomaticAssessmentEnabled: row.AutomaticAssessmentEnabled == 1,
+		AssessmentProcessingLimit:  int(row.AssessmentProcessingLimit),
+		AutomaticOutreachEnabled:   row.AutomaticOutreachEnabled == 1,
+		OutreachGreeting:           greeting,
+		OutreachTimeWindows:        windows,
+		OutreachTimeDescription:    timeDescription,
+	}, nil
+}
+
+// PreviewOutreachConfiguration applies the same normalization and eligibility
+// rules as configuration, but never changes settings or platform jobs.
+func (s *Settings) PreviewOutreachConfiguration(
+	ctx context.Context,
+	automaticEnabled bool,
+	greetingText string,
+	windows []OutreachTimeWindow,
+) (OutreachChangeImpact, error) {
+	greeting := strings.Join(strings.Fields(greetingText), " ")
+	if automaticEnabled && greeting == "" {
 		return OutreachChangeImpact{}, &Rejection{
 			Code: "outreach_greeting_required", Reason: "开启自动打招呼前必须配置固定招呼语",
 		}
+	}
+	normalizedWindows, err := normalizeOutreachTimeWindows(windows)
+	if err != nil {
+		return OutreachChangeImpact{}, err
 	}
 	count, err := s.pool.CountEligibleOutreach(ctx, nil)
 	if err != nil {
@@ -322,11 +451,9 @@ func (s *Settings) PreviewOutreachChange(ctx context.Context, automaticEnabled b
 	impact := OutreachChangeImpact{
 		AutomaticOutreachEnabled: automaticEnabled,
 		EligibleJobCount:         count,
-		TimeDescription:          view.OutreachTimeDescription,
-		OutreachTimeWindows:      append([]OutreachTimeWindow(nil), view.OutreachTimeWindows...),
-	}
-	if view.OutreachGreeting != nil {
-		impact.GreetingText = *view.OutreachGreeting
+		GreetingText:             greeting,
+		TimeDescription:          outreachTimeDescription(normalizedWindows),
+		OutreachTimeWindows:      append([]OutreachTimeWindow(nil), normalizedWindows...),
 	}
 	return impact, nil
 }

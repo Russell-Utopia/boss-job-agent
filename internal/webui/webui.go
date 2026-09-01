@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Russell-Utopia/boss-job-agent/internal/assessment"
@@ -130,16 +131,20 @@ type pageData struct {
 }
 
 type startupState struct {
-	CurrentResume         *onlineresume.Version             `json:"currentResume"`
-	ActivePolicy          assessment.Policy                 `json:"activePolicy"`
-	PolicyOptimization    assessment.PolicyOptimizationView `json:"policyOptimization"`
-	Automation            automationsettings.View           `json:"automation"`
-	Actions               firstUseActions                   `json:"actions"`
-	RunlogHealth          runlog.Health                     `json:"runlogHealth"`
-	ActiveResumeUse       *discovery.ActiveResumeUse        `json:"activeDiscoveryResumeUse,omitempty"`
-	DiscoveryRun          *discovery.RunView                `json:"discoveryRun,omitempty"`
-	Jobs                  []jobpool.JobView                 `json:"jobs"`
-	EligibleOutreachCount int                               `json:"eligibleOutreachCount,omitempty"`
+	CurrentResume         *onlineresume.Version                    `json:"currentResume"`
+	ActivePolicy          assessment.Policy                        `json:"activePolicy"`
+	PolicyOptimization    assessment.PolicyOptimizationView        `json:"policyOptimization"`
+	Automation            automationsettings.View                  `json:"automation"`
+	Actions               firstUseActions                          `json:"actions"`
+	RunlogHealth          runlog.Health                            `json:"runlogHealth"`
+	ActiveResumeUse       *discovery.ActiveResumeUse               `json:"activeDiscoveryResumeUse,omitempty"`
+	DiscoveryRun          *discovery.RunView                       `json:"discoveryRun,omitempty"`
+	Jobs                  []webJobView                             `json:"jobs"`
+	EligibleOutreachCount int                                      `json:"eligibleOutreachCount,omitempty"`
+	OutreachPreview       automationsettings.OutreachChangeImpact  `json:"outreachPreview,omitempty"`
+	OutreachForm          automationsettings.OutreachChangeImpact  `json:"outreachForm,omitempty"`
+	OutreachProposal      *automationsettings.OutreachChangeImpact `json:"-"`
+	OutreachSettingsNote  string                                   `json:"outreachSettingsNote,omitempty"`
 }
 
 type resumeFeedback struct {
@@ -158,6 +163,30 @@ type actionAvailability struct {
 	Reason  string `json:"reason,omitempty"`
 }
 
+type webJobView struct {
+	ID             int64                  `json:"id"`
+	JobTitle       string                 `json:"jobTitle"`
+	CompanyName    string                 `json:"companyName"`
+	City           string                 `json:"city"`
+	Salary         string                 `json:"salary"`
+	PlatformStatus jobpool.PlatformStatus `json:"platformStatus"`
+	OutreachAction actionAvailability     `json:"outreachAction"`
+}
+
+func toWebJobViews(jobs []jobpool.JobView) []webJobView {
+	views := make([]webJobView, 0, len(jobs))
+	for _, job := range jobs {
+		views = append(views, webJobView{
+			ID: job.ID, JobTitle: job.JobTitle, CompanyName: job.CompanyName,
+			City: job.City, Salary: job.Salary, PlatformStatus: job.PlatformStatus,
+			OutreachAction: actionAvailability{
+				Allowed: job.OutreachAction.Allowed, Code: job.OutreachAction.Code, Reason: job.OutreachAction.Reason,
+			},
+		})
+	}
+	return views
+}
+
 type stateQuery func(context.Context) (startupState, error)
 
 func New(dependencies Dependencies) http.Handler {
@@ -174,6 +203,7 @@ func New(dependencies Dependencies) http.Handler {
 	mux.HandleFunc("GET /assessments", h.renderPage("assessments", "岗位鉴定", h.assessmentsState))
 	mux.HandleFunc("POST /assessments/settings", h.configureAssessmentPage)
 	mux.HandleFunc("GET /outreach", h.renderPage("outreach", "打招呼", h.outreachState))
+	mux.HandleFunc("POST /outreach/settings", h.configureOutreachPage)
 	mux.HandleFunc("POST /outreach/real", h.queueRealPage)
 	mux.HandleFunc("GET /resume", h.renderPage("resume", "在线简历", h.resumeState))
 	mux.HandleFunc("POST /resume/refresh", h.refreshResumePage)
@@ -194,6 +224,7 @@ func New(dependencies Dependencies) http.Handler {
 	mux.HandleFunc("POST /api/assessments", h.assessmentCommandAPI(h.dependencies.Jobs.QueueAssessments))
 	mux.HandleFunc("POST /api/assessments/retry", h.assessmentCommandAPI(h.dependencies.Jobs.RetryAssessmentFailures))
 	mux.HandleFunc("POST /api/outreach/real", h.queueReal)
+	mux.HandleFunc("POST /api/outreach/settings", h.configureOutreach)
 	mux.HandleFunc("POST /api/policy/draft", h.generatePolicyDraft)
 	mux.HandleFunc("POST /api/policy/validate", h.validatePolicyDraft)
 	mux.HandleFunc("POST /api/policy/adopt", h.adoptPolicy)
@@ -332,7 +363,7 @@ func (h *handler) jobsState(ctx context.Context) (startupState, error) {
 	return startupState{
 		CurrentResume: resume,
 		DiscoveryRun:  run,
-		Jobs:          jobs,
+		Jobs:          toWebJobViews(jobs),
 		Automation:    settings,
 		Actions: firstUseActions{
 			StartDiscovery: fromDiscoveryAvailability(availability),
@@ -444,6 +475,183 @@ func (h *handler) configureAssessmentPage(w http.ResponseWriter, r *http.Request
 	http.Redirect(w, r, "/assessments", http.StatusSeeOther)
 }
 
+type outreachSettingsRequest struct {
+	AutomaticOutreachEnabled bool                                            `json:"automaticOutreachEnabled"`
+	GreetingText             string                                          `json:"greetingText"`
+	TimeWindows              []automationsettings.OutreachTimeWindow         `json:"timeWindows"`
+	Confirmation             automationsettings.OutreachSettingsConfirmation `json:"confirmation"`
+}
+
+func (h *handler) previewOutreachSettings(ctx context.Context, request outreachSettingsRequest) (automationsettings.OutreachChangeImpact, error) {
+	return h.dependencies.Settings.PreviewOutreachConfiguration(
+		ctx, request.AutomaticOutreachEnabled, request.GreetingText, request.TimeWindows,
+	)
+}
+
+func (h *handler) saveOutreachSettings(ctx context.Context, request outreachSettingsRequest) error {
+	return h.dependencies.Settings.ConfigureOutreachWithConfirmation(
+		ctx, request.AutomaticOutreachEnabled, request.GreetingText, request.TimeWindows, request.Confirmation,
+	)
+}
+
+func (h *handler) outreachEnableRequiresConfirmation(ctx context.Context, enabled bool) (bool, error) {
+	if !enabled {
+		return false, nil
+	}
+	settings, err := h.dependencies.Settings.Get(ctx)
+	if err != nil {
+		return false, err
+	}
+	return !settings.AutomaticOutreachEnabled, nil
+}
+
+func (h *handler) configureOutreach(w http.ResponseWriter, r *http.Request) {
+	var request outreachSettingsRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	impact, err := h.previewOutreachSettings(r.Context(), request)
+	if err != nil {
+		h.writeCommandResult(w, err)
+		return
+	}
+	requiresConfirmation, err := h.outreachEnableRequiresConfirmation(r.Context(), request.AutomaticOutreachEnabled)
+	if err != nil {
+		h.writeCommandResult(w, err)
+		return
+	}
+	if requiresConfirmation && !request.Confirmation.Confirmed {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"code":    "outreach_confirmation_required",
+			"reason":  "开启自动打招呼前必须确认当前可入队岗位、完整招呼语和时间规则",
+			"preview": impact,
+		})
+		return
+	}
+	if err := h.saveOutreachSettings(r.Context(), request); err != nil {
+		h.writeCommandResult(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, impact)
+}
+
+func (h *handler) configureOutreachPage(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "自动打招呼设置内容无效", http.StatusBadRequest)
+		return
+	}
+	request, err := parseOutreachSettingsForm(r)
+	if err != nil {
+		http.Error(w, "自动打招呼设置内容无效", http.StatusBadRequest)
+		return
+	}
+	impact, err := h.previewOutreachSettings(r.Context(), request)
+	if err != nil {
+		var rejection businessRejection
+		if errors.As(err, &rejection) {
+			http.Error(w, rejection.RejectionReason(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "读取自动打招呼影响失败，请稍后重试", http.StatusInternalServerError)
+		return
+	}
+	requiresConfirmation, err := h.outreachEnableRequiresConfirmation(r.Context(), request.AutomaticOutreachEnabled)
+	if err != nil {
+		http.Error(w, "读取自动打招呼设置失败，请稍后重试", http.StatusInternalServerError)
+		return
+	}
+	if requiresConfirmation && r.PostFormValue("confirmed") != "true" {
+		h.renderOutreachEnableProposal(w, r, impact)
+		return
+	}
+
+	request.Confirmation = automationsettings.OutreachSettingsConfirmation{
+		EligibleJobCount: parseFormInt(r.PostFormValue("confirmedEligibleJobCount")),
+		GreetingText:     r.PostFormValue("confirmedGreetingText"),
+		TimeDescription:  r.PostFormValue("confirmedTimeDescription"),
+		Confirmed:        r.PostFormValue("confirmed") == "true",
+	}
+	if err := h.saveOutreachSettings(r.Context(), request); err != nil {
+		var rejection businessRejection
+		if errors.As(err, &rejection) {
+			http.Error(w, rejection.RejectionReason(), http.StatusConflict)
+			return
+		}
+		http.Error(w, "保存自动打招呼设置失败，请稍后重试", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/outreach", http.StatusSeeOther)
+}
+
+func (h *handler) renderOutreachEnableProposal(w http.ResponseWriter, r *http.Request, impact automationsettings.OutreachChangeImpact) {
+	state, err := h.outreachState(r.Context())
+	if err != nil {
+		http.Error(w, "无法读取当前业务状态", http.StatusInternalServerError)
+		return
+	}
+	impact.AutomaticOutreachEnabled = true
+	state.OutreachPreview = impact
+	state.OutreachForm = impact
+	state.OutreachProposal = &impact
+	state.OutreachSettingsNote = "请确认开启自动打招呼：确认只授权之后新符合条件的岗位，不会停止后台处理。"
+	h.executePage(w, http.StatusOK, pageData{Page: "outreach", PageTitle: "打招呼", State: state})
+}
+
+func parseOutreachSettingsForm(r *http.Request) (outreachSettingsRequest, error) {
+	starts := r.PostForm["outreachTimeWindowStart"]
+	ends := r.PostForm["outreachTimeWindowEnd"]
+	if len(starts) != len(ends) {
+		return outreachSettingsRequest{}, errors.New("outreach time window start and end counts differ")
+	}
+	windows := make([]automationsettings.OutreachTimeWindow, 0, len(starts))
+	for index := range starts {
+		if strings.TrimSpace(starts[index]) == "" && strings.TrimSpace(ends[index]) == "" {
+			continue
+		}
+		windows = append(windows, automationsettings.OutreachTimeWindow{Start: starts[index], End: ends[index]})
+	}
+	if preset := r.PostFormValue("outreachWindowPreset"); preset != "" {
+		window, ok := outreachWindowPreset(preset)
+		if !ok {
+			return outreachSettingsRequest{}, errors.New("unknown outreach time window preset")
+		}
+		windows = append(windows, window)
+	}
+	if r.PostFormValue("outreachWindowCustom") == "true" {
+		windows = append(windows, automationsettings.OutreachTimeWindow{
+			Start: r.PostFormValue("outreachWindowCustomStart"),
+			End:   r.PostFormValue("outreachWindowCustomEnd"),
+		})
+	}
+	return outreachSettingsRequest{
+		AutomaticOutreachEnabled: r.PostFormValue("automaticOutreachEnabled") == "on",
+		GreetingText:             r.PostFormValue("outreachGreetingText"),
+		TimeWindows:              windows,
+	}, nil
+}
+
+func outreachWindowPreset(name string) (automationsettings.OutreachTimeWindow, bool) {
+	switch name {
+	case "morning":
+		return automationsettings.OutreachTimeWindow{Start: "09:00", End: "12:00"}, true
+	case "afternoon":
+		return automationsettings.OutreachTimeWindow{Start: "14:00", End: "18:00"}, true
+	case "evening":
+		return automationsettings.OutreachTimeWindow{Start: "19:00", End: "21:00"}, true
+	default:
+		return automationsettings.OutreachTimeWindow{}, false
+	}
+}
+
+func parseFormInt(value string) int {
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0
+	}
+	return parsed
+}
+
 func (h *handler) outreachState(ctx context.Context) (startupState, error) {
 	settings, err := h.dependencies.Settings.Get(ctx)
 	if err != nil {
@@ -457,12 +665,24 @@ func (h *handler) outreachState(ctx context.Context) (startupState, error) {
 	if err != nil {
 		return startupState{}, err
 	}
-	eligibleCount, err := h.dependencies.Jobs.CountEligibleOutreach(ctx, nil)
+	preview, err := h.dependencies.Settings.PreviewOutreachChange(ctx, false)
 	if err != nil {
 		return startupState{}, err
 	}
+	form := preview
+	form.OutreachTimeWindows = append([]automationsettings.OutreachTimeWindow(nil), preview.OutreachTimeWindows...)
+	for len(form.OutreachTimeWindows) < 3 {
+		form.OutreachTimeWindows = append(form.OutreachTimeWindows, automationsettings.OutreachTimeWindow{})
+	}
+	form.AutomaticOutreachEnabled = settings.AutomaticOutreachEnabled
+	form.GreetingText = ""
+	if settings.OutreachGreeting != nil {
+		form.GreetingText = *settings.OutreachGreeting
+	}
 	return startupState{
-		Automation: settings, Jobs: jobs, EligibleOutreachCount: eligibleCount,
+		Automation: settings, Jobs: toWebJobViews(jobs), EligibleOutreachCount: preview.EligibleJobCount,
+		OutreachPreview: preview, OutreachForm: form,
+		OutreachSettingsNote: "自动打招呼开关只控制之后新符合条件的岗位入队；关闭后，已经安排的岗位仍会继续。",
 		Actions: firstUseActions{
 			QueueRealOutreach: fromSettingsAvailability(availability),
 		},

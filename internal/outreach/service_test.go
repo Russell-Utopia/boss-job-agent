@@ -77,6 +77,138 @@ func TestServiceSendsOnlyAfterFreshCheckAndPersistsConfirmedContact(t *testing.T
 	}
 }
 
+func TestServiceAutomaticallyAdmitsEligibleOutreachWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	service, pool, settings, adapter, _ := openOutreachServiceTest(t)
+	job := eligibleOutreachTestJob(t, pool, "outreach-automatic")
+	configureAutomaticOutreachTest(t, settings, "您好，想和您聊聊", nil)
+	adapter.checkStatus = ContactStatus{Open: true, Evidence: json.RawMessage(`{"open":true,"contacted":false}`)}
+	adapter.sendResult = FirstContactResult{Effect: OutreachEffectConfirmedSent, Evidence: json.RawMessage(`{"sent":true}`)}
+
+	if err := service.runSchedulingCycle(t.Context(), time.UnixMilli(5000)); err != nil {
+		t.Fatalf("run automatic outreach cycle: %v", err)
+	}
+	if len(adapter.checks) != 1 || len(adapter.sends) != 1 {
+		t.Fatalf("automatic adapter calls = checks %d, sends %d; want one check and one send", len(adapter.checks), len(adapter.sends))
+	}
+	if adapter.sends[0].GreetingText != "您好，想和您聊聊" {
+		t.Errorf("automatic greeting = %q, want configured greeting", adapter.sends[0].GreetingText)
+	}
+	view := mustGetOutreachJob(t, pool, job.ID)
+	if view.OutreachStatus != jobpool.OutreachStatusContacted {
+		t.Errorf("automatic outreach status = %q, want contacted", view.OutreachStatus)
+	}
+}
+
+func TestServiceContinuesExistingOutreachAfterAutomaticSettingIsDisabled(t *testing.T) {
+	t.Parallel()
+
+	service, pool, settings, adapter, _ := openOutreachServiceTest(t)
+	job := eligibleOutreachTestJob(t, pool, "outreach-automatic-disabled")
+	window := []automationsettings.OutreachTimeWindow{{Start: "09:00", End: "10:00"}}
+	configureAutomaticOutreachTest(t, settings, "您好，想和您聊聊", window)
+	// 08:00 Asia/Shanghai is outside the window: admission is allowed, but
+	// starting the external action is not.
+	if err := service.runSchedulingCycle(t.Context(), time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("run automatic admission cycle: %v", err)
+	}
+	if view := mustGetOutreachJob(t, pool, job.ID); view.OutreachStatus != jobpool.OutreachStatusPending {
+		t.Fatalf("automatically admitted outreach status = %q, want pending", view.OutreachStatus)
+	}
+
+	if err := settings.ConfigureOutreach(t.Context(), false, "您好，想和您聊聊", window); err != nil {
+		t.Fatalf("disable automatic outreach: %v", err)
+	}
+	adapter.checkStatus = ContactStatus{Open: true, Evidence: json.RawMessage(`{"open":true,"contacted":false}`)}
+	adapter.sendResult = FirstContactResult{Effect: OutreachEffectConfirmedSent, Evidence: json.RawMessage(`{"sent":true}`)}
+	if err := service.runSchedulingCycle(t.Context(), time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("run existing queue cycle: %v", err)
+	}
+	if len(adapter.checks) != 1 || len(adapter.sends) != 1 {
+		t.Fatalf("existing queue adapter calls = checks %d, sends %d; want one check and one send", len(adapter.checks), len(adapter.sends))
+	}
+	if adapter.sends[0].GreetingText != "您好，想和您聊聊" {
+		t.Errorf("existing queue greeting = %q, want greeting frozen at admission", adapter.sends[0].GreetingText)
+	}
+	if view := mustGetOutreachJob(t, pool, job.ID); view.OutreachStatus != jobpool.OutreachStatusContacted {
+		t.Errorf("existing queue outreach status = %q, want contacted", view.OutreachStatus)
+	}
+}
+
+func TestAutomaticOutreachAndFrozenGreetingSurviveServiceRestart(t *testing.T) {
+	t.Parallel()
+
+	databasePath := filepath.Join(t.TempDir(), "outreach.db")
+	jobID := persistAutomaticOutreachBeforeRestart(t, databasePath)
+	runRestartedAutomaticOutreach(t, databasePath, jobID)
+}
+
+func persistAutomaticOutreachBeforeRestart(t *testing.T, databasePath string) int64 {
+	t.Helper()
+
+	db, err := storage.Open(t.Context(), databasePath)
+	if err != nil {
+		t.Fatalf("open initial sqlite: %v", err)
+	}
+	p := jobpool.New(db)
+	settings := automationsettings.New(db, p)
+	if err := settings.EnsureSafeDefaults(t.Context(), time.UnixMilli(1000)); err != nil {
+		t.Fatalf("ensure initial settings: %v", err)
+	}
+	job := eligibleOutreachTestJob(t, p, "outreach-restart")
+	window := []automationsettings.OutreachTimeWindow{{Start: "09:00", End: "10:00"}}
+	configureAutomaticOutreachTest(t, settings, "重启前的完整招呼语", window)
+	initialLogs := runlog.Open(filepath.Join(t.TempDir(), "initial.jsonl"))
+	initialAdapter := &controlledOutreachAdapter{}
+	initialService := newService(p, settings, initialAdapter, initialLogs, func() time.Time {
+		return time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	})
+	if err := initialService.runSchedulingCycle(t.Context(), time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("run initial automatic admission: %v", err)
+	}
+	if view := mustGetOutreachJob(t, p, job.ID); view.OutreachStatus != jobpool.OutreachStatusPending || view.OutreachGreetingText != "重启前的完整招呼语" {
+		t.Fatalf("persisted automatic queue = %#v, want pending with frozen greeting", view)
+	}
+	if err := initialLogs.Close(); err != nil {
+		t.Fatalf("close initial logs: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close initial sqlite: %v", err)
+	}
+	return job.ID
+}
+
+func runRestartedAutomaticOutreach(t *testing.T, databasePath string, jobID int64) {
+	t.Helper()
+
+	restartedDB, err := storage.Open(t.Context(), databasePath)
+	if err != nil {
+		t.Fatalf("reopen sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = restartedDB.Close() })
+	restartedPool := jobpool.New(restartedDB)
+	restartedSettings := automationsettings.New(restartedDB, restartedPool)
+	restartedLogs := runlog.Open(filepath.Join(t.TempDir(), "restarted.jsonl"))
+	t.Cleanup(func() { _ = restartedLogs.Close() })
+	restartedAdapter := &controlledOutreachAdapter{
+		checkStatus: ContactStatus{Open: true, Evidence: json.RawMessage(`{"open":true,"contacted":false}`)},
+		sendResult:  FirstContactResult{Effect: OutreachEffectConfirmedSent, Evidence: json.RawMessage(`{"sent":true}`)},
+	}
+	restartedService := newService(restartedPool, restartedSettings, restartedAdapter, restartedLogs, func() time.Time {
+		return time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC)
+	})
+	if err := restartedService.runSchedulingCycle(t.Context(), time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("run restarted outreach cycle: %v", err)
+	}
+	if len(restartedAdapter.sends) != 1 || restartedAdapter.sends[0].GreetingText != "重启前的完整招呼语" {
+		t.Fatalf("restarted send = %#v, want frozen greeting", restartedAdapter.sends)
+	}
+	if view := mustGetOutreachJob(t, restartedPool, jobID); view.OutreachStatus != jobpool.OutreachStatusContacted {
+		t.Errorf("restarted outreach status = %q, want contacted", view.OutreachStatus)
+	}
+}
+
 func TestServiceRecordsExistingBossContactWithoutSending(t *testing.T) {
 	t.Parallel()
 
@@ -237,6 +369,40 @@ func queueOutreachTestJob(t *testing.T, pool *jobpool.Pool, platformID, greeting
 		t.Fatalf("queue outreach job = %#v, err=%v", result, err)
 	}
 	return job
+}
+
+func eligibleOutreachTestJob(t *testing.T, pool *jobpool.Pool, platformID string) jobpool.JobView {
+	t.Helper()
+	job, err := pool.Observe(t.Context(), 1, jobpool.Observation{
+		PlatformJobID: platformID, CanonicalURL: "https://www.zhipin.com/job_detail/" + platformID + ".html",
+		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
+	})
+	if err != nil {
+		t.Fatalf("observe eligible outreach job: %v", err)
+	}
+	if err := pool.Review(t.Context(), []jobpool.ReviewDecision{{JobID: job.ID, ExpectedJDHash: job.JDHash, Verdict: jobpool.HumanVerdictSuitable}}); err != nil {
+		t.Fatalf("review eligible outreach job: %v", err)
+	}
+	return job
+}
+
+func configureAutomaticOutreachTest(t *testing.T, settings *automationsettings.Settings, greeting string, windows []automationsettings.OutreachTimeWindow) {
+	t.Helper()
+	impact, err := settings.PreviewOutreachConfiguration(t.Context(), true, greeting, windows)
+	if err != nil {
+		t.Fatalf("preview automatic outreach: %v", err)
+	}
+	err = settings.ConfigureOutreachWithConfirmation(t.Context(), true, greeting, windows, automationsettings.OutreachSettingsConfirmation{
+		EligibleJobCount: impact.EligibleJobCount,
+		GreetingText:     impact.GreetingText,
+		TimeDescription:  impact.TimeDescription,
+		Confirmed:        true,
+	})
+	if err != nil {
+		t.Fatalf("enable automatic outreach: %v", err)
+	}
 }
 
 func mustClaimOutreach(t *testing.T, pool *jobpool.Pool, claimedAt time.Time) []jobpool.OutreachWork {

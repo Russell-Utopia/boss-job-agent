@@ -355,13 +355,106 @@
 
     {{if eq .Page "outreach"}}
     <section class="settings-grid">
+      <article class="card">
+        <p class="eyebrow">持续授权设置</p>
+        <h2>自动打招呼</h2>
+        <p class="muted">开关表示对之后新符合条件岗位的持续真实打招呼授权，不是停止后台处理。关闭后，已经安排的岗位仍会继续。</p>
+        <form id="outreach-settings-form" method="post" action="/outreach/settings">
+          <label class="assessment-toggle">
+            <input type="checkbox" name="automaticOutreachEnabled" {{if .State.OutreachForm.AutomaticOutreachEnabled}}checked{{end}}>
+            新出现且当前适合、可沟通、尚未打招呼的岗位自动进入真实打招呼队列
+          </label>
+          <label for="outreach-greeting-text">完整固定招呼语</label>
+          <textarea id="outreach-greeting-text" name="outreachGreetingText" rows="4" placeholder="例如：您好，想和您聊聊这个岗位">{{.State.OutreachForm.GreetingText}}</textarea>
+          <fieldset class="outreach-window-fields">
+            <legend>打招呼时间窗（Asia/Shanghai，留空表示全天）</legend>
+            {{range .State.OutreachForm.OutreachTimeWindows}}
+            <div class="outreach-window-row">
+              <input type="time" name="outreachTimeWindowStart" value="{{.Start}}" aria-label="时间窗开始">
+              <span>至</span>
+              <input type="time" name="outreachTimeWindowEnd" value="{{.End}}" aria-label="时间窗结束">
+            </div>
+            {{else}}
+            <div class="outreach-window-row">
+              <input type="time" name="outreachTimeWindowStart" value="" aria-label="时间窗开始">
+              <span>至</span>
+              <input type="time" name="outreachTimeWindowEnd" value="" aria-label="时间窗结束">
+            </div>
+            {{end}}
+          </fieldset>
+          <button type="button" class="secondary-button" popovertarget="outreach-window-popover">添加时间窗</button>
+          <p class="muted">可填写多个互不重叠的时间窗；空白行不会保存。</p>
+          <input type="hidden" name="confirmed" value="false">
+          <button type="submit">保存自动打招呼设置</button>
+        </form>
+        <p class="reason">{{.State.OutreachSettingsNote}}</p>
+      </article>
       <article class="card compact">
+        <p class="eyebrow">开启前影响预览</p>
         <dl>
           <div><dt>自动打招呼</dt><dd>{{enabledText .State.Automation.AutomaticOutreachEnabled}}</dd></div>
-          <div><dt>固定招呼语</dt><dd>{{if .State.Automation.OutreachGreeting}}{{.State.Automation.OutreachGreeting}}{{else}}未配置{{end}}</dd></div>
-          <div><dt>真实打招呼时间</dt><dd>{{.State.Automation.OutreachTimeDescription}}</dd></div>
+          <div><dt>当前可入队岗位</dt><dd>{{.State.OutreachPreview.EligibleJobCount}}</dd></div>
+          <div><dt>完整固定招呼语</dt><dd>{{if .State.OutreachPreview.GreetingText}}{{.State.OutreachPreview.GreetingText}}{{else}}未配置{{end}}</dd></div>
+          <div><dt>真实打招呼时间</dt><dd>{{.State.OutreachPreview.TimeDescription}}</dd></div>
         </dl>
+        <p class="muted">开启确认只影响之后的新自动入队，不修改已经进入队列的岗位。</p>
       </article>
+    </section>
+    <div id="outreach-window-popover" popover class="card detail-card">
+      <p class="eyebrow">时间窗预设</p>
+      <h2>添加打招呼时间窗</h2>
+      <p class="muted">选择预设，或填写起止时间后保存。新增时间窗会与当前设置合并。</p>
+      <form method="post" action="/outreach/settings">
+        <input type="hidden" name="automaticOutreachEnabled" value="{{if .State.OutreachForm.AutomaticOutreachEnabled}}on{{end}}">
+        <input type="hidden" name="outreachGreetingText" value="{{.State.OutreachForm.GreetingText}}">
+        {{range .State.OutreachForm.OutreachTimeWindows}}
+        {{if .Start}}
+        <input type="hidden" name="outreachTimeWindowStart" value="{{.Start}}">
+        <input type="hidden" name="outreachTimeWindowEnd" value="{{.End}}">
+        {{end}}
+        {{end}}
+        <div class="button-row">
+          <button type="submit" name="outreachWindowPreset" value="morning">上午 09:00–12:00</button>
+          <button type="submit" name="outreachWindowPreset" value="afternoon">下午 14:00–18:00</button>
+          <button type="submit" name="outreachWindowPreset" value="evening">晚间 19:00–21:00</button>
+        </div>
+        <fieldset class="outreach-window-fields">
+          <legend>自定义时间窗</legend>
+          <div class="outreach-window-row">
+            <input type="time" name="outreachWindowCustomStart" aria-label="自定义时间窗开始">
+            <span>至</span>
+            <input type="time" name="outreachWindowCustomEnd" aria-label="自定义时间窗结束">
+          </div>
+        </fieldset>
+        <button type="submit" name="outreachWindowCustom" value="true">保存自定义时间窗</button>
+      </form>
+    </div>
+    {{with .State.OutreachProposal}}
+    <section class="card detail-card" role="alert">
+      <p class="eyebrow">需要明确确认</p>
+      <h2>请确认开启自动打招呼</h2>
+      <p>这会授权之后新的合格岗位进入真实打招呼队列；不会停止后台处理，也不会修改已经安排的岗位。</p>
+      <dl>
+        <div><dt>当前可入队岗位</dt><dd>{{.EligibleJobCount}} 个岗位</dd></div>
+        <div><dt>完整固定招呼语</dt><dd>{{.GreetingText}}</dd></div>
+        <div><dt>当前时间规则</dt><dd>{{.TimeDescription}}</dd></div>
+      </dl>
+      <form method="post" action="/outreach/settings">
+        <input type="hidden" name="automaticOutreachEnabled" value="on">
+        <input type="hidden" name="outreachGreetingText" value="{{.GreetingText}}">
+        {{range .OutreachTimeWindows}}
+        <input type="hidden" name="outreachTimeWindowStart" value="{{.Start}}">
+        <input type="hidden" name="outreachTimeWindowEnd" value="{{.End}}">
+        {{end}}
+        <input type="hidden" name="confirmedEligibleJobCount" value="{{.EligibleJobCount}}">
+        <input type="hidden" name="confirmedGreetingText" value="{{.GreetingText}}">
+        <input type="hidden" name="confirmedTimeDescription" value="{{.TimeDescription}}">
+        <input type="hidden" name="confirmed" value="true">
+        <button type="submit">确认开启自动打招呼</button>
+      </form>
+    </section>
+    {{end}}
+    <section class="settings-grid">
       <article class="card">
         <p class="eyebrow">手工操作</p>
         <h2>当前可入队岗位：{{.State.EligibleOutreachCount}}</h2>
