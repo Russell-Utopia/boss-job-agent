@@ -49,10 +49,12 @@ func (d *webJobDiscovery) FetchPage(
 	discovery.SearchRange,
 	int,
 ) (discovery.DiscoveryPage, error) {
+	jobWithoutSalary := webDiscoveredJob("boss-job-2", "Go 平台工程师", "另一科技")
+	jobWithoutSalary.Salary = ""
 	return discovery.DiscoveryPage{
 		Observations: []discovery.JobObservation{
 			webDiscoveredJob("boss-job-1", "Go 后端工程师", "示例科技"),
-			webDiscoveredJob("boss-job-2", "Go 平台工程师", "另一科技"),
+			jobWithoutSalary,
 		},
 		HasMore: false,
 	}, nil
@@ -283,6 +285,7 @@ func TestJobsPageDisplaysDiscoveryInputsProgressSettingsHintsAndGlobalJobs(t *te
 		"示例科技",
 		"Go 平台工程师",
 		"另一科技",
+		"薪资仅可在 BOSS 页面查看",
 	})
 
 	runtime.resume.content = webResumeContent("Go 研发工程师")

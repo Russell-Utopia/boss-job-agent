@@ -182,6 +182,53 @@ func TestInvalidObservationFailsTheWholePageWithoutAdvancingOrSavingJobs(t *test
 	}
 }
 
+func TestObservationWithoutReliableSalaryCanBeSaved(t *testing.T) {
+	t.Parallel()
+
+	job := discoveredJob("boss-job-without-salary")
+	job.Salary = ""
+	discoveryAdapter := &controlledJobDiscovery{pages: map[int]DiscoveryPage{
+		1: {Observations: []JobObservation{job}, HasMore: false},
+	}}
+	_, _, versions, pool, service, _ := openDiscoveryServiceTest(t, discoveryAdapter)
+	refreshDiscoveryResume(t, versions)
+
+	if _, err := service.Start(t.Context()); err != nil {
+		t.Fatalf("start discovery without reliable job salary: %v", err)
+	}
+	jobs, err := pool.ListJobs(t.Context())
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].Salary != "" {
+		t.Errorf("jobs = %#v, want one saved job with unavailable salary", jobs)
+	}
+}
+
+func TestRunlogFailureEvidencePreservesTheFirstFailedUpstreamRequest(t *testing.T) {
+	t.Parallel()
+
+	evidence := runlogFailureEvidence(&FetchError{
+		Category: FetchErrorPlatformLimited,
+		Evidence: &FetchFailureEvidence{
+			RequestOrdinal: 7,
+			Stage:          "job_detail",
+			DetailOrdinal:  4,
+			UpstreamCode:   "37",
+		},
+		Cause: errors.New("BOSS_PLATFORM_LIMITED"),
+	})
+	want := &runlog.ExternalFailureEvidence{
+		RequestOrdinal: 7,
+		Stage:          "job_detail",
+		DetailOrdinal:  4,
+		UpstreamCode:   "37",
+	}
+	if !reflect.DeepEqual(evidence, want) {
+		t.Errorf("runlog failure evidence = %#v, want %#v", evidence, want)
+	}
+}
+
 func TestActiveDiscoveryKeepsV1WhenTheCurrentOnlineResumeBecomesV2(t *testing.T) {
 	t.Parallel()
 

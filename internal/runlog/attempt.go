@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"time"
 )
 
@@ -82,11 +83,26 @@ func (t Trace) ID() string {
 }
 
 type AttemptResult struct {
-	Outcome        Outcome
-	ErrorCategory  ErrorCategory
-	Err            error
-	OutreachEffect OutreachEffect
+	Outcome         Outcome
+	ErrorCategory   ErrorCategory
+	ExternalFailure *ExternalFailureEvidence
+	Err             error
+	OutreachEffect  OutreachEffect
 }
+
+// ExternalFailureEvidence is the non-sensitive location of the first failed
+// upstream request within one business-level external attempt.
+type ExternalFailureEvidence struct {
+	RequestOrdinal int
+	Stage          string
+	DetailOrdinal  int
+	UpstreamCode   string
+}
+
+var (
+	externalFailureStagePattern = regexp.MustCompile(`^[a-z_]{1,64}$`)
+	upstreamCodePattern         = regexp.MustCompile(`^-?\d{1,10}$`)
+)
 
 // Start is the fail-closed seam for a new BOSS or Pi attempt. It returns a
 // Trace only after the durable start record succeeds.
@@ -192,6 +208,18 @@ func terminalRecord(at time.Time, trace Trace, attempt Attempt, itemIndex int, r
 	}
 	if result.OutreachEffect != "" {
 		attrs = append(attrs, slog.String("outreach_effect", string(result.OutreachEffect)))
+	}
+	if result.ExternalFailure != nil {
+		attrs = append(attrs,
+			slog.Int("request_ordinal", result.ExternalFailure.RequestOrdinal),
+			slog.String("stage", result.ExternalFailure.Stage),
+		)
+		if result.ExternalFailure.DetailOrdinal > 0 {
+			attrs = append(attrs, slog.Int("detail_ordinal", result.ExternalFailure.DetailOrdinal))
+		}
+		if result.ExternalFailure.UpstreamCode != "" {
+			attrs = append(attrs, slog.String("upstream_code", result.ExternalFailure.UpstreamCode))
+		}
 	}
 	if result.Err != nil {
 		chain, truncated := snapshotErrorTree(result.Err)
@@ -346,7 +374,28 @@ func validateResult(attempt Attempt, result AttemptResult) error {
 	if result.ErrorCategory != "" && !validErrorCategory(result.ErrorCategory) {
 		return fmt.Errorf("unsupported error category %q", result.ErrorCategory)
 	}
+	if err := validateExternalFailure(attempt, result); err != nil {
+		return err
+	}
 	return validateOutreachEffect(attempt.Operation, result.OutreachEffect)
+}
+
+func validateExternalFailure(attempt Attempt, result AttemptResult) error {
+	if result.ExternalFailure == nil {
+		return nil
+	}
+	if result.Outcome != OutcomeFailed || attempt.Operation != OperationFetchPage {
+		return fmt.Errorf("external failure evidence is only valid for failed fetch_page results")
+	}
+	evidence := result.ExternalFailure
+	if evidence.RequestOrdinal < 0 || evidence.DetailOrdinal < 0 ||
+		!externalFailureStagePattern.MatchString(evidence.Stage) {
+		return fmt.Errorf("external failure evidence requires non-negative ordinals and a stable stage")
+	}
+	if evidence.UpstreamCode != "" && !upstreamCodePattern.MatchString(evidence.UpstreamCode) {
+		return fmt.Errorf("external failure evidence upstream code must be a short integer")
+	}
+	return nil
 }
 
 func validateOutcome(result AttemptResult) error {

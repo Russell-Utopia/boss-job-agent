@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>岗位详情逐条读取与恢复原型</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17212b;
+      --muted: #637080;
+      --line: #dbe2ea;
+      --surface: #ffffff;
+      --wash: #f5f7fa;
+      --accent: #246bfd;
+      --danger: #b42318;
+      --ok: #027a48;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--wash);
+      color: var(--ink);
+      font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { width: min(1100px, calc(100% - 32px)); margin: 36px auto 72px; }
+    h1, h2, h3 { margin: 0; line-height: 1.25; }
+    h1 { font-size: 28px; }
+    h2 { margin-bottom: 16px; font-size: 20px; }
+    p { margin: 10px 0 0; }
+    code { padding: 2px 5px; border-radius: 5px; background: #edf1f6; }
+    .intro, .panel { padding: 24px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+    .intro { margin-bottom: 18px; }
+    .intro strong { color: var(--accent); }
+    .grid { display: grid; grid-template-columns: 1.15fr .85fr; gap: 18px; align-items: start; }
+    .stack { display: grid; gap: 18px; }
+    .state-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .field { min-height: 72px; padding: 12px; border-radius: 10px; background: var(--wash); }
+    .field span { display: block; color: var(--muted); font-size: 12px; }
+    .field strong { display: block; margin-top: 4px; overflow-wrap: anywhere; }
+    .wide { grid-column: 1 / -1; }
+    .event { border-left: 4px solid var(--accent); }
+    .event.blocked { border-left-color: var(--danger); }
+    .event.complete { border-left-color: var(--ok); }
+    .buttons { display: flex; flex-wrap: wrap; gap: 9px; }
+    button {
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 9px 12px;
+      background: var(--surface);
+      color: var(--ink);
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    button.primary { border-color: var(--accent); background: var(--accent); color: white; }
+    button.danger { border-color: #f4c7c3; color: var(--danger); }
+    button:disabled { cursor: not-allowed; opacity: .42; }
+    .tabs { display: flex; gap: 8px; overflow-x: auto; margin-bottom: 16px; }
+    .tab.active { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+    .walkthrough { min-height: 290px; }
+    .walkthrough ol { margin: 16px 0 0; padding-left: 22px; }
+    .walkthrough li { margin: 9px 0; }
+    .walkthrough li button { width: 100%; text-align: left; }
+    .walkthrough li.done button { color: var(--ok); border-color: #a6e0c2; }
+    .walkthrough li.current button { border-color: var(--accent); box-shadow: 0 0 0 2px #dbe7ff; }
+    .verdict { margin-top: 18px; padding: 16px; border-radius: 10px; background: #edf4ff; }
+    @media (max-width: 780px) {
+      .grid { grid-template-columns: 1fr; }
+      .state-grid { grid-template-columns: 1fr; }
+      .wide { grid-column: auto; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="intro">
+    <h1>岗位详情逐条读取与恢复原型</h1>
+    <p><strong>要回答的问题：</strong>如果岗位列表来自页面原生 DOM，详情按卡片逐条读取，并为当前页保存“已经可靠完成到第几个岗位”，那么遇到平台限制后，能否停止且不重放前面已经成功的详情，同时仍坚持“整页完整后才推进页码”？</p>
+    <p>这是隔离的逻辑原型，不连接 BOSS、不读 Cookie、不发送消息，也不代表生产实现。</p>
+  </section>
+
+  <div class="grid">
+    <section class="panel">
+      <h2>当前岗位发现运行</h2>
+      <div id="state" class="state-grid"></div>
+    </section>
+
+    <div class="stack">
+      <section class="panel">
+        <h2>自由操作</h2>
+        <div class="buttons">
+          <button data-action="load">读取当前页岗位列表</button>
+          <button data-action="detail">当前岗位详情成功</button>
+          <button class="danger" data-action="limit">当前岗位返回 code=37</button>
+          <button data-action="resume">人工确认后继续</button>
+          <button class="danger" data-action="replay">按旧 FetchPage 整页重来</button>
+          <button class="danger" data-action="missing">当前卡片已不在页面</button>
+          <button class="primary" data-action="commit">提交完整页</button>
+          <button data-action="reset">重置原型</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>原型结论</h2>
+        <div class="verdict">
+          页码仍然只在整页详情全部可靠后推进；区别是成功详情先进入当前页检查点。平台限制发生时保存下一个详情序号，人工恢复后从该序号继续。这样不会把已成功的详情再次请求，也不会把不完整页面误判为成功。
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <section class="panel" style="margin-top: 18px;">
+    <h2>引导场景</h2>
+    <div id="tabs" class="tabs"></div>
+    <div id="walkthrough" class="walkthrough"></div>
+  </section>
+</main>
+
+<script>
+const DetailRecoveryModel = (() => {
+  const initialState = () => ({
+    runStatus: "运行中",
+    pageNo: 1,
+    attemptNo: 1,
+    pageStatus: "尚未读取列表",
+    hasMore: null,
+    jobIds: [],
+    completedJobIds: [],
+    nextDetailOrdinal: 0,
+    detailRequests: 0,
+    replayedDetails: 0,
+    failure: null,
+    lastEvent: "等待读取第 1 页岗位列表"
+  });
+
+  const expectedJobId = state => state.jobIds[state.nextDetailOrdinal - 1] || null;
+  const pageComplete = state => state.jobIds.length > 0 && state.completedJobIds.length === state.jobIds.length;
+
+  function reduce(state, action) {
+    if (action.type === "RESET") return initialState();
+
+    if (action.type === "LOAD_PAGE") {
+      if (state.pageStatus !== "尚未读取列表") return {...state, lastEvent: "拒绝：当前页列表已经建立"};
+      return {
+        ...state,
+        pageStatus: "逐条读取详情",
+        hasMore: action.hasMore,
+        jobIds: [...action.jobIds],
+        nextDetailOrdinal: 1,
+        lastEvent: `第 ${state.pageNo} 页列表已建立，共 ${action.jobIds.length} 个稳定岗位 ID`
+      };
+    }
+
+    if (action.type === "DETAIL_SUCCEEDED") {
+      if (state.runStatus !== "运行中" || state.pageStatus !== "逐条读取详情") {
+        return {...state, lastEvent: "拒绝：当前状态不能读取详情"};
+      }
+      const jobId = expectedJobId(state);
+      if (!jobId) return {...state, lastEvent: "拒绝：没有待读取岗位"};
+      const completed = [...state.completedJobIds, jobId];
+      return {
+        ...state,
+        completedJobIds: completed,
+        nextDetailOrdinal: completed.length === state.jobIds.length ? 0 : completed.length + 1,
+        detailRequests: state.detailRequests + 1,
+        pageStatus: completed.length === state.jobIds.length ? "等待提交完整页" : state.pageStatus,
+        lastEvent: `${jobId} 详情可靠，当前页进度 ${completed.length}/${state.jobIds.length}`
+      };
+    }
+
+    if (action.type === "PLATFORM_LIMITED") {
+      if (state.runStatus !== "运行中" || !expectedJobId(state)) {
+        return {...state, lastEvent: "拒绝：当前没有正在读取的岗位详情"};
+      }
+      return {
+        ...state,
+        runStatus: "失败，等待人工处理",
+        detailRequests: state.detailRequests + 1,
+        failure: {
+          category: "platform_limited",
+          upstreamCode: 37,
+          detailOrdinal: state.nextDetailOrdinal,
+          jobId: expectedJobId(state)
+        },
+        lastEvent: `第 ${state.nextDetailOrdinal} 个详情返回 code=37；页码和逐条进度均未推进`
+      };
+    }
+
+    if (action.type === "RESUME") {
+      if (state.runStatus !== "失败，等待人工处理") {
+        return {...state, lastEvent: "拒绝：只有失败运行可以人工继续"};
+      }
+      return {
+        ...state,
+        runStatus: "运行中",
+        attemptNo: state.attemptNo + 1,
+        failure: null,
+        lastEvent: `从第 ${state.nextDetailOrdinal} 个详情继续；已完成详情不会重放`
+      };
+    }
+
+    if (action.type === "RETRY_WHOLE_PAGE") {
+      if (state.runStatus !== "失败，等待人工处理") {
+        return {...state, lastEvent: "拒绝：只有失败运行才会整页重来"};
+      }
+      return {
+        ...state,
+        runStatus: "运行中",
+        attemptNo: state.attemptNo + 1,
+        replayedDetails: state.replayedDetails + state.completedJobIds.length,
+        completedJobIds: [],
+        nextDetailOrdinal: 1,
+        failure: null,
+        pageStatus: "逐条读取详情",
+        lastEvent: `旧模型清空当前页进度，将重放 ${state.completedJobIds.length} 个已成功详情`
+      };
+    }
+
+    if (action.type === "CARD_MISSING") {
+      if (state.runStatus !== "运行中" || !expectedJobId(state)) {
+        return {...state, lastEvent: "拒绝：当前没有待读取卡片"};
+      }
+      return {
+        ...state,
+        runStatus: "失败，等待人工处理",
+        failure: {
+          category: "invalid_response",
+          detailOrdinal: state.nextDetailOrdinal,
+          jobId: expectedJobId(state)
+        },
+        lastEvent: `缓存岗位 ${expectedJobId(state)} 已不在原生列表 DOM；停止而不是跳过`
+      };
+    }
+
+    if (action.type === "COMMIT_PAGE") {
+      if (!pageComplete(state)) return {...state, lastEvent: "拒绝：当前页详情尚未全部可靠，不能推进页码"};
+      if (!state.hasMore) {
+        return {...state, runStatus: "发现完成", pageStatus: "已提交并确认耗尽", lastEvent: `第 ${state.pageNo} 页完整提交，hasMore=false`};
+      }
+      return {
+        ...state,
+        pageNo: state.pageNo + 1,
+        pageStatus: "尚未读取列表",
+        hasMore: null,
+        jobIds: [],
+        completedJobIds: [],
+        nextDetailOrdinal: 0,
+        failure: null,
+        lastEvent: `第 ${state.pageNo} 页完整提交，检查点推进到第 ${state.pageNo + 1} 页`
+      };
+    }
+
+    return {...state, lastEvent: `未知操作：${action.type}`};
+  }
+
+  return {initialState, reduce};
+})();
+</script>
+
+<script>
+const sampleJobs = count => Array.from({length: count}, (_, index) => `岗位-${index + 1}`);
+const actionFor = name => ({
+  load: {type: "LOAD_PAGE", jobIds: sampleJobs(8), hasMore: true},
+  load3: {type: "LOAD_PAGE", jobIds: sampleJobs(3), hasMore: false},
+  detail: {type: "DETAIL_SUCCEEDED"},
+  limit: {type: "PLATFORM_LIMITED"},
+  resume: {type: "RESUME"},
+  replay: {type: "RETRY_WHOLE_PAGE"},
+  missing: {type: "CARD_MISSING"},
+  commit: {type: "COMMIT_PAGE"},
+  reset: {type: "RESET"}
+}[name]);
+
+const scenarios = [
+  {
+    name: "旧模型整页重放",
+    description: "模拟前 5 个详情成功、第 6 个触发限制。观察旧 FetchPage 重试如何丢掉页内进度。",
+    steps: [
+      ["建立 8 个岗位的当前页", "load"],
+      ...Array.from({length: 5}, (_, i) => [`第 ${i + 1} 个详情成功`, "detail"]),
+      ["第 6 个详情触发 code=37", "limit"],
+      ["按旧 FetchPage 整页重来", "replay"]
+    ]
+  },
+  {
+    name: "逐岗位检查点恢复",
+    description: "同样在第 6 个详情失败，但人工确认恢复后保留前 5 个可靠结果。",
+    steps: [
+      ["建立 8 个岗位的当前页", "load"],
+      ...Array.from({length: 5}, (_, i) => [`第 ${i + 1} 个详情成功`, "detail"]),
+      ["第 6 个详情触发 code=37", "limit"],
+      ["人工确认平台恢复并继续", "resume"],
+      ["第 6 个详情成功", "detail"],
+      ["第 7 个详情成功", "detail"],
+      ["第 8 个详情成功", "detail"],
+      ["完整提交第 1 页", "commit"]
+    ]
+  },
+  {
+    name: "DOM 卡片消失",
+    description: "恢复后若缓存的稳定岗位 ID 已不在原生列表 DOM，必须停止，不能静默跳过。",
+    steps: [
+      ["建立 8 个岗位的当前页", "load"],
+      ["第 1 个详情成功", "detail"],
+      ["第 2 个详情成功", "detail"],
+      ["第 3 个详情触发 code=37", "limit"],
+      ["人工确认平台恢复并继续", "resume"],
+      ["第 3 个岗位卡片已不存在", "missing"]
+    ]
+  },
+  {
+    name: "显式耗尽",
+    description: "只有所有详情可靠且列表给出 hasMore=false，运行才进入发现完成。",
+    steps: [
+      ["建立 3 个岗位的末页", "load3"],
+      ["第 1 个详情成功", "detail"],
+      ["第 2 个详情成功", "detail"],
+      ["第 3 个详情成功", "detail"],
+      ["提交完整末页", "commit"]
+    ]
+  }
+];
+
+let state = DetailRecoveryModel.initialState();
+let activeScenario = 0;
+let completedSteps = 0;
+
+function dispatch(action) {
+  state = DetailRecoveryModel.reduce(state, action);
+  renderState();
+}
+
+function renderState() {
+  const failure = state.failure
+    ? `${state.failure.category} / 详情 ${state.failure.detailOrdinal} / ${state.failure.jobId}${state.failure.upstreamCode ? ` / code=${state.failure.upstreamCode}` : ""}`
+    : "无";
+  const fields = [
+    ["运行状态", state.runStatus],
+    ["页码 / 执行尝试", `${state.pageNo} / ${state.attemptNo}`],
+    ["当前页状态", state.pageStatus],
+    ["hasMore", state.hasMore === null ? "尚无证据" : String(state.hasMore)],
+    ["当前页岗位", state.jobIds.length ? state.jobIds.join("、") : "尚未建立"],
+    ["已可靠完成", `${state.completedJobIds.length}/${state.jobIds.length || 0}：${state.completedJobIds.join("、") || "无"}`],
+    ["下一个详情序号", state.nextDetailOrdinal || "无"],
+    ["详情请求 / 重放详情", `${state.detailRequests} / ${state.replayedDetails}`],
+    ["当前失败", failure],
+    ["刚刚发生", state.lastEvent]
+  ];
+  document.querySelector("#state").innerHTML = fields.map(([label, value], index) =>
+    `<div class="field ${index >= 4 ? "wide" : ""} ${index === 9 ? `event ${state.runStatus.includes("失败") ? "blocked" : state.runStatus.includes("完成") ? "complete" : ""}` : ""}"><span>${label}</span><strong>${value}</strong></div>`
+  ).join("");
+}
+
+function renderTabs() {
+  document.querySelector("#tabs").innerHTML = scenarios.map((scenario, index) =>
+    `<button class="tab ${index === activeScenario ? "active" : ""}" data-scenario="${index}">${scenario.name}</button>`
+  ).join("");
+  document.querySelectorAll("[data-scenario]").forEach(button => button.addEventListener("click", () => {
+    activeScenario = Number(button.dataset.scenario);
+    completedSteps = 0;
+    state = DetailRecoveryModel.initialState();
+    renderState();
+    renderTabs();
+    renderWalkthrough();
+  }));
+}
+
+function renderWalkthrough() {
+  const scenario = scenarios[activeScenario];
+  document.querySelector("#walkthrough").innerHTML = `
+    <h3>${scenario.name}</h3>
+    <p>${scenario.description}</p>
+    <ol>${scenario.steps.map(([label], index) => `
+      <li class="${index < completedSteps ? "done" : index === completedSteps ? "current" : ""}">
+        <button data-step="${index}" ${index !== completedSteps ? "disabled" : ""}>${index < completedSteps ? "✓ " : ""}${label}</button>
+      </li>`).join("")}
+    </ol>`;
+  document.querySelectorAll("[data-step]").forEach(button => button.addEventListener("click", () => {
+    const step = Number(button.dataset.step);
+    dispatch(actionFor(scenario.steps[step][1]));
+    completedSteps++;
+    renderWalkthrough();
+  }));
+}
+
+document.querySelectorAll("[data-action]").forEach(button => button.addEventListener("click", () => {
+  dispatch(actionFor(button.dataset.action));
+}));
+
+renderState();
+renderTabs();
+renderWalkthrough();
+</script>
+</body>
+</html>

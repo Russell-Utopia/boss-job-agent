@@ -77,7 +77,17 @@ const (
 
 type FetchError struct {
 	Category FetchErrorCategory
+	Evidence *FetchFailureEvidence
 	Cause    error
+}
+
+// FetchFailureEvidence identifies the first failed upstream request without
+// retaining request material or response content.
+type FetchFailureEvidence struct {
+	RequestOrdinal int
+	Stage          string
+	DetailOrdinal  int
+	UpstreamCode   string
 }
 
 func (e *FetchError) Error() string {
@@ -306,7 +316,10 @@ func (s *Service) fetchReliablePage(
 	if fetchErr != nil {
 		category := fetchErrorCategory(fetchErr)
 		finishErr := s.logs.Finish(ctx, trace, runlog.AttemptResult{
-			Outcome: runlog.OutcomeFailed, ErrorCategory: category, Err: fetchErr,
+			Outcome:         runlog.OutcomeFailed,
+			ErrorCategory:   category,
+			ExternalFailure: runlogFailureEvidence(fetchErr),
+			Err:             fetchErr,
 		})
 		return DiscoveryPage{}, errors.Join(fmt.Errorf("fetch discovery page %d: %w", pageNo, fetchErr), finishErr)
 	}
@@ -387,7 +400,7 @@ func ValidatePage(page DiscoveryPage) error {
 func validateObservation(observation JobObservation) error {
 	required := []string{
 		observation.PlatformJobID, observation.CanonicalURL, observation.JobTitle,
-		observation.CompanyName, observation.City, observation.Salary,
+		observation.CompanyName, observation.City,
 		observation.Responsibilities, observation.Requirements,
 	}
 	for _, value := range required {
@@ -466,5 +479,18 @@ func fetchErrorCategory(err error) runlog.ErrorCategory {
 		return runlog.ErrorCategoryInvalidProtocol
 	default:
 		return runlog.ErrorCategoryUnknown
+	}
+}
+
+func runlogFailureEvidence(err error) *runlog.ExternalFailureEvidence {
+	var fetchErr *FetchError
+	if !errors.As(err, &fetchErr) || fetchErr.Evidence == nil {
+		return nil
+	}
+	return &runlog.ExternalFailureEvidence{
+		RequestOrdinal: fetchErr.Evidence.RequestOrdinal,
+		Stage:          fetchErr.Evidence.Stage,
+		DetailOrdinal:  fetchErr.Evidence.DetailOrdinal,
+		UpstreamCode:   fetchErr.Evidence.UpstreamCode,
 	}
 }

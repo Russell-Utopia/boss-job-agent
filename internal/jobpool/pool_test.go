@@ -57,6 +57,53 @@ func observedJob(platformJobID string) Observation {
 	}
 }
 
+func TestObserveKeepsJobWhenReliableSalaryIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	db, err := storage.Open(t.Context(), ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	pool := New(db)
+
+	job := observedJob("boss-job-without-salary")
+	job.Salary = ""
+	got, err := pool.Observe(t.Context(), 1, job)
+	if err != nil {
+		t.Fatalf("observe platform job without reliable salary: %v", err)
+	}
+	if got.Salary != "" {
+		t.Errorf("observed salary = %q, want unavailable empty value", got.Salary)
+	}
+
+	jobs, err := pool.ListJobs(t.Context())
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].Salary != "" {
+		t.Errorf("listed jobs = %#v, want one job with unavailable salary", jobs)
+	}
+}
+
+func TestReliableSalaryAppearingChangesJudgmentHash(t *testing.T) {
+	t.Parallel()
+
+	withoutSalary := observedJob("boss-job-salary-change")
+	withoutSalary.Salary = ""
+	_, withoutHash, err := encodeJudgmentContent(withoutSalary)
+	if err != nil {
+		t.Fatalf("encode job without reliable salary: %v", err)
+	}
+	_, withHash, err := encodeJudgmentContent(observedJob("boss-job-salary-change"))
+	if err != nil {
+		t.Fatalf("encode job with reliable salary: %v", err)
+	}
+	if withoutHash == withHash {
+		t.Fatal("judgment hash did not change when reliable salary appeared")
+	}
+}
+
 func TestQueueAuthorizedOutreachRejectsWhenNoJobIsAvailable(t *testing.T) {
 	t.Parallel()
 

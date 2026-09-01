@@ -105,7 +105,7 @@ func (p *Pool) Observe(ctx context.Context, runID int64, observation Observation
 		JobTitle:                observation.JobTitle,
 		CompanyName:             sql.NullString{String: observation.CompanyName, Valid: true},
 		CityText:                sql.NullString{String: observation.City, Valid: true},
-		SalaryText:              sql.NullString{String: observation.Salary, Valid: true},
+		SalaryText:              optionalText(observation.Salary),
 		JdJson:                  jdJSON,
 		JdHash:                  jdHash,
 		PlatformStatus:          string(observation.PlatformStatus),
@@ -173,7 +173,7 @@ func validateObservationContent(observation Observation, content judgmentContent
 	if observation.CanonicalURL == "" {
 		return fmt.Errorf("observe platform job: stable platform ID and canonical URL are required")
 	}
-	if hasEmptyText(content.JobTitle, content.CompanyName, content.City, content.Salary) {
+	if hasEmptyText(content.JobTitle, content.CompanyName, content.City) {
 		return fmt.Errorf("observe platform job %q: basic job information is incomplete", observation.PlatformJobID)
 	}
 	if hasEmptyText(content.Responsibilities, content.Requirements) {
@@ -195,6 +195,11 @@ func hasEmptyText(values ...string) bool {
 		}
 	}
 	return false
+}
+
+func optionalText(value string) sql.NullString {
+	value = normalizeText(value)
+	return sql.NullString{String: value, Valid: value != ""}
 }
 
 func validatePlatformStatus(observation Observation) error {

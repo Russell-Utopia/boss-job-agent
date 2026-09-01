@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Russell-Utopia/boss-job-agent/internal/discovery"
@@ -115,6 +116,7 @@ type rawDiscoveryJob struct {
 	CompanyName            string `json:"companyName"`
 	City                   string `json:"city"`
 	Salary                 string `json:"salary"`
+	SalaryEvidence         string `json:"salaryEvidence,omitempty"`
 	FullJD                 string `json:"fullJD"`
 }
 
@@ -235,7 +237,33 @@ func buildJobDiscoveryScript(searchRange discovery.SearchRange, pageNo int) (str
 
 func classifyDiscoveryError(cause error) error {
 	category := discoveryCategoryFromCause(cause)
-	return &discovery.FetchError{Category: category, Cause: cause}
+	return &discovery.FetchError{
+		Category: category,
+		Evidence: discoveryFailureEvidence(cause),
+		Cause:    cause,
+	}
+}
+
+var discoveryFailureEvidencePattern = regexp.MustCompile(
+	`\|request_ordinal=(\d+)\|stage=([a-z_]+)\|detail_ordinal=(\d+)(?:\|upstream_code=([A-Za-z0-9_-]+))?`,
+)
+
+func discoveryFailureEvidence(cause error) *discovery.FetchFailureEvidence {
+	match := discoveryFailureEvidencePattern.FindStringSubmatch(cause.Error())
+	if match == nil {
+		return nil
+	}
+	requestOrdinal, requestErr := strconv.Atoi(match[1])
+	detailOrdinal, detailErr := strconv.Atoi(match[3])
+	if requestErr != nil || detailErr != nil {
+		return nil
+	}
+	return &discovery.FetchFailureEvidence{
+		RequestOrdinal: requestOrdinal,
+		Stage:          match[2],
+		DetailOrdinal:  detailOrdinal,
+		UpstreamCode:   match[4],
+	}
 }
 
 func discoveryCategoryFromCause(cause error) discovery.FetchErrorCategory {
@@ -248,7 +276,8 @@ func discoveryCategoryFromCause(cause error) discovery.FetchErrorCategory {
 	case strings.Contains(message, "boss_platform_limited"):
 		return discovery.FetchErrorPlatformLimited
 	case strings.Contains(message, "boss_search_filter_unresolved"),
-		strings.Contains(message, "boss_discovery_unreliable_page"):
+		strings.Contains(message, "boss_discovery_unreliable_page"),
+		strings.Contains(message, "boss_visible_page_unreliable"):
 		return discovery.FetchErrorInvalidResponse
 	}
 	var failure *adapterFailure
@@ -267,27 +296,60 @@ func discoveryCategoryFromCause(cause error) discovery.FetchErrorCategory {
 
 const fetchJobDiscoveryPageScript = `(async () => {
   const input = __SEARCH_INPUT__;
+  let requestOrdinal = 0;
+  const fail = (kind, stage, detailOrdinal = 0, upstreamCode = "") => {
+    const evidence = [
+      "request_ordinal=" + requestOrdinal,
+      "stage=" + stage,
+      "detail_ordinal=" + detailOrdinal
+    ];
+    const code = String(upstreamCode ?? "");
+    if (/^-?\d{1,10}$/.test(code)) {
+      evidence.push("upstream_code=" + code);
+    }
+    throw new Error(kind + "|" + evidence.join("|"));
+  };
   const pageText = document.body?.innerText || "";
   if (/login/i.test(location.pathname) || pageText.includes("登录/注册")) {
-    throw new Error("BOSS_AUTHENTICATION_REQUIRED");
+    fail("BOSS_AUTHENTICATION_REQUIRED", "page_preflight");
   }
   if (pageText.includes("安全验证") || pageText.includes("请输入验证码")) {
-    throw new Error("BOSS_VERIFICATION_REQUIRED");
+    fail("BOSS_VERIFICATION_REQUIRED", "page_preflight");
   }
   if (pageText.includes("访问过于频繁") || pageText.includes("操作过于频繁")) {
-    throw new Error("BOSS_PLATFORM_LIMITED");
+    fail("BOSS_PLATFORM_LIMITED", "page_preflight");
   }
 
-  const request = async (path, params = {}) => {
+  const request = async (stage, detailOrdinal, path, params = {}) => {
+    requestOrdinal++;
     const url = new URL(path, location.origin);
     Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
-    const response = await fetch(url, {credentials: "include", headers: {"X-Requested-With": "XMLHttpRequest"}});
-    if (!response.ok) throw new Error("BOSS_DISCOVERY_HTTP_" + response.status);
-    const payload = await response.json();
-    if ([7, 1011, 120, 121, 122].includes(payload.code)) throw new Error("BOSS_AUTHENTICATION_REQUIRED");
-    if (payload.code === 5012) throw new Error("BOSS_VERIFICATION_REQUIRED");
-    if ([31, 32, 35, 36, 37, 5002, 5003, 5004].includes(payload.code)) throw new Error("BOSS_PLATFORM_LIMITED");
-    if (payload.code !== 0 || !payload.zpData) throw new Error("BOSS_DISCOVERY_UNRELIABLE_PAGE");
+    let response;
+    try {
+      response = await fetch(url, {credentials: "include", headers: {"X-Requested-With": "XMLHttpRequest"}});
+    } catch (_) {
+      fail("BOSS_DISCOVERY_NETWORK_ERROR", stage, detailOrdinal);
+    }
+    if (!response.ok) fail("BOSS_DISCOVERY_HTTP_" + response.status, stage, detailOrdinal);
+    let payload;
+    try {
+      payload = await response.json();
+    } catch (_) {
+      fail("BOSS_DISCOVERY_INVALID_JSON", stage, detailOrdinal);
+    }
+    const upstreamCode = payload && typeof payload === "object" ? payload.code : "";
+    if ([7, 1011, 120, 121, 122].includes(upstreamCode)) {
+      fail("BOSS_AUTHENTICATION_REQUIRED", stage, detailOrdinal, upstreamCode);
+    }
+    if (upstreamCode === 5012) {
+      fail("BOSS_VERIFICATION_REQUIRED", stage, detailOrdinal, upstreamCode);
+    }
+    if ([31, 32, 35, 36, 37, 5002, 5003, 5004].includes(upstreamCode)) {
+      fail("BOSS_PLATFORM_LIMITED", stage, detailOrdinal, upstreamCode);
+    }
+    if (upstreamCode !== 0 || !payload.zpData) {
+      fail("BOSS_DISCOVERY_UNRELIABLE_PAGE", stage, detailOrdinal, upstreamCode);
+    }
     return payload.zpData;
   };
 
@@ -339,16 +401,18 @@ const fetchJobDiscoveryPageScript = `(async () => {
     return best;
   };
 
-  const cityData = await request("/wapi/zpCommon/data/city.json");
+  const cityData = await request("city_metadata", 0, "/wapi/zpCommon/data/city.json");
   const cityOption = findNamedOption(cityData, input.city);
-  if (!cityOption) throw new Error("BOSS_SEARCH_FILTER_UNRESOLVED:city");
+  if (!cityOption) fail("BOSS_SEARCH_FILTER_UNRESOLVED:city", "filter_resolution");
   const cityCode = optionCode(cityOption);
-  const conditions = await request("/wapi/zpgeek/search/job/condition.json", {city: cityCode, query: input.role});
+  const conditions = await request("filter_conditions", 0, "/wapi/zpgeek/search/job/condition.json", {city: cityCode, query: input.role});
   const salaryOption = resolveSalaryOption(conditions.salaryList, input.salary);
   const employmentOption = findNamedOption(conditions, input.employmentType);
-  if (!salaryOption || !employmentOption) throw new Error("BOSS_SEARCH_FILTER_UNRESOLVED:salary_or_employment_type");
+  if (!salaryOption || !employmentOption) {
+    fail("BOSS_SEARCH_FILTER_UNRESOLVED:salary_or_employment_type", "filter_resolution");
+  }
 
-  const list = await request("/wapi/zpgeek/search/joblist.json", {
+  const list = await request("job_list", 0, "/wapi/zpgeek/search/joblist.json", {
     scene: 1,
     query: input.role,
     city: cityCode,
@@ -358,16 +422,19 @@ const fetchJobDiscoveryPageScript = `(async () => {
     pageSize: 15
   });
   if (!Array.isArray(list.jobList) || typeof list.hasMore !== "boolean") {
-    throw new Error("BOSS_DISCOVERY_UNRELIABLE_PAGE");
+    fail("BOSS_DISCOVERY_UNRELIABLE_PAGE", "job_list_validation");
   }
 
   const jobs = [];
-  for (const entry of list.jobList) {
+  for (const [detailIndex, entry] of list.jobList.entries()) {
+    const detailOrdinal = detailIndex + 1;
     const card = entry.jobCard || entry;
     const platformJobId = normalized(card.encryptJobId || card.jobId);
-    if (!platformJobId) throw new Error("BOSS_DISCOVERY_UNRELIABLE_PAGE:missing_stable_id");
+    if (!platformJobId) {
+      fail("BOSS_DISCOVERY_UNRELIABLE_PAGE:missing_stable_id", "job_card_validation", detailOrdinal);
+    }
     if (jobs.length > 0) await new Promise(resolve => setTimeout(resolve, 750));
-    const detail = await request("/wapi/zpgeek/job/detail.json", {
+    const detail = await request("job_detail", detailOrdinal, "/wapi/zpgeek/job/detail.json", {
       securityId: card.securityId || "",
       jobId: platformJobId,
       lid: card.lid || list.lid || ""
@@ -375,7 +442,7 @@ const fetchJobDiscoveryPageScript = `(async () => {
     const info = detail.jobInfo || detail.jobCard || detail;
     const detailPlatformJobId = normalized(info.encryptId || info.encryptJobId || info.jobId);
     if (detailPlatformJobId !== platformJobId) {
-      throw new Error("BOSS_DISCOVERY_UNRELIABLE_PAGE:detail_identity_mismatch");
+      fail("BOSS_DISCOVERY_UNRELIABLE_PAGE:detail_identity_mismatch", "job_detail_validation", detailOrdinal);
     }
     const job = {
       platformJobId,
@@ -389,7 +456,7 @@ const fetchJobDiscoveryPageScript = `(async () => {
       fullJD: normalized(info.postDescription || info.jobDescription).replace(/\r\n?/g, "\n")
     };
     if (Object.values(job).some(value => !normalized(value))) {
-      throw new Error("BOSS_DISCOVERY_UNRELIABLE_PAGE:missing_job_field");
+      fail("BOSS_DISCOVERY_UNRELIABLE_PAGE:missing_job_field", "job_detail_validation", detailOrdinal);
     }
     jobs.push(job);
   }

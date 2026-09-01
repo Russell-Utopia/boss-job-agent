@@ -135,7 +135,7 @@
             <td><a href="{{.CanonicalURL}}">{{.JobTitle}}</a></td>
             <td>{{.CompanyName}}</td>
             <td>{{.City}}</td>
-            <td>{{.Salary}}</td>
+            <td>{{if .Salary}}{{.Salary}}{{else}}薪资仅可在 BOSS 页面查看{{end}}</td>
             <td>{{platformStatusText .PlatformStatus}}</td>
           </tr>
           {{end}}

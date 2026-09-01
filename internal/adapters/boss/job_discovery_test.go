@@ -68,7 +68,9 @@ func TestJobDiscoveryFetchesOneCompleteReliablePageThroughKimiWebBridge(t *testi
 	for _, expected := range []string{
 		"Go 后端工程师", "福州", "20-30K", "全职", `"page":3`,
 		"/wapi/zpgeek/search/joblist.json", "/wapi/zpgeek/job/detail.json", "hasMore",
-		"resolveSalaryOption", "conditions.salaryList",
+		"resolveSalaryOption", "conditions.salaryList", "requestOrdinal++",
+		`request("city_metadata", 0`, `request("filter_conditions", 0`,
+		`request("job_list", 0`, `request("job_detail", detailOrdinal`,
 	} {
 		if !strings.Contains(fixture.evaluationScript, expected) {
 			t.Errorf("evaluation script does not contain %q", expected)
@@ -102,6 +104,31 @@ func TestJobDiscoveryRejectsTheWholePageWhenOneObservationIsUnreliable(t *testin
 	}
 	if fetchErr.Category != discovery.FetchErrorInvalidResponse {
 		t.Errorf("fetch error category = %q, want invalid_response", fetchErr.Category)
+	}
+}
+
+func TestJobDiscoveryClassifiesAndPreservesFirstFailedRequestEvidence(t *testing.T) {
+	t.Parallel()
+
+	err := classifyDiscoveryError(errors.New(
+		"extension_error: evaluate: Error: BOSS_PLATFORM_LIMITED" +
+			"|request_ordinal=7|stage=job_detail|detail_ordinal=4|upstream_code=37",
+	))
+	var fetchErr *discovery.FetchError
+	if !errors.As(err, &fetchErr) {
+		t.Fatalf("fetch error = %v, want discovery.FetchError", err)
+	}
+	if fetchErr.Category != discovery.FetchErrorPlatformLimited {
+		t.Errorf("category = %q, want platform_limited", fetchErr.Category)
+	}
+	want := &discovery.FetchFailureEvidence{
+		RequestOrdinal: 7,
+		Stage:          "job_detail",
+		DetailOrdinal:  4,
+		UpstreamCode:   "37",
+	}
+	if !reflect.DeepEqual(fetchErr.Evidence, want) {
+		t.Errorf("failure evidence = %#v, want %#v", fetchErr.Evidence, want)
 	}
 }
 

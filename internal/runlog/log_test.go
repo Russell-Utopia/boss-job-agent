@@ -82,7 +82,13 @@ func writeFailedAttempt(t *testing.T, logs *Log) Trace {
 	if err := logs.Finish(context.Background(), trace, AttemptResult{
 		Outcome:       OutcomeFailed,
 		ErrorCategory: ErrorCategoryTransient,
-		Err:           fmt.Errorf("fetch page: %w", joined),
+		ExternalFailure: &ExternalFailureEvidence{
+			RequestOrdinal: 7,
+			Stage:          "job_detail",
+			DetailOrdinal:  4,
+			UpstreamCode:   "37",
+		},
+		Err: fmt.Errorf("fetch page: %w", joined),
 	}); err != nil {
 		t.Fatalf("finish attempt: %v", err)
 	}
@@ -110,6 +116,10 @@ func assertFailureRecord(t *testing.T, finish map[string]any, traceID string) {
 	assertJSONField(t, finish, "search_city", "福州")
 	assertJSONField(t, finish, "page_no", float64(3))
 	assertJSONField(t, finish, "error_category", "transient")
+	assertJSONField(t, finish, "request_ordinal", float64(7))
+	assertJSONField(t, finish, "stage", "job_detail")
+	assertJSONField(t, finish, "detail_ordinal", float64(4))
+	assertJSONField(t, finish, "upstream_code", "37")
 	assertCompleteRedactedErrorChain(t, finish["error_chain"])
 }
 
