@@ -406,6 +406,8 @@ WHERE lease_stage IS NULL
   AND (
       outreach_status = 'possibly_contacted'
       OR (
+          sqlc.arg(allow_contact) = 1
+          AND
           outreach_status = 'pending'
           AND platform_status = 'open'
           AND (
@@ -414,6 +416,8 @@ WHERE lease_stage IS NULL
           )
       )
       OR (
+          sqlc.arg(allow_contact) = 1
+          AND
           outreach_status = 'failed'
           AND outreach_retry_at IS NOT NULL
           AND outreach_retry_at <= sqlc.arg(claimed_at)

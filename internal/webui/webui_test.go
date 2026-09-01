@@ -905,7 +905,7 @@ func TestRealOutreachCommandReturnsPerJobBatchResult(t *testing.T) {
 	response := postJSONResponse(t, server.Client(), server.URL+"/api/outreach/real", fmt.Sprintf(`{
 		"jobIds":[%d,999],
 		"confirmation":{
-			"jobCount":2,
+			"jobCount":1,
 			"greetingText":"您好，想和您聊聊这个岗位",
 			"timeDescription":"全天可打招呼",
 			"confirmed":true
@@ -921,6 +921,57 @@ func TestRealOutreachCommandReturnsPerJobBatchResult(t *testing.T) {
 	}
 	if result.Succeeded != 1 || len(result.Skipped) != 1 || result.Skipped[0].JobID != 999 {
 		t.Errorf("outreach batch result = %#v, want one success and missing job 999", result)
+	}
+}
+
+func TestOutreachPageDisplaysEligibleBatchAndQueuesConfirmedSelection(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	if _, err := runtime.db.ExecContext(t.Context(), `
+		UPDATE automation_settings
+		SET outreach_greeting_text = '您好，想和您聊聊这个岗位'
+		WHERE id = 1
+	`); err != nil {
+		t.Fatalf("configure outreach greeting: %v", err)
+	}
+	job, err := runtime.pool.Observe(t.Context(), 1, jobpool.Observation{
+		PlatformJobID: "boss-job-page", CanonicalURL: "https://www.zhipin.com/job_detail/boss-job-page.html",
+		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
+	})
+	if err != nil {
+		t.Fatalf("observe outreach job: %v", err)
+	}
+	if err := runtime.pool.Review(t.Context(), []jobpool.ReviewDecision{{
+		JobID: job.ID, ExpectedJDHash: job.JDHash, Verdict: jobpool.HumanVerdictSuitable,
+	}}); err != nil {
+		t.Fatalf("review outreach job: %v", err)
+	}
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	client := server.Client()
+
+	assertPageContains(t, client, server.URL+"/outreach", []string{
+		"当前可入队岗位：1", "加入真实打招呼队列", "您好，想和您聊聊这个岗位", "全天可打招呼",
+	})
+	response := postFormResponse(t, client, server.URL+"/outreach/real", url.Values{
+		"jobId": {fmt.Sprint(job.ID)}, "jobCount": {"1"},
+		"greetingText": {"您好，想和您聊聊这个岗位"}, "timeDescription": {"全天可打招呼"},
+		"confirmed": {"true"},
+	})
+	defer closeResponseBody(t, response.Body)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("queue outreach page status = %d, want redirected page", response.StatusCode)
+	}
+	view, err := runtime.pool.GetJob(t.Context(), job.ID)
+	if err != nil {
+		t.Fatalf("get queued outreach job: %v", err)
+	}
+	if view.OutreachStatus != jobpool.OutreachStatusPending {
+		t.Errorf("page queued outreach status = %q, want pending", view.OutreachStatus)
 	}
 }
 
@@ -988,7 +1039,7 @@ func TestWebRestoresSavedPolicyAndAutomationSettings(t *testing.T) {
 	})
 	assertPageContains(t, client, server.URL+"/outreach", []string{
 		"<dd>您好，想和您聊聊这个岗位</dd>",
-		"<dd>按已配置时间段打招呼</dd>",
+		"<dd>10:00-12:00（Asia/Shanghai）</dd>",
 		"当前没有可真实打招呼的岗位",
 	})
 }

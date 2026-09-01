@@ -1,6 +1,27 @@
 (function () {
   "use strict";
 
+  const outreachForm = document.querySelector("#outreach-form");
+  outreachForm?.addEventListener("submit", (event) => {
+    const selected = Array.from(outreachForm.querySelectorAll("input[name='jobId']:checked"));
+    if (!selected.length) {
+      event.preventDefault();
+      window.alert("至少选择一个当前可入队岗位。");
+      return;
+    }
+    const greeting = outreachForm.dataset.greeting || "";
+    const timeDescription = outreachForm.dataset.timeDescription || "";
+    const message = "本批将授权 " + selected.length + " 个岗位。\n\n完整招呼语：" + greeting + "\n当前时间规则：" + timeDescription + "\n\n确认后只加入本批真实打招呼队列，不会开启自动打招呼。";
+    if (!window.confirm(message)) {
+      event.preventDefault();
+      return;
+    }
+    outreachForm.querySelector("input[name='jobCount']").value = String(selected.length);
+    outreachForm.querySelector("input[name='greetingText']").value = greeting;
+    outreachForm.querySelector("input[name='timeDescription']").value = timeDescription;
+    outreachForm.querySelector("input[name='confirmed']").value = "true";
+  });
+
   const root = document.querySelector("#policy-optimization");
   if (!root) return;
 

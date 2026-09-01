@@ -835,6 +835,13 @@ func (p *Pool) AdmitAssessments(ctx context.Context, limit int) (int, error) {
 	return int(count), nil
 }
 
+func boolInt64(value bool) int64 {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 func (p *Pool) AdmitOutreach(
 	ctx context.Context,
 	authorization OutreachAuthorization,
@@ -1219,6 +1226,26 @@ func nullableTime(value *time.Time) sql.NullInt64 {
 }
 
 func (p *Pool) ClaimOutreach(ctx context.Context, claim OutreachClaim) ([]OutreachWork, error) {
+	return p.claimOutreach(ctx, claim, true)
+}
+
+// ClaimOutreachWithinWindow always permits reconciliation, while allowing
+// new contact work only when the caller's current Asia/Shanghai window is
+// open. The unrestricted ClaimOutreach method remains the direct JobPool seam
+// for business commands and tests.
+func (p *Pool) ClaimOutreachWithinWindow(
+	ctx context.Context,
+	claim OutreachClaim,
+	allowContact bool,
+) ([]OutreachWork, error) {
+	return p.claimOutreach(ctx, claim, allowContact)
+}
+
+func (p *Pool) claimOutreach(
+	ctx context.Context,
+	claim OutreachClaim,
+	allowContact bool,
+) ([]OutreachWork, error) {
 	if err := validateOutreachClaim(claim); err != nil {
 		return nil, err
 	}
@@ -1235,7 +1262,7 @@ func (p *Pool) ClaimOutreach(ctx context.Context, claim OutreachClaim) ([]Outrea
 	if err != nil {
 		return nil, fmt.Errorf("expire outreach leases: %w", err)
 	}
-	work, err := claimOutreachBatch(ctx, queries, claim)
+	work, err := claimOutreachBatch(ctx, queries, claim, allowContact)
 	if err != nil {
 		return nil, err
 	}
@@ -1249,10 +1276,11 @@ func claimOutreachBatch(
 	ctx context.Context,
 	queries *sqlitedb.Queries,
 	claim OutreachClaim,
+	allowContact bool,
 ) ([]OutreachWork, error) {
 	work := make([]OutreachWork, 0, claim.Limit)
 	for len(work) < claim.Limit {
-		item, found, err := claimNextOutreach(ctx, queries, claim)
+		item, found, err := claimNextOutreach(ctx, queries, claim, allowContact)
 		if err != nil {
 			return nil, err
 		}
@@ -1268,10 +1296,11 @@ func claimNextOutreach(
 	ctx context.Context,
 	queries *sqlitedb.Queries,
 	claim OutreachClaim,
+	allowContact bool,
 ) (OutreachWork, bool, error) {
 	candidate, err := queries.GetOutreachClaimCandidate(ctx, sqlitedb.GetOutreachClaimCandidateParams{
 		ClaimedAt:    sql.NullInt64{Int64: claim.ClaimedAt.UnixMilli(), Valid: true},
-		FailureLimit: unattendedAttemptLimit,
+		FailureLimit: unattendedAttemptLimit, AllowContact: boolInt64(allowContact),
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return OutreachWork{}, false, nil
@@ -1434,6 +1463,32 @@ func (p *Pool) OutreachAvailability(ctx context.Context) ActionAvailability {
 		}
 	}
 	return ActionAvailability{Code: "outreach_unavailable", Reason: "当前没有可真实打招呼的岗位"}
+}
+
+// CountEligibleOutreach counts the current handoff candidates. A non-empty
+// jobIDs list scopes the count to a user's selected batch; nil previews the
+// whole global pool.
+func (p *Pool) CountEligibleOutreach(ctx context.Context, jobIDs []int64) (int, error) {
+	rows, err := p.queries.ListPlatformJobs(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("count outreach candidates: %w", err)
+	}
+	selected := make(map[int64]struct{}, len(jobIDs))
+	for _, jobID := range jobIDs {
+		selected[jobID] = struct{}{}
+	}
+	count := 0
+	for _, row := range rows {
+		if len(selected) > 0 {
+			if _, ok := selected[row.ID]; !ok {
+				continue
+			}
+		}
+		if outreachEligible(row) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (p *Pool) QueueAuthorizedOutreach(

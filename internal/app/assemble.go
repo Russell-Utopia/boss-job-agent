@@ -28,6 +28,7 @@ type assembled struct {
 	logs       *runlog.Log
 	discovery  *discovery.Service
 	assessment *assessment.Service
+	outreach   *outreach.Service
 }
 
 func assemble(ctx context.Context, config Config) (*assembled, error) {
@@ -81,12 +82,13 @@ func assemble(ctx context.Context, config Config) (*assembled, error) {
 		logs,
 		config.Now,
 	)
-	_ = outreach.New()
+	outreachService := outreach.New(pool, settings, bossadapter.NewDefaultOutreach(), logs)
 
 	return &assembled{
 		database:   database,
 		discovery:  discoveryService,
 		assessment: assessmentService,
+		outreach:   outreachService,
 		handler: webui.New(webui.Dependencies{
 			Resume:     resumeVersions,
 			Discovery:  discoveryService,
@@ -132,7 +134,7 @@ func (a *assembled) close() error {
 
 func (a *assembled) startBackground(ctx context.Context, recheckInterval time.Duration) func() {
 	var group sync.WaitGroup
-	group.Add(3)
+	group.Add(4)
 	go func() {
 		defer group.Done()
 		a.logs.RunRechecks(ctx, recheckInterval)
@@ -144,6 +146,10 @@ func (a *assembled) startBackground(ctx context.Context, recheckInterval time.Du
 	go func() {
 		defer group.Done()
 		a.assessment.Run(ctx)
+	}()
+	go func() {
+		defer group.Done()
+		a.outreach.Run(ctx)
 	}()
 	return group.Wait
 }

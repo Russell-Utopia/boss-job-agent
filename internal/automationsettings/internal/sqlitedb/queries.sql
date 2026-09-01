@@ -25,3 +25,11 @@ SET automatic_assessment_enabled = sqlc.arg(automatic_assessment_enabled),
     assessment_processing_limit = sqlc.arg(assessment_processing_limit),
     updated_at = sqlc.arg(updated_at)
 WHERE id = 1;
+
+-- name: ConfigureOutreach :execrows
+UPDATE automation_settings
+SET automatic_outreach_enabled = sqlc.arg(automatic_outreach_enabled),
+    outreach_greeting_text = sqlc.narg(outreach_greeting_text),
+    outreach_time_windows_json = sqlc.arg(outreach_time_windows_json),
+    updated_at = sqlc.arg(updated_at)
+WHERE id = 1;

@@ -3,6 +3,7 @@ package automationsettings
 import (
 	"database/sql"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -68,7 +69,7 @@ func TestSafeDefaultInitializationPreservesSavedAutomationSettings(t *testing.T)
 	if !view.AutomaticOutreachEnabled || view.OutreachGreeting == nil {
 		t.Errorf("saved outreach settings = %#v, want enabled with greeting", view)
 	}
-	if view.OutreachTimeDescription != "按已配置时间段打招呼" {
+	if view.OutreachTimeDescription != "10:00-12:00（Asia/Shanghai）" {
 		t.Errorf("outreach time description = %q, want configured periods", view.OutreachTimeDescription)
 	}
 }
@@ -217,7 +218,12 @@ func TestQueueRealOutreachReturnsTheJobPoolBatchResult(t *testing.T) {
 	}
 
 	result, err := settings.QueueRealOutreach(
-		t.Context(), []int64{job.ID, 999}, RealOutreachConfirmation{},
+		t.Context(), []int64{job.ID, 999}, RealOutreachConfirmation{
+			JobCount:        1,
+			GreetingText:    "您好，想和您聊聊这个岗位",
+			TimeDescription: "全天可打招呼",
+			Confirmed:       true,
+		},
 	)
 	if err != nil {
 		t.Fatalf("queue real outreach: %v", err)
@@ -225,4 +231,127 @@ func TestQueueRealOutreachReturnsTheJobPoolBatchResult(t *testing.T) {
 	if result.Succeeded != 1 || len(result.Skipped) != 1 || result.Skipped[0].JobID != 999 {
 		t.Errorf("queue real outreach result = %#v, want one success and missing job 999", result)
 	}
+}
+
+func TestConfigureOutreachSortsWindowsAndUsesAsiaShanghai(t *testing.T) {
+	t.Parallel()
+
+	settings, _ := openTestSettings(t)
+	mustEnsureSettingsDefaults(t, settings)
+	if err := settings.ConfigureOutreach(t.Context(), true, "  您好，想聊聊  ", []OutreachTimeWindow{
+		{Start: "14:00", End: "18:00"},
+		{Start: "09:00", End: "12:00"},
+	}); err != nil {
+		t.Fatalf("configure outreach: %v", err)
+	}
+
+	view := mustGetSettingsView(t, settings)
+	assertConfiguredOutreachView(t, view)
+}
+
+func mustEnsureSettingsDefaults(t *testing.T, settings *Settings) {
+	t.Helper()
+	if err := settings.EnsureSafeDefaults(t.Context(), time.UnixMilli(1000)); err != nil {
+		t.Fatalf("ensure safe defaults: %v", err)
+	}
+}
+
+func assertConfiguredOutreachView(t *testing.T, view View) {
+	t.Helper()
+	if !view.AutomaticOutreachEnabled || view.OutreachGreeting == nil || *view.OutreachGreeting != "您好，想聊聊" {
+		t.Errorf("outreach settings = %#v, want enabled and normalized greeting", view)
+	}
+	if want := []OutreachTimeWindow{{Start: "09:00", End: "12:00"}, {Start: "14:00", End: "18:00"}}; !reflect.DeepEqual(view.OutreachTimeWindows, want) {
+		t.Errorf("outreach windows = %#v, want %#v", view.OutreachTimeWindows, want)
+	}
+	if view.OutreachTimeDescription != "09:00-12:00、14:00-18:00（Asia/Shanghai）" {
+		t.Errorf("outreach time description = %q", view.OutreachTimeDescription)
+	}
+	if !view.AllowsOutreachAt(time.Date(2026, 9, 1, 2, 30, 0, 0, time.UTC)) {
+		t.Error("02:30 UTC (10:30 Asia/Shanghai) is outside outreach window")
+	}
+	if view.AllowsOutreachAt(time.Date(2026, 9, 1, 4, 30, 0, 0, time.UTC)) {
+		t.Error("04:30 UTC (12:30 Asia/Shanghai) is inside outreach window")
+	}
+}
+
+func TestConfigureOutreachRejectsOverlappingWindowsAndMissingGreetingWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	settings, _ := openTestSettings(t)
+	if err := settings.EnsureSafeDefaults(t.Context(), time.UnixMilli(1000)); err != nil {
+		t.Fatalf("ensure safe defaults: %v", err)
+	}
+
+	err := settings.ConfigureOutreach(t.Context(), true, "", []OutreachTimeWindow{{Start: "09:00", End: "12:00"}})
+	assertSettingsRejectionCode(t, err, "outreach_greeting_required")
+	err = settings.ConfigureOutreach(t.Context(), false, "您好", []OutreachTimeWindow{
+		{Start: "09:00", End: "12:00"}, {Start: "11:59", End: "13:00"},
+	})
+	assertSettingsRejectionCode(t, err, "outreach_time_windows_overlap")
+	assertSafeDefaults(t, mustGetSettingsView(t, settings))
+}
+
+func TestQueueRealOutreachRequiresCurrentExplicitConfirmation(t *testing.T) {
+	t.Parallel()
+
+	settings, db := openTestSettings(t)
+	if err := settings.EnsureSafeDefaults(t.Context(), time.UnixMilli(1000)); err != nil {
+		t.Fatalf("ensure safe defaults: %v", err)
+	}
+	if err := settings.ConfigureOutreach(t.Context(), false, "您好，想和您聊聊这个岗位", nil); err != nil {
+		t.Fatalf("configure outreach greeting: %v", err)
+	}
+	job, err := settings.pool.Observe(t.Context(), 1, jobpool.Observation{
+		PlatformJobID: "boss-job-confirmation", CanonicalURL: "https://www.zhipin.com/job_detail/boss-job-confirmation.html",
+		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
+	})
+	if err != nil {
+		t.Fatalf("observe eligible outreach job: %v", err)
+	}
+	if err := settings.pool.Review(t.Context(), []jobpool.ReviewDecision{{JobID: job.ID, ExpectedJDHash: job.JDHash, Verdict: jobpool.HumanVerdictSuitable}}); err != nil {
+		t.Fatalf("review eligible outreach job: %v", err)
+	}
+
+	_, err = settings.QueueRealOutreach(t.Context(), []int64{job.ID}, RealOutreachConfirmation{})
+	assertSettingsRejectionCode(t, err, "outreach_confirmation_required")
+	_, err = settings.QueueRealOutreach(t.Context(), []int64{job.ID}, RealOutreachConfirmation{
+		JobCount: 1, GreetingText: "旧招呼语", TimeDescription: "全天可打招呼", Confirmed: true,
+	})
+	assertSettingsRejectionCode(t, err, "outreach_confirmation_stale")
+	result, err := settings.QueueRealOutreach(t.Context(), []int64{job.ID}, RealOutreachConfirmation{
+		JobCount: 1, GreetingText: "您好，想和您聊聊这个岗位", TimeDescription: "全天可打招呼", Confirmed: true,
+	})
+	if err != nil || result.Succeeded != 1 {
+		t.Fatalf("queue confirmed outreach = %#v, err=%v; want one success", result, err)
+	}
+	var status string
+	if err := db.QueryRowContext(t.Context(), `SELECT outreach_status FROM platform_jobs WHERE id = ?`, job.ID).Scan(&status); err != nil {
+		t.Fatalf("read queued outreach status: %v", err)
+	}
+	if status != string(jobpool.OutreachStatusPending) {
+		t.Errorf("queued outreach status = %q, want pending", status)
+	}
+}
+
+func assertSettingsRejectionCode(t *testing.T, err error, want string) {
+	t.Helper()
+	var rejection *Rejection
+	if !errors.As(err, &rejection) {
+		t.Fatalf("error = %v, want settings rejection %q", err, want)
+	}
+	if rejection.Code != want {
+		t.Fatalf("rejection code = %q, want %q", rejection.Code, want)
+	}
+}
+
+func mustGetSettingsView(t *testing.T, settings *Settings) View {
+	t.Helper()
+	view, err := settings.Get(t.Context())
+	if err != nil {
+		t.Fatalf("get settings: %v", err)
+	}
+	return view
 }

@@ -364,11 +364,27 @@
       </article>
       <article class="card">
         <p class="eyebrow">手工操作</p>
-        <h2>当前没有可打招呼岗位</h2>
-        <div class="button-row">
-          <button type="button" disabled>真实打招呼</button>
-        </div>
+        <h2>当前可入队岗位：{{.State.EligibleOutreachCount}}</h2>
+        {{if .State.EligibleOutreachCount}}
+        <form id="outreach-form" method="post" action="/outreach/real" data-greeting="{{with .State.Automation.OutreachGreeting}}{{.}}{{end}}" data-time-description="{{.State.Automation.OutreachTimeDescription}}">
+          <div class="outreach-job-picker">
+          {{range .State.Jobs}}
+          {{if .OutreachAction.Allowed}}
+          <label class="outreach-job"><input type="checkbox" name="jobId" value="{{.ID}}"><span><strong>{{.JobTitle}}</strong><small>{{.CompanyName}} · {{.City}} · {{if .Salary}}{{.Salary}}{{else}}薪资仅可在 BOSS 页面查看{{end}}</small></span></label>
+          {{end}}
+          {{end}}
+          </div>
+          <input type="hidden" name="jobCount" value="0">
+          <input type="hidden" name="greetingText" value="">
+          <input type="hidden" name="timeDescription" value="">
+          <input type="hidden" name="confirmed" value="false">
+          <div class="button-row"><button type="submit" {{if not .State.Actions.QueueRealOutreach.Allowed}}disabled{{end}}>加入真实打招呼队列</button></div>
+        </form>
+        {{else}}
+        <div class="button-row"><button type="button" disabled>加入真实打招呼队列</button></div>
+        {{end}}
         <p class="reason">{{.State.Actions.QueueRealOutreach.Reason}}</p>
+        <p class="muted">提交前会再次逐项检查岗位资格；此确认只授权本次选中的岗位，不会开启自动打招呼。</p>
       </article>
     </section>
     {{end}}

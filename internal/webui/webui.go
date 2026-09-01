@@ -130,15 +130,16 @@ type pageData struct {
 }
 
 type startupState struct {
-	CurrentResume      *onlineresume.Version             `json:"currentResume"`
-	ActivePolicy       assessment.Policy                 `json:"activePolicy"`
-	PolicyOptimization assessment.PolicyOptimizationView `json:"policyOptimization"`
-	Automation         automationsettings.View           `json:"automation"`
-	Actions            firstUseActions                   `json:"actions"`
-	RunlogHealth       runlog.Health                     `json:"runlogHealth"`
-	ActiveResumeUse    *discovery.ActiveResumeUse        `json:"activeDiscoveryResumeUse,omitempty"`
-	DiscoveryRun       *discovery.RunView                `json:"discoveryRun,omitempty"`
-	Jobs               []jobpool.JobView                 `json:"jobs"`
+	CurrentResume         *onlineresume.Version             `json:"currentResume"`
+	ActivePolicy          assessment.Policy                 `json:"activePolicy"`
+	PolicyOptimization    assessment.PolicyOptimizationView `json:"policyOptimization"`
+	Automation            automationsettings.View           `json:"automation"`
+	Actions               firstUseActions                   `json:"actions"`
+	RunlogHealth          runlog.Health                     `json:"runlogHealth"`
+	ActiveResumeUse       *discovery.ActiveResumeUse        `json:"activeDiscoveryResumeUse,omitempty"`
+	DiscoveryRun          *discovery.RunView                `json:"discoveryRun,omitempty"`
+	Jobs                  []jobpool.JobView                 `json:"jobs"`
+	EligibleOutreachCount int                               `json:"eligibleOutreachCount,omitempty"`
 }
 
 type resumeFeedback struct {
@@ -173,6 +174,7 @@ func New(dependencies Dependencies) http.Handler {
 	mux.HandleFunc("GET /assessments", h.renderPage("assessments", "岗位鉴定", h.assessmentsState))
 	mux.HandleFunc("POST /assessments/settings", h.configureAssessmentPage)
 	mux.HandleFunc("GET /outreach", h.renderPage("outreach", "打招呼", h.outreachState))
+	mux.HandleFunc("POST /outreach/real", h.queueRealPage)
 	mux.HandleFunc("GET /resume", h.renderPage("resume", "在线简历", h.resumeState))
 	mux.HandleFunc("POST /resume/refresh", h.refreshResumePage)
 	mux.HandleFunc("POST /discovery-runs", h.startDiscoveryPage)
@@ -451,8 +453,16 @@ func (h *handler) outreachState(ctx context.Context) (startupState, error) {
 	if err != nil {
 		return startupState{}, err
 	}
+	jobs, err := h.dependencies.Jobs.ListJobs(ctx)
+	if err != nil {
+		return startupState{}, err
+	}
+	eligibleCount, err := h.dependencies.Jobs.CountEligibleOutreach(ctx, nil)
+	if err != nil {
+		return startupState{}, err
+	}
 	return startupState{
-		Automation: settings,
+		Automation: settings, Jobs: jobs, EligibleOutreachCount: eligibleCount,
 		Actions: firstUseActions{
 			QueueRealOutreach: fromSettingsAvailability(availability),
 		},
@@ -710,6 +720,54 @@ func (h *handler) queueReal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *handler) queueRealPage(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "真实打招呼内容无效", http.StatusBadRequest)
+		return
+	}
+	jobIDs, err := parseOutreachJobIDs(r.PostForm["jobId"])
+	if err != nil {
+		http.Error(w, "岗位编号无效", http.StatusBadRequest)
+		return
+	}
+	jobCount, err := strconv.Atoi(r.PostFormValue("jobCount"))
+	if err != nil || jobCount < 0 {
+		http.Error(w, "岗位数量无效", http.StatusBadRequest)
+		return
+	}
+	result, err := h.dependencies.Settings.QueueRealOutreach(r.Context(), jobIDs, automationsettings.RealOutreachConfirmation{
+		JobCount: jobCount, GreetingText: r.PostFormValue("greetingText"),
+		TimeDescription: r.PostFormValue("timeDescription"), Confirmed: r.PostFormValue("confirmed") == "true",
+	})
+	if err != nil {
+		var rejection businessRejection
+		if errors.As(err, &rejection) {
+			http.Error(w, rejection.RejectionReason(), http.StatusConflict)
+			return
+		}
+		http.Error(w, "真实打招呼操作失败，请稍后重试", http.StatusInternalServerError)
+		return
+	}
+	if result.Succeeded == 0 && len(result.Skipped) > 0 {
+		http.Error(w, result.Skipped[0].Reason, http.StatusConflict)
+		return
+	}
+	http.Redirect(w, r, "/outreach", http.StatusSeeOther)
+}
+
+func parseOutreachJobIDs(values []string) ([]int64, error) {
+	jobIDs := make([]int64, 0, len(values))
+	for _, value := range values {
+		jobID, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || jobID <= 0 {
+			return nil, errors.New("invalid outreach job ID")
+		}
+		jobIDs = append(jobIDs, jobID)
+	}
+	return jobIDs, nil
 }
 
 func (h *handler) assessmentCommandAPI(command assessmentBatchCommand) http.HandlerFunc {

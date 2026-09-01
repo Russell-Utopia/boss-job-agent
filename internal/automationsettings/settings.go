@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/Russell-Utopia/boss-job-agent/internal/automationsettings/internal/sqlitedb"
@@ -30,6 +32,14 @@ type View struct {
 type OutreachTimeWindow struct {
 	Start string `json:"start"`
 	End   string `json:"end"`
+}
+
+type OutreachChangeImpact struct {
+	AutomaticOutreachEnabled bool                 `json:"automaticOutreachEnabled"`
+	EligibleJobCount         int                  `json:"eligibleJobCount"`
+	GreetingText             string               `json:"greetingText"`
+	TimeDescription          string               `json:"timeDescription"`
+	OutreachTimeWindows      []OutreachTimeWindow `json:"outreachTimeWindows"`
 }
 
 type RealOutreachConfirmation struct {
@@ -83,14 +93,15 @@ func (s *Settings) Get(ctx context.Context) (View, error) {
 	if err := json.Unmarshal([]byte(row.OutreachTimeWindowsJson), &windows); err != nil {
 		return View{}, fmt.Errorf("decode outreach time windows: %w", err)
 	}
+	windows, err = normalizeOutreachTimeWindows(windows)
+	if err != nil {
+		return View{}, fmt.Errorf("validate saved outreach time windows: %w", err)
+	}
 	var greeting *string
 	if row.OutreachGreetingText.Valid {
 		greeting = &row.OutreachGreetingText.String
 	}
-	timeDescription := "全天可打招呼"
-	if len(windows) > 0 {
-		timeDescription = "按已配置时间段打招呼"
-	}
+	timeDescription := outreachTimeDescription(windows)
 	return View{
 		AutomaticAssessmentEnabled: row.AutomaticAssessmentEnabled == 1,
 		AssessmentProcessingLimit:  int(row.AssessmentProcessingLimit),
@@ -99,6 +110,24 @@ func (s *Settings) Get(ctx context.Context) (View, error) {
 		OutreachTimeWindows:        windows,
 		OutreachTimeDescription:    timeDescription,
 	}, nil
+}
+
+// AllowsOutreachAt evaluates the configured daily half-open windows in the
+// user's local China Standard Time. An empty list means the whole day.
+func (v View) AllowsOutreachAt(now time.Time) bool {
+	if len(v.OutreachTimeWindows) == 0 {
+		return true
+	}
+	local := now.In(time.FixedZone("Asia/Shanghai", 8*60*60))
+	minutes := local.Hour()*60 + local.Minute()
+	for _, window := range v.OutreachTimeWindows {
+		start, _ := parseOutreachClock(window.Start)
+		end, _ := parseOutreachClock(window.End)
+		if minutes >= start && minutes < end {
+			return true
+		}
+	}
+	return false
 }
 
 // ConfigureAssessment controls admission of new assessment work and the
@@ -124,6 +153,102 @@ func (s *Settings) ConfigureAssessment(ctx context.Context, enabled bool, proces
 	return nil
 }
 
+// ConfigureOutreach validates and persists the instance-level real outreach
+// authorization settings. A greeting is retained while automatic outreach is
+// disabled, so a later explicit enable does not need to recreate it.
+func (s *Settings) ConfigureOutreach(
+	ctx context.Context,
+	enabled bool,
+	greetingText string,
+	windows []OutreachTimeWindow,
+) error {
+	greeting := strings.Join(strings.Fields(greetingText), " ")
+	if enabled && greeting == "" {
+		return &Rejection{Code: "outreach_greeting_required", Reason: "开启自动打招呼前必须配置固定招呼语"}
+	}
+	normalizedWindows, err := normalizeOutreachTimeWindows(windows)
+	if err != nil {
+		return err
+	}
+	windowsJSON, err := json.Marshal(normalizedWindows)
+	if err != nil {
+		return fmt.Errorf("encode outreach time windows: %w", err)
+	}
+	var greetingValue sql.NullString
+	if greeting != "" {
+		greetingValue = sql.NullString{String: greeting, Valid: true}
+	}
+	updated, err := s.queries.ConfigureOutreach(ctx, sqlitedb.ConfigureOutreachParams{
+		AutomaticOutreachEnabled: boolInt64(enabled), OutreachGreetingText: greetingValue,
+		OutreachTimeWindowsJson: string(windowsJSON), UpdatedAt: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return fmt.Errorf("configure outreach automation: %w", err)
+	}
+	if updated != 1 {
+		return fmt.Errorf("configure outreach automation: safe settings are not initialized")
+	}
+	return nil
+}
+
+func normalizeOutreachTimeWindows(windows []OutreachTimeWindow) ([]OutreachTimeWindow, error) {
+	normalized := make([]OutreachTimeWindow, 0, len(windows))
+	for index, window := range windows {
+		start, err := parseOutreachClock(window.Start)
+		if err != nil {
+			return nil, &Rejection{Code: "outreach_time_window_invalid", Reason: fmt.Sprintf("第 %d 个打招呼时间窗无效：%v", index+1, err)}
+		}
+		end, err := parseOutreachClock(window.End)
+		if err != nil {
+			return nil, &Rejection{Code: "outreach_time_window_invalid", Reason: fmt.Sprintf("第 %d 个打招呼时间窗无效：%v", index+1, err)}
+		}
+		if start >= end {
+			return nil, &Rejection{Code: "outreach_time_window_invalid", Reason: fmt.Sprintf("第 %d 个打招呼时间窗必须从早到晚", index+1)}
+		}
+		normalized = append(normalized, OutreachTimeWindow{
+			Start: formatOutreachClock(start), End: formatOutreachClock(end),
+		})
+	}
+	sort.Slice(normalized, func(i, j int) bool { return normalized[i].Start < normalized[j].Start })
+	for index := 1; index < len(normalized); index++ {
+		_, previousEnd := mustParseOutreachWindow(normalized[index-1])
+		currentStart, _ := mustParseOutreachWindow(normalized[index])
+		if currentStart < previousEnd {
+			return nil, &Rejection{Code: "outreach_time_windows_overlap", Reason: "打招呼时间窗不能互相重叠"}
+		}
+	}
+	return normalized, nil
+}
+
+func parseOutreachClock(value string) (int, error) {
+	parsed, err := time.Parse("15:04", strings.TrimSpace(value))
+	if err != nil {
+		return 0, errors.New("时间必须使用 HH:MM 格式")
+	}
+	return parsed.Hour()*60 + parsed.Minute(), nil
+}
+
+func formatOutreachClock(minutes int) string {
+	return fmt.Sprintf("%02d:%02d", minutes/60, minutes%60)
+}
+
+func mustParseOutreachWindow(window OutreachTimeWindow) (int, int) {
+	start, _ := parseOutreachClock(window.Start)
+	end, _ := parseOutreachClock(window.End)
+	return start, end
+}
+
+func outreachTimeDescription(windows []OutreachTimeWindow) string {
+	if len(windows) == 0 {
+		return "全天可打招呼"
+	}
+	parts := make([]string, 0, len(windows))
+	for _, window := range windows {
+		parts = append(parts, window.Start+"-"+window.End)
+	}
+	return strings.Join(parts, "、") + "（Asia/Shanghai）"
+}
+
 func boolInt64(value bool) int64 {
 	if value {
 		return 1
@@ -144,7 +269,7 @@ func (s *Settings) GetDiscoveryHints(ctx context.Context) (View, error) {
 func (s *Settings) QueueRealOutreach(
 	ctx context.Context,
 	jobIDs []int64,
-	_ RealOutreachConfirmation,
+	confirmation RealOutreachConfirmation,
 ) (jobpool.BatchActionResult, error) {
 	view, err := s.Get(ctx)
 	if err != nil {
@@ -156,10 +281,54 @@ func (s *Settings) QueueRealOutreach(
 			Reason: "请先配置固定招呼语，再真实打招呼",
 		}
 	}
+	if len(jobIDs) > 0 {
+		if !confirmation.Confirmed {
+			return jobpool.BatchActionResult{}, &Rejection{
+				Code: "outreach_confirmation_required", Reason: "请确认本批岗位、完整招呼语和当前时间规则",
+			}
+		}
+		eligibleCount, err := s.pool.CountEligibleOutreach(ctx, jobIDs)
+		if err != nil {
+			return jobpool.BatchActionResult{}, err
+		}
+		if confirmation.JobCount != eligibleCount ||
+			strings.Join(strings.Fields(confirmation.GreetingText), " ") != *view.OutreachGreeting ||
+			strings.TrimSpace(confirmation.TimeDescription) != view.OutreachTimeDescription {
+			return jobpool.BatchActionResult{}, &Rejection{
+				Code: "outreach_confirmation_stale", Reason: "岗位资格、完整招呼语或时间规则已变化，请刷新后重新确认",
+			}
+		}
+	}
 	return s.pool.QueueAuthorizedOutreach(ctx, jobIDs, jobpool.OutreachAuthorization{
 		GreetingText:    *view.OutreachGreeting,
 		TimeDescription: view.OutreachTimeDescription,
 	})
+}
+
+func (s *Settings) PreviewOutreachChange(ctx context.Context, automaticEnabled bool) (OutreachChangeImpact, error) {
+	view, err := s.Get(ctx)
+	if err != nil {
+		return OutreachChangeImpact{}, err
+	}
+	if automaticEnabled && view.OutreachGreeting == nil {
+		return OutreachChangeImpact{}, &Rejection{
+			Code: "outreach_greeting_required", Reason: "开启自动打招呼前必须配置固定招呼语",
+		}
+	}
+	count, err := s.pool.CountEligibleOutreach(ctx, nil)
+	if err != nil {
+		return OutreachChangeImpact{}, err
+	}
+	impact := OutreachChangeImpact{
+		AutomaticOutreachEnabled: automaticEnabled,
+		EligibleJobCount:         count,
+		TimeDescription:          view.OutreachTimeDescription,
+		OutreachTimeWindows:      append([]OutreachTimeWindow(nil), view.OutreachTimeWindows...),
+	}
+	if view.OutreachGreeting != nil {
+		impact.GreetingText = *view.OutreachGreeting
+	}
+	return impact, nil
 }
 
 func (s *Settings) QueueRealOutreachAvailability(ctx context.Context) (ActionAvailability, error) {

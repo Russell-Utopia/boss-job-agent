@@ -165,6 +165,10 @@ dd { margin: 0; font-weight: 720; text-align: right; }
 .assessment-toggle input { margin-top: 5px; }
 .assessment-settings-form input[type="number"] { width: 100%; padding: 11px 12px; border: 1px solid #cad6d0; border-radius: 10px; font: inherit; }
 .assessment-settings-form button { margin-top: 4px; justify-self: start; }
+.outreach-job-picker { max-height: 280px; overflow: auto; display: grid; gap: 8px; margin-top: 16px; }
+.outreach-job { display: flex; align-items: flex-start; gap: 10px; padding: 11px; border: 1px solid #dfe8e2; border-radius: 10px; background: white; cursor: pointer; }
+.outreach-job span { display: grid; gap: 3px; }
+.outreach-job small { color: #64736d; }
 .button-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
 .inline-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
 .inline-actions form { margin: 0; }

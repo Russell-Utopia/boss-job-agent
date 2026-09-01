@@ -32,6 +32,35 @@ func (q *Queries) ConfigureAssessment(ctx context.Context, arg ConfigureAssessme
 	return result.RowsAffected()
 }
 
+const configureOutreach = `-- name: ConfigureOutreach :execrows
+UPDATE automation_settings
+SET automatic_outreach_enabled = ?1,
+    outreach_greeting_text = ?2,
+    outreach_time_windows_json = ?3,
+    updated_at = ?4
+WHERE id = 1
+`
+
+type ConfigureOutreachParams struct {
+	AutomaticOutreachEnabled int64
+	OutreachGreetingText     sql.NullString
+	OutreachTimeWindowsJson  string
+	UpdatedAt                int64
+}
+
+func (q *Queries) ConfigureOutreach(ctx context.Context, arg ConfigureOutreachParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, configureOutreach,
+		arg.AutomaticOutreachEnabled,
+		arg.OutreachGreetingText,
+		arg.OutreachTimeWindowsJson,
+		arg.UpdatedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const ensureSafeDefaults = `-- name: EnsureSafeDefaults :exec
 INSERT OR IGNORE INTO automation_settings (
   id,

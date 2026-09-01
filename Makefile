@@ -5,7 +5,7 @@ export GOTOOLCHAIN := $(GO_TOOLCHAIN)
 
 GOLANGCI_LINT := .cache/tools/golangci-lint/$(GOLANGCI_LINT_VERSION)/golangci-lint
 
-.PHONY: run check live-online-resume live-job-discovery live-visible-job-discovery live-assessment toolchain-check quality-gate-contract-check module-boundary-check ci-check fmt-check mod-check lint test coverage race vuln generate-check
+.PHONY: run check live-online-resume live-job-discovery live-visible-job-discovery live-assessment live-outreach toolchain-check quality-gate-contract-check module-boundary-check ci-check fmt-check mod-check lint test coverage race vuln generate-check
 
 run:
 	go run ./cmd/boss-job-agent
@@ -24,6 +24,9 @@ live-visible-job-discovery:
 
 live-assessment:
 	PI_ASSESSMENT_LIVE=1 go test -count=1 -tags=live ./internal/adapters/pi -run '^TestAssessmentLiveUsesTheConfirmationTool$$' -v
+
+live-outreach:
+	BOSS_OUTREACH_LIVE=1 BOSS_OUTREACH_SEND_LIVE=1 go test -count=1 -tags=live ./internal/adapters/boss -run '^TestOutreachLiveUsesTheAuthenticatedBossSession$$' -v
 
 check:
 	$(MAKE) toolchain-check

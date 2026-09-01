@@ -525,6 +525,8 @@ WHERE lease_stage IS NULL
   AND (
       outreach_status = 'possibly_contacted'
       OR (
+          ?1 = 1
+          AND
           outreach_status = 'pending'
           AND platform_status = 'open'
           AND (
@@ -533,10 +535,12 @@ WHERE lease_stage IS NULL
           )
       )
       OR (
+          ?1 = 1
+          AND
           outreach_status = 'failed'
           AND outreach_retry_at IS NOT NULL
-          AND outreach_retry_at <= ?1
-          AND outreach_consecutive_failure_count < ?2
+          AND outreach_retry_at <= ?2
+          AND outreach_consecutive_failure_count < ?3
           AND platform_status = 'open'
           AND (
               (human_verdict = 'suitable' AND human_reviewed_jd_hash = jd_hash)
@@ -552,6 +556,7 @@ LIMIT 1
 `
 
 type GetOutreachClaimCandidateParams struct {
+	AllowContact interface{}
 	ClaimedAt    sql.NullInt64
 	FailureLimit int64
 }
@@ -562,7 +567,7 @@ type GetOutreachClaimCandidateRow struct {
 }
 
 func (q *Queries) GetOutreachClaimCandidate(ctx context.Context, arg GetOutreachClaimCandidateParams) (GetOutreachClaimCandidateRow, error) {
-	row := q.db.QueryRowContext(ctx, getOutreachClaimCandidate, arg.ClaimedAt, arg.FailureLimit)
+	row := q.db.QueryRowContext(ctx, getOutreachClaimCandidate, arg.AllowContact, arg.ClaimedAt, arg.FailureLimit)
 	var i GetOutreachClaimCandidateRow
 	err := row.Scan(&i.ID, &i.OutreachStatus)
 	return i, err
