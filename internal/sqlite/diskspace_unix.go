@@ -4,6 +4,7 @@ package sqlite
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 
@@ -28,7 +29,10 @@ func ensureUpgradeSpace(path string) error {
 	if err := unix.Statfs(filepath.Dir(path), &status); err != nil {
 		return fmt.Errorf("inspect sqlite filesystem space: %w", err)
 	}
-	available := status.Bavail * uint64(status.Bsize)
+	available, err := availableFilesystemBytes(status.Bavail, int64(status.Bsize))
+	if err != nil {
+		return fmt.Errorf("calculate sqlite filesystem space: %w", err)
+	}
 	if available < required {
 		return fmt.Errorf(
 			"insufficient space for sqlite upgrade: %d bytes available, %d required",
@@ -37,4 +41,20 @@ func ensureUpgradeSpace(path string) error {
 		)
 	}
 	return nil
+}
+
+func availableFilesystemBytes(availableBlocks uint64, blockSize int64) (uint64, error) {
+	if blockSize <= 0 {
+		return 0, fmt.Errorf("invalid filesystem block size: %d", blockSize)
+	}
+
+	unsignedBlockSize := uint64(blockSize)
+	if availableBlocks > math.MaxUint64/unsignedBlockSize {
+		return 0, fmt.Errorf(
+			"filesystem byte count overflows uint64: %d blocks of %d bytes",
+			availableBlocks,
+			blockSize,
+		)
+	}
+	return availableBlocks * unsignedBlockSize, nil
 }
