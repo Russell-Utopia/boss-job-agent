@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Russell-Utopia/boss-job-agent/internal/discovery"
 )
@@ -19,10 +20,12 @@ const (
 	jobDiscoveryGroup   = "BOSS Job Agent 岗位发现"
 )
 
-// JobDiscovery reads complete BOSS search pages through the local Kimi
-// WebBridge daemon and one discovery-owned authenticated Chrome session.
+// JobDiscovery lists BOSS pages and reads one listed job at a time through the
+// local Kimi WebBridge daemon and one discovery-owned authenticated session.
 type JobDiscovery struct {
 	bridge *webBridge
+	mu     sync.RWMutex
+	listed map[string]rawListedJob
 }
 
 func NewDefaultJobDiscovery() *JobDiscovery {
@@ -30,25 +33,92 @@ func NewDefaultJobDiscovery() *JobDiscovery {
 }
 
 func NewJobDiscovery(endpoint string, client *http.Client) *JobDiscovery {
-	return &JobDiscovery{bridge: newWebBridge(endpoint, client, jobDiscoverySession)}
+	return &JobDiscovery{
+		bridge: newWebBridge(endpoint, client, jobDiscoverySession),
+		listed: make(map[string]rawListedJob),
+	}
 }
 
-func (a *JobDiscovery) FetchPage(
+func (a *JobDiscovery) ListPage(
 	ctx context.Context,
 	searchRange discovery.SearchRange,
 	pageNo int,
-) (discovery.DiscoveryPage, error) {
+) (discovery.JobPage, error) {
 	if err := validateSearchInput(searchRange, pageNo); err != nil {
-		return discovery.DiscoveryPage{}, classifyDiscoveryError(err)
+		return discovery.JobPage{}, classifyDiscoveryError(err)
 	}
 	if err := a.prepareSearchTab(ctx); err != nil {
-		return discovery.DiscoveryPage{}, classifyDiscoveryError(err)
+		return discovery.JobPage{}, classifyDiscoveryError(err)
 	}
-	page, err := a.evaluatePage(ctx, searchRange, pageNo)
+	script, err := buildListJobDiscoveryScript(searchRange, pageNo)
 	if err != nil {
-		return discovery.DiscoveryPage{}, classifyDiscoveryError(err)
+		return discovery.JobPage{}, classifyDiscoveryError(err)
 	}
+	value, err := a.evaluateString(ctx, script, "list BOSS discovery page")
+	if err != nil {
+		return discovery.JobPage{}, classifyDiscoveryError(err)
+	}
+	page, listed, err := decodeReliableJobList(value)
+	if err != nil {
+		return discovery.JobPage{}, classifyDiscoveryError(newAdapterFailure(
+			adapterFailureInvalidResponse,
+			fmt.Errorf("decode reliable BOSS discovery list: %w", err),
+		))
+	}
+	a.mu.Lock()
+	a.listed = listed
+	a.mu.Unlock()
 	return page, nil
+}
+
+func (a *JobDiscovery) ReadJob(ctx context.Context, platformJobID string) (discovery.JobObservation, error) {
+	platformJobID = strings.TrimSpace(platformJobID)
+	a.mu.RLock()
+	listed, ok := a.listed[platformJobID]
+	a.mu.RUnlock()
+	if platformJobID == "" || !ok {
+		return discovery.JobObservation{}, classifyDiscoveryError(newAdapterFailure(
+			adapterFailureInvalidResponse,
+			errors.New("requested BOSS discovery job is not in the current listed page"),
+		))
+	}
+	script, err := buildReadDiscoveryJobScript(listed)
+	if err != nil {
+		return discovery.JobObservation{}, classifyDiscoveryError(err)
+	}
+	value, err := a.evaluateString(ctx, script, "read BOSS discovery job")
+	if err != nil {
+		return discovery.JobObservation{}, classifyDiscoveryError(err)
+	}
+	var rawJob rawDiscoveryJob
+	if err := json.Unmarshal([]byte(value), &rawJob); err != nil {
+		return discovery.JobObservation{}, classifyDiscoveryError(newAdapterFailure(
+			adapterFailureInvalidResponse,
+			fmt.Errorf("decode reliable BOSS discovery job: %w", err),
+		))
+	}
+	observation, err := observationFromReliableSearchDetail(rawJob)
+	if err != nil {
+		return discovery.JobObservation{}, classifyDiscoveryError(newAdapterFailure(
+			adapterFailureInvalidResponse,
+			err,
+		))
+	}
+	return observation, nil
+}
+
+func (a *JobDiscovery) evaluateString(ctx context.Context, script, operation string) (string, error) {
+	var evaluation evaluationResult
+	if err := a.bridge.command(ctx, "evaluate", map[string]any{"code": script}, &evaluation); err != nil {
+		return "", fmt.Errorf("%s: %w", operation, err)
+	}
+	if evaluation.Type != "string" || evaluation.Value == "" {
+		return "", newAdapterFailure(
+			adapterFailureInvalidProtocol,
+			fmt.Errorf("%s extraction returned a non-string result", operation),
+		)
+	}
+	return evaluation.Value, nil
 }
 
 func (a *JobDiscovery) prepareSearchTab(ctx context.Context) error {
@@ -73,38 +143,19 @@ func (a *JobDiscovery) prepareSearchTab(ctx context.Context) error {
 	return nil
 }
 
-func (a *JobDiscovery) evaluatePage(
-	ctx context.Context,
-	searchRange discovery.SearchRange,
-	pageNo int,
-) (discovery.DiscoveryPage, error) {
-	script, err := buildJobDiscoveryScript(searchRange, pageNo)
-	if err != nil {
-		return discovery.DiscoveryPage{}, err
-	}
-	var evaluation evaluationResult
-	if err := a.bridge.command(ctx, "evaluate", map[string]any{"code": script}, &evaluation); err != nil {
-		return discovery.DiscoveryPage{}, fmt.Errorf("fetch BOSS discovery page: %w", err)
-	}
-	if evaluation.Type != "string" || evaluation.Value == "" {
-		return discovery.DiscoveryPage{}, newAdapterFailure(
-			adapterFailureInvalidProtocol,
-			errors.New("BOSS discovery extraction returned a non-string result"),
-		)
-	}
-	page, err := decodeReliableDiscoveryPage(evaluation.Value)
-	if err != nil {
-		return discovery.DiscoveryPage{}, newAdapterFailure(
-			adapterFailureInvalidResponse,
-			fmt.Errorf("decode reliable BOSS discovery page: %w", err),
-		)
-	}
-	return page, nil
+type rawJobList struct {
+	Jobs    []rawListedJob `json:"jobs"`
+	HasMore *bool          `json:"hasMore"`
 }
 
-type rawDiscoveryPage struct {
-	Jobs    []rawDiscoveryJob `json:"jobs"`
-	HasMore *bool             `json:"hasMore"`
+type rawListedJob struct {
+	PlatformJobID string `json:"platformJobId"`
+	SecurityID    string `json:"securityId"`
+	LID           string `json:"lid"`
+	JobTitle      string `json:"jobTitle"`
+	CompanyName   string `json:"companyName"`
+	City          string `json:"city"`
+	Salary        string `json:"salary"`
 }
 
 type rawDiscoveryJob struct {
@@ -124,44 +175,48 @@ var requirementsHeading = regexp.MustCompile(
 	`(?m)^[\t ]*(?:任职要求|岗位要求|职位要求|任职资格)[\t ]*(?:[：:][\t ]*|\n)`,
 )
 
-func decodeReliableDiscoveryPage(value string) (discovery.DiscoveryPage, error) {
-	var rawPage rawDiscoveryPage
+func decodeReliableJobList(value string) (discovery.JobPage, map[string]rawListedJob, error) {
+	var rawPage rawJobList
 	if err := json.Unmarshal([]byte(value), &rawPage); err != nil {
-		return discovery.DiscoveryPage{}, err
+		return discovery.JobPage{}, nil, err
 	}
 	if rawPage.Jobs == nil || rawPage.HasMore == nil {
-		return discovery.DiscoveryPage{}, errors.New("BOSS discovery result requires jobs and explicit hasMore")
+		return discovery.JobPage{}, nil, errors.New("BOSS discovery list requires jobs and explicit hasMore")
 	}
-	observations := make([]discovery.JobObservation, 0, len(rawPage.Jobs))
-	for _, rawJob := range rawPage.Jobs {
-		observation, err := observationFromReliableSearchDetail(rawJob)
-		if err != nil {
-			return discovery.DiscoveryPage{}, err
+	page := discovery.JobPage{
+		PlatformJobIDs: make([]string, 0, len(rawPage.Jobs)),
+		HasMore:        *rawPage.HasMore,
+	}
+	listed := make(map[string]rawListedJob, len(rawPage.Jobs))
+	for index, job := range rawPage.Jobs {
+		job.PlatformJobID = strings.TrimSpace(job.PlatformJobID)
+		if job.PlatformJobID == "" {
+			return discovery.JobPage{}, nil, fmt.Errorf("BOSS discovery list job %d has no stable ID", index+1)
 		}
-		observations = append(observations, observation)
+		if _, duplicate := listed[job.PlatformJobID]; duplicate {
+			return discovery.JobPage{}, nil, errors.New("BOSS discovery list repeats a stable ID")
+		}
+		page.PlatformJobIDs = append(page.PlatformJobIDs, job.PlatformJobID)
+		listed[job.PlatformJobID] = job
 	}
-	page := discovery.DiscoveryPage{Observations: observations, HasMore: *rawPage.HasMore}
-	if err := discovery.ValidatePage(page); err != nil {
-		return discovery.DiscoveryPage{}, err
-	}
-	return page, nil
+	return page, listed, nil
 }
 
 func observationFromReliableSearchDetail(rawJob rawDiscoveryJob) (discovery.JobObservation, error) {
 	platformJobID := strings.TrimSpace(rawJob.PlatformJobID)
 	if platformJobID == "" || strings.TrimSpace(rawJob.DetailPlatformJobID) != platformJobID {
-		return discovery.JobObservation{}, fmt.Errorf(
-			"BOSS live detail does not confirm listed platform job %q", rawJob.PlatformJobID,
-		)
+		return discovery.JobObservation{}, errors.New("BOSS live detail does not confirm the listed platform job")
 	}
 	if strings.TrimSpace(rawJob.PlatformStatusEvidence) != "招聘中" {
-		return discovery.JobObservation{}, fmt.Errorf(
-			"BOSS platform job %q has no reliable open status", platformJobID,
-		)
+		return discovery.JobObservation{}, errors.New("BOSS live detail has no reliable open status")
+	}
+	salary, err := reliableDiscoverySalary(rawJob.Salary, rawJob.SalaryEvidence)
+	if err != nil {
+		return discovery.JobObservation{}, err
 	}
 	responsibilities, requirements, err := splitReliableJD(rawJob.FullJD)
 	if err != nil {
-		return discovery.JobObservation{}, fmt.Errorf("BOSS platform job %q: %w", platformJobID, err)
+		return discovery.JobObservation{}, fmt.Errorf("BOSS live detail: %w", err)
 	}
 	// A matching live detail identity plus BOSS's explicit 招聘中 status is
 	// this adapter's reliable evidence that the job is open.
@@ -171,11 +226,29 @@ func observationFromReliableSearchDetail(rawJob rawDiscoveryJob) (discovery.JobO
 		JobTitle:         strings.TrimSpace(rawJob.JobTitle),
 		CompanyName:      strings.TrimSpace(rawJob.CompanyName),
 		City:             strings.TrimSpace(rawJob.City),
-		Salary:           strings.TrimSpace(rawJob.Salary),
+		Salary:           salary,
 		Responsibilities: responsibilities,
 		Requirements:     requirements,
 		PlatformStatus:   discovery.PlatformStatusOpen,
 	}, nil
+}
+
+func reliableDiscoverySalary(value, evidence string) (string, error) {
+	salary := strings.TrimSpace(value)
+	switch strings.TrimSpace(evidence) {
+	case "readable":
+		if salary == "" || containsPrivateUseCharacters(salary) {
+			return "", errors.New("BOSS live detail salary claimed readable without reliable text")
+		}
+		return salary, nil
+	case "unavailable":
+		if salary != "" {
+			return "", errors.New("BOSS live detail must clear unavailable salary text")
+		}
+		return "", nil
+	default:
+		return "", errors.New("BOSS live detail has invalid salary evidence")
+	}
 }
 
 func splitReliableJD(value string) (string, string, error) {
@@ -218,7 +291,7 @@ type discoveryScriptInput struct {
 	Page           int    `json:"page"`
 }
 
-func buildJobDiscoveryScript(searchRange discovery.SearchRange, pageNo int) (string, error) {
+func buildListJobDiscoveryScript(searchRange discovery.SearchRange, pageNo int) (string, error) {
 	encoded, err := json.Marshal(discoveryScriptInput{
 		Role:           searchRange.Role,
 		City:           searchRange.City,
@@ -229,10 +302,26 @@ func buildJobDiscoveryScript(searchRange discovery.SearchRange, pageNo int) (str
 	if err != nil {
 		return "", newAdapterFailure(
 			adapterFailureInvalidProtocol,
-			fmt.Errorf("encode BOSS discovery search input: %w", err),
+			fmt.Errorf("encode BOSS discovery list input: %w", err),
 		)
 	}
-	return strings.Replace(fetchJobDiscoveryPageScript, "__SEARCH_INPUT__", string(encoded), 1), nil
+	return renderJobDiscoveryScript(listJobDiscoveryPageScript, "__SEARCH_INPUT__", string(encoded)), nil
+}
+
+func buildReadDiscoveryJobScript(listed rawListedJob) (string, error) {
+	encoded, err := json.Marshal(listed)
+	if err != nil {
+		return "", newAdapterFailure(
+			adapterFailureInvalidProtocol,
+			fmt.Errorf("encode BOSS discovery job input: %w", err),
+		)
+	}
+	return renderJobDiscoveryScript(readDiscoveryJobScript, "__JOB_INPUT__", string(encoded)), nil
+}
+
+func renderJobDiscoveryScript(template, inputMarker, encodedInput string) string {
+	script := strings.Replace(template, inputMarker, encodedInput, 1)
+	return strings.Replace(script, "__DISCOVERY_COMMON__", jobDiscoveryCommonScript, 1)
 }
 
 func classifyDiscoveryError(cause error) error {
@@ -294,33 +383,50 @@ func discoveryCategoryFromCause(cause error) discovery.FetchErrorCategory {
 	}
 }
 
-const fetchJobDiscoveryPageScript = `(async () => {
-  const input = __SEARCH_INPUT__;
+const jobDiscoveryCommonScript = `
   let requestOrdinal = 0;
-  const fail = (kind, stage, detailOrdinal = 0, upstreamCode = "") => {
+  const fail = (kind, stage, upstreamCode = "") => {
     const evidence = [
       "request_ordinal=" + requestOrdinal,
       "stage=" + stage,
-      "detail_ordinal=" + detailOrdinal
+      "detail_ordinal=0"
     ];
     const code = String(upstreamCode ?? "");
-    if (/^-?\d{1,10}$/.test(code)) {
-      evidence.push("upstream_code=" + code);
-    }
+    if (/^-?\d{1,10}$/.test(code)) evidence.push("upstream_code=" + code);
     throw new Error(kind + "|" + evidence.join("|"));
   };
   const pageText = document.body?.innerText || "";
   if (/login/i.test(location.pathname) || pageText.includes("登录/注册")) {
-    fail("BOSS_AUTHENTICATION_REQUIRED", "page_preflight");
+    fail("BOSS_AUTHENTICATION_REQUIRED", preflightStage);
   }
   if (pageText.includes("安全验证") || pageText.includes("请输入验证码")) {
-    fail("BOSS_VERIFICATION_REQUIRED", "page_preflight");
+    fail("BOSS_VERIFICATION_REQUIRED", preflightStage);
   }
   if (pageText.includes("访问过于频繁") || pageText.includes("操作过于频繁")) {
-    fail("BOSS_PLATFORM_LIMITED", "page_preflight");
+    fail("BOSS_PLATFORM_LIMITED", preflightStage);
   }
+  const reliableData = (payload, stage) => {
+    const upstreamCode = payload && typeof payload === "object" ? payload.code : "";
+    if ([7, 1011, 120, 121, 122].includes(upstreamCode)) {
+      fail("BOSS_AUTHENTICATION_REQUIRED", stage, upstreamCode);
+    }
+    if (upstreamCode === 5012) fail("BOSS_VERIFICATION_REQUIRED", stage, upstreamCode);
+    if ([31, 32, 35, 36, 37, 5002, 5003, 5004].includes(upstreamCode)) {
+      fail("BOSS_PLATFORM_LIMITED", stage, upstreamCode);
+    }
+    if (upstreamCode !== 0 || !payload.zpData) {
+      fail("BOSS_DISCOVERY_UNRELIABLE_PAGE", stage, upstreamCode);
+    }
+    return payload.zpData;
+  };
+  const normalized = value => String(value || "").trim();
+`
 
-  const request = async (stage, detailOrdinal, path, params = {}) => {
+const listJobDiscoveryPageScript = `(async () => {
+  const input = __SEARCH_INPUT__;
+  const preflightStage = "page_preflight";
+  __DISCOVERY_COMMON__
+  const request = async (stage, path, params = {}) => {
     requestOrdinal++;
     const url = new URL(path, location.origin);
     Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
@@ -328,32 +434,17 @@ const fetchJobDiscoveryPageScript = `(async () => {
     try {
       response = await fetch(url, {credentials: "include", headers: {"X-Requested-With": "XMLHttpRequest"}});
     } catch (_) {
-      fail("BOSS_DISCOVERY_NETWORK_ERROR", stage, detailOrdinal);
+      fail("BOSS_DISCOVERY_NETWORK_ERROR", stage);
     }
-    if (!response.ok) fail("BOSS_DISCOVERY_HTTP_" + response.status, stage, detailOrdinal);
+    if (!response.ok) fail("BOSS_DISCOVERY_HTTP_" + response.status, stage);
     let payload;
     try {
       payload = await response.json();
     } catch (_) {
-      fail("BOSS_DISCOVERY_INVALID_JSON", stage, detailOrdinal);
+      fail("BOSS_DISCOVERY_INVALID_JSON", stage);
     }
-    const upstreamCode = payload && typeof payload === "object" ? payload.code : "";
-    if ([7, 1011, 120, 121, 122].includes(upstreamCode)) {
-      fail("BOSS_AUTHENTICATION_REQUIRED", stage, detailOrdinal, upstreamCode);
-    }
-    if (upstreamCode === 5012) {
-      fail("BOSS_VERIFICATION_REQUIRED", stage, detailOrdinal, upstreamCode);
-    }
-    if ([31, 32, 35, 36, 37, 5002, 5003, 5004].includes(upstreamCode)) {
-      fail("BOSS_PLATFORM_LIMITED", stage, detailOrdinal, upstreamCode);
-    }
-    if (upstreamCode !== 0 || !payload.zpData) {
-      fail("BOSS_DISCOVERY_UNRELIABLE_PAGE", stage, detailOrdinal, upstreamCode);
-    }
-    return payload.zpData;
+    return reliableData(payload, stage);
   };
-
-  const normalized = value => String(value || "").trim();
   const optionCode = value => value?.code ?? value?.cityCode ?? value?.value ?? value?.id;
   const findNamedOption = (value, wanted) => {
     if (!value || typeof value !== "object") return null;
@@ -400,19 +491,19 @@ const fetchJobDiscoveryPageScript = `(async () => {
     }
     return best;
   };
-
-  const cityData = await request("city_metadata", 0, "/wapi/zpCommon/data/city.json");
+  const cityData = await request("city_metadata", "/wapi/zpCommon/data/city.json");
   const cityOption = findNamedOption(cityData, input.city);
   if (!cityOption) fail("BOSS_SEARCH_FILTER_UNRESOLVED:city", "filter_resolution");
   const cityCode = optionCode(cityOption);
-  const conditions = await request("filter_conditions", 0, "/wapi/zpgeek/search/job/condition.json", {city: cityCode, query: input.role});
+  const conditions = await request("filter_conditions", "/wapi/zpgeek/search/job/condition.json", {
+    city: cityCode, query: input.role
+  });
   const salaryOption = resolveSalaryOption(conditions.salaryList, input.salary);
   const employmentOption = findNamedOption(conditions, input.employmentType);
   if (!salaryOption || !employmentOption) {
     fail("BOSS_SEARCH_FILTER_UNRESOLVED:salary_or_employment_type", "filter_resolution");
   }
-
-  const list = await request("job_list", 0, "/wapi/zpgeek/search/joblist.json", {
+  const list = await request("job_list", "/wapi/zpgeek/search/joblist.json", {
     scene: 1,
     query: input.role,
     city: cityCode,
@@ -424,41 +515,73 @@ const fetchJobDiscoveryPageScript = `(async () => {
   if (!Array.isArray(list.jobList) || typeof list.hasMore !== "boolean") {
     fail("BOSS_DISCOVERY_UNRELIABLE_PAGE", "job_list_validation");
   }
-
-  const jobs = [];
-  for (const [detailIndex, entry] of list.jobList.entries()) {
-    const detailOrdinal = detailIndex + 1;
+  const jobs = list.jobList.map(entry => {
     const card = entry.jobCard || entry;
     const platformJobId = normalized(card.encryptJobId || card.jobId);
     if (!platformJobId) {
-      fail("BOSS_DISCOVERY_UNRELIABLE_PAGE:missing_stable_id", "job_card_validation", detailOrdinal);
+      fail("BOSS_DISCOVERY_UNRELIABLE_PAGE:missing_stable_id", "job_card_validation");
     }
-    if (jobs.length > 0) await new Promise(resolve => setTimeout(resolve, 750));
-    const detail = await request("job_detail", detailOrdinal, "/wapi/zpgeek/job/detail.json", {
-      securityId: card.securityId || "",
-      jobId: platformJobId,
-      lid: card.lid || list.lid || ""
-    });
-    const info = detail.jobInfo || detail.jobCard || detail;
-    const detailPlatformJobId = normalized(info.encryptId || info.encryptJobId || info.jobId);
-    if (detailPlatformJobId !== platformJobId) {
-      fail("BOSS_DISCOVERY_UNRELIABLE_PAGE:detail_identity_mismatch", "job_detail_validation", detailOrdinal);
-    }
-    const job = {
+    return {
       platformJobId,
-      detailPlatformJobId,
-      platformStatusEvidence: normalized(info.jobStatusDesc),
-      canonicalUrl: "https://www.zhipin.com/job_detail/" + platformJobId + ".html",
-      jobTitle: normalized(info.jobName || card.jobName),
-      companyName: normalized(info.brandName || card.brandName),
-      city: normalized(info.cityName || card.cityName),
-      salary: normalized(info.salaryDesc || card.salaryDesc),
-      fullJD: normalized(info.postDescription || info.jobDescription).replace(/\r\n?/g, "\n")
+      securityId: normalized(card.securityId),
+      lid: normalized(card.lid || list.lid),
+      jobTitle: normalized(card.jobName),
+      companyName: normalized(card.brandName),
+      city: normalized(card.cityName),
+      salary: normalized(card.salaryDesc)
     };
-    if (Object.values(job).some(value => !normalized(value))) {
-      fail("BOSS_DISCOVERY_UNRELIABLE_PAGE:missing_job_field", "job_detail_validation", detailOrdinal);
-    }
-    jobs.push(job);
-  }
+  });
   return JSON.stringify({jobs, hasMore: list.hasMore});
+})()`
+
+const readDiscoveryJobScript = `(async () => {
+  const input = __JOB_INPUT__;
+  const preflightStage = "job_preflight";
+  __DISCOVERY_COMMON__
+  const url = new URL("/wapi/zpgeek/job/detail.json", location.origin);
+  Object.entries({securityId: input.securityId || "", jobId: input.platformJobId, lid: input.lid || ""})
+    .forEach(([key, value]) => url.searchParams.set(key, value));
+  requestOrdinal++;
+  let response;
+  try {
+    response = await fetch(url, {credentials: "include", headers: {"X-Requested-With": "XMLHttpRequest"}});
+  } catch (_) {
+    fail("BOSS_DISCOVERY_NETWORK_ERROR", "job_detail");
+  }
+  if (!response.ok) fail("BOSS_DISCOVERY_HTTP_" + response.status, "job_detail");
+  let payload;
+  try {
+    payload = await response.json();
+  } catch (_) {
+    fail("BOSS_DISCOVERY_INVALID_JSON", "job_detail");
+  }
+  const hasPrivateUseCharacters = value => /[\uE000-\uF8FF\u{F0000}-\u{FFFFD}\u{100000}-\u{10FFFD}]/u.test(value);
+  const detail = reliableData(payload, "job_detail");
+  const info = detail.jobInfo || detail.jobCard || detail;
+  const detailPlatformJobId = normalized(info.encryptId || info.encryptJobId || info.jobId);
+  if (detailPlatformJobId !== input.platformJobId) {
+    fail("BOSS_DISCOVERY_UNRELIABLE_PAGE:detail_identity_mismatch", "job_detail_validation");
+  }
+  const renderedSalary = normalized(info.salaryDesc || input.salary);
+  const salaryReadable = renderedSalary !== "" && !hasPrivateUseCharacters(renderedSalary);
+  const job = {
+    platformJobId: input.platformJobId,
+    detailPlatformJobId,
+    platformStatusEvidence: normalized(info.jobStatusDesc),
+    canonicalUrl: "https://www.zhipin.com/job_detail/" + input.platformJobId + ".html",
+    jobTitle: normalized(info.jobName || input.jobTitle),
+    companyName: normalized(info.brandName || input.companyName),
+    city: normalized(info.cityName || input.city),
+    salary: salaryReadable ? renderedSalary : "",
+    salaryEvidence: salaryReadable ? "readable" : "unavailable",
+    fullJD: normalized(info.postDescription || info.jobDescription).replace(/\r\n?/g, "\n")
+  };
+  const required = [
+    job.platformJobId, job.detailPlatformJobId, job.platformStatusEvidence,
+    job.canonicalUrl, job.jobTitle, job.companyName, job.city, job.fullJD
+  ];
+  if (required.some(value => !normalized(value))) {
+    fail("BOSS_DISCOVERY_UNRELIABLE_PAGE:missing_job_field", "job_detail_validation");
+  }
+  return JSON.stringify(job);
 })()`

@@ -6,13 +6,17 @@
 
 对应工单：[R01：调研 BOSS 真实多页岗位读取与 code=37 风控边界](https://github.com/Russell-Utopia/boss-job-agent/issues/36)
 
+## 2026-09-01 实现更新
+
+Issue #37 已用 `JobDiscovery.ListPage` 与 `ReadJob` 取代本文研究基线中的整页 `FetchPage` 合同。`discovery.Service` 现在先持久化有序稳定岗位 ID、显式 `HasMore` 和下一个岗位序号，再逐岗读取并经 `JobPool.Observe` 保存；恢复时重新核对完整清单，最多重读当前一个岗位。本文后续关于 `FetchPage`、整页不提交和请求放大的描述保留为 Issue #36 当时的研究证据，不再描述当前实现。
+
 ## 结论
 
 1. **当前没有足够的一手证据把 BOSS 网页内部请求称为“官方公开 API”。** 本次核验的 BOSS 官方职位页提供面向人的职位搜索入口，页脚列出的企业服务也只有职位搜索、客户端、投资者关系等普通产品入口；没有发现开发者门户、职位列表 API 文档、应用注册或访问凭证申请入口。这只是对已核验公开入口的结论，不是对 BOSS 全部商业合作能力的否定。[BOSS 官方职位页](https://www.zhipin.com/zhaopin/index.html)（访问于 2026-08-31）；[BOSS 联系方式](https://www.zhipin.com/aboutContact)（访问于 2026-08-31）
 2. **外部系统的首选路径只能是 BOSS 明确公开或通过合作合同授权的数据接口。** BOSS 官方页面提供的 2019 版用户协议明确要求通过 BOSS 软件使用服务，并说明未经许可不得通过第三方工具获取包括浏览职位在内的服务。因此，登录用户在浏览器里能够看到数据，不等于第三方系统获得了自动采集或转授权权利；该历史版本只能说明本次核验到的公开条款，正式接入仍须确认当前有效协议和书面授权。[BOSS 用户协议第四条第 8 项](https://www.zhipin.com/web/common/protocol/protocol-2019-09-30.html)（页面标注 2019 版，访问于 2026-08-31）
-3. **当前仓库实现是一条“已登录浏览器页面上下文中的私有网页接口”实验路径，不是可交付给外部调用方的开放 API。** 它把 `SearchRange + pageNo` 交给 `JobDiscovery.FetchPage`，经本机 Kimi WebBridge 在已登录 Chrome 标签页中执行页面脚本，再把规范化 JSON 字符串交回 Go 校验和解析。[`JobDiscovery` 输入与输出合同](../../internal/discovery/service.go#L20-L88)；[生产 Adapter 的导航、求值和解码](../../internal/adapters/boss/job_discovery.go#L15-L101)（均访问于 2026-08-31）
+3. **当前仓库实现仍是一条“已登录浏览器页面上下文中的私有网页接口”实验路径，不是可交付给外部调用方的开放 API。** 它把 `SearchRange + pageNo` 交给 `JobDiscovery.ListPage`，再按稳定 ID 调用 `ReadJob`；两者经本机 Kimi WebBridge 在已登录 Chrome 标签页中执行页面脚本，并把规范化 JSON 字符串交回 Go 校验和解析。页面端点、参数和会话材料不进入 `discovery` interface 或 SQLite。
 4. **`code=37` 的触发条件仍是未知，但失败位置现已可观察。** Issue #36 最初只记录了一个相关性：第 1 页曾返回 15 条且有下一页，连续读取岗位详情时随后出现 `code=37` 和安全检查页面。固定 15 秒探针仍返回 `platform_limited`，但当时尚未保留失败位置；加入非敏感诊断字段后的下一次授权探针则明确观察到第 10 个对外请求、即第 7 个岗位详情返回 `code=37`。这能定位首次失败，仍不能单独证明请求频率、调用形态、会话状态、私有接口方式或某个岗位响应是原因。[Issue #36 的 Problem 与 Questions](https://github.com/Russell-Utopia/boss-job-agent/issues/36)（访问于 2026-08-31）
-5. **生产 seam 仍应由 `discovery` 模块拥有，但当前“一次返回整页”的 `FetchPage` 粒度过粗。** 稳定恢复需要把它深化为“打开一页并取得稳定 ID 清单”与“在该页逐岗读取详情”两个能力；`discovery.Service` 持久化本页 ID 清单和已完成 ID，Adapter 只持有本次页面的临时技术状态。这样首个限制仍会立即停止，但恢复时不再重放已经成功的详情。页面内部端点、参数、Cookie 或 CDP 类型仍不能泄漏到 interface。[架构设计原则](../architecture.md#L5-L11)（访问于 2026-08-31）
+5. **生产 seam 由 `discovery` 模块拥有，并已拆成列表清单与单岗位读取。** `discovery.Service` 持久化本页有序 ID、`HasMore` 和下一个岗位序号，Adapter 只持有本次页面的临时技术状态。首个限制仍会立即停止，但恢复时不再重放更早的成功详情；页面内部端点、参数、Cookie 或 CDP 类型仍不能泄漏到 interface。[架构设计原则](../architecture.md#L5-L11)
 6. **一次固定 15 秒间隔的授权只读探针仍在第 1 页触发 `platform_limited`。** 探针在每个岗位详情之前固定等待 15 秒，约 112.5 秒后失败，没有提交第 1 页，也没有进入第 2、3 页。这能否定“把 750 ms 改成 15 秒即可解决”的简单假设，但仍不能证明具体触发条件，也不能确认本次上游原始码就是 `37`。
 7. **加入诊断后的对照探针确认固定 15 秒仍不能通过第 1 页。** 默认 750 ms 探针在第 10 个总请求、即第 7 个详情返回 `code=37`；之后再次明确授权的固定 15 秒探针则在第 9 个总请求、即第 6 个详情返回 `code=37`，耗时约 96.61 秒。延长间隔没有消除限制，失败序号也不固定；两个不同时间和 session 的观测不能证明更长间隔导致更早失败。
 8. **两份离线原型已把恢复规则和 DOM 身份规则跑通，但真实稳定性仍未验收。** 逐岗状态机证明旧模型会重放已成功详情，岗位级 checkpoint 只从失败岗位继续；可见 DOM fixture 先后抓到“清洗时丢失 JD 换行”“`textContent` 混入隐藏节点”和“私用区薪资非空但不可读”三类 parser 缺陷。运行后的修复使七组场景全部符合预期，包括隐藏节点排除、只有职责标题的完整可见 JD，以及私用区薪资被清空并标记为不可用而不丢弃岗位。fixture 不连接 BOSS，不能替代获准的 live 对照。
@@ -80,25 +84,25 @@ SearchRange {
 输出必须是：
 
 ```text
-DiscoveryPage {
-  observations: [
-    {
-      platformJobId,
-      canonicalUrl,
-      jobTitle,
-      companyName,
-      city,
-      salary,
-      responsibilities,
-      requirements,
-      platformStatus
-    }
-  ],
+JobPage {
+  platformJobIds: [...],
   hasMore: boolean
+}
+
+ReadJob(platformJobId) -> JobObservation {
+  platformJobId,
+  canonicalUrl,
+  jobTitle,
+  companyName,
+  city,
+  salary,
+  responsibilities,
+  requirements,
+  platformStatus
 }
 ```
 
-这组类型由 `discovery` 模块拥有，调用方不需要知道 WebBridge、CDP 或网页传输形状。[`SearchRange`、`JobObservation`、`DiscoveryPage`](../../internal/discovery/service.go#L30-L88)（访问于 2026-08-31）
+这组类型由 `discovery` 模块拥有，调用方不需要知道 WebBridge、CDP 或网页传输形状。
 
 ### 2. Go 到 Kimi WebBridge
 
@@ -114,17 +118,17 @@ DiscoveryPage {
 
 ### 4. 页面结果回到 Go
 
-页面任务返回一个只含规范化字段的 JSON 字符串。Go 要求：
+页面任务分别返回列表清单或单岗位规范化字段的 JSON 字符串。Go 要求：
 
-- 顶层必须同时存在岗位数组和显式 `hasMore`；
+- 列表必须同时存在有序稳定岗位 ID 数组和显式 `hasMore`；
 - 列表稳定 ID 与详情证据中的稳定 ID 一致；
 - 平台状态证据可靠；
 - JD 能拆分成非空职责与要求；
-- 任一岗位不可靠时整页失败。
+- 单个岗位不可靠时停在该岗位，保留此前已可靠写入的岗位及页内 checkpoint。
 
-这些检查集中在生产 Adapter 与 `discovery.ValidatePage`，调用者不会接触原始网页响应。[Adapter 的规范化结果与可靠性检查](../../internal/adapters/boss/job_discovery.go#L104-L190)；[`ValidatePage` 整页合同](../../internal/discovery/service.go#L376-L410)（均访问于 2026-08-31）
+这些检查集中在生产 Adapter 与 `discovery.Service`，调用者不会接触原始网页响应。
 
-## 当前私有接口 + 逐岗详情模式：知道什么，不知道什么
+## Issue #36 研究基线的私有接口 + 逐岗详情模式：知道什么，不知道什么
 
 ### 已证实
 

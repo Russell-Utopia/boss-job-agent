@@ -45,6 +45,9 @@ type DiscoveryRun struct {
 	LastProgressAt          sql.NullInt64
 	FinishedAt              sql.NullInt64
 	UpdatedAt               int64
+	CurrentPageJobIdsJson   sql.NullString
+	CurrentPageHasMore      sql.NullInt64
+	NextJobOrdinal          sql.NullInt64
 }
 
 type OnlineResumeVersion struct {

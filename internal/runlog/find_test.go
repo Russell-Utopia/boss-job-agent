@@ -18,13 +18,13 @@ func TestFindMatchesExactTraceAndCompositeKeysAndReportsIncompleteFiles(t *testi
 
 	traceReport := findIncompleteReport(t, path, Query{TraceID: traceID}, 2)
 	compositeReport := findIncompleteReport(t, path, Query{
-		Flow:           FlowDiscovery,
-		Operation:      OperationFetchPage,
-		DiscoveryRunID: 42,
-		AttemptNo:      7,
-		SearchRole:     "Go工程师",
-		SearchCity:     "福州",
-		PageNo:         3,
+		Flow:             FlowDiscovery,
+		Operation:        OperationReadJob,
+		DiscoveryRunID:   42,
+		AttemptNo:        7,
+		PageNo:           3,
+		JobOrdinal:       4,
+		JobIDFingerprint: "9542806604c794eebc1517859836f31a3cf607ba0363d16be187120bb497c5fb",
 	}, 2)
 	if !reflect.DeepEqual(rawStrings(traceReport.Events), rawStrings(compositeReport.Events)) {
 		t.Errorf("trace and composite matches differ\ntrace: %v\ncomposite: %v", traceReport.Events, compositeReport.Events)
@@ -36,13 +36,13 @@ func createFindFixture(t *testing.T, path string) string {
 	t.Helper()
 	logs := Open(path)
 	trace, err := logs.Start(t.Context(), Attempt{
-		Flow:           FlowDiscovery,
-		Operation:      OperationFetchPage,
-		DiscoveryRunID: 42,
-		AttemptNo:      7,
-		SearchRole:     "Go工程师",
-		SearchCity:     "福州",
-		PageNo:         3,
+		Flow:             FlowDiscovery,
+		Operation:        OperationReadJob,
+		DiscoveryRunID:   42,
+		AttemptNo:        7,
+		PageNo:           3,
+		JobOrdinal:       4,
+		JobIDFingerprint: "9542806604c794eebc1517859836f31a3cf607ba0363d16be187120bb497c5fb",
 	})
 	if err != nil {
 		t.Fatalf("start attempt: %v", err)

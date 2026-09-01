@@ -299,6 +299,29 @@ func newPool(db *sql.DB, now func() time.Time) *Pool {
 }
 
 func (p *Pool) Observe(ctx context.Context, runID int64, observation Observation) (JobView, error) {
+	return p.observe(ctx, p.queries, runID, observation)
+}
+
+// ObserveInTransaction lets an owning workflow atomically validate its work
+// token and persist the resulting global job through JobPool's own queries.
+func (p *Pool) ObserveInTransaction(
+	ctx context.Context,
+	transaction *sql.Tx,
+	runID int64,
+	observation Observation,
+) (JobView, error) {
+	if transaction == nil {
+		return JobView{}, fmt.Errorf("observe platform job: transaction is required")
+	}
+	return p.observe(ctx, p.queries.WithTx(transaction), runID, observation)
+}
+
+func (p *Pool) observe(
+	ctx context.Context,
+	queries *sqlitedb.Queries,
+	runID int64,
+	observation Observation,
+) (JobView, error) {
 	if runID <= 0 {
 		return JobView{}, fmt.Errorf("observe platform job: discovery run ID must be positive")
 	}
@@ -310,7 +333,7 @@ func (p *Pool) Observe(ctx context.Context, runID int64, observation Observation
 	if observation.PlatformClosedReason != "" {
 		closedReason = sql.NullString{String: observation.PlatformClosedReason, Valid: true}
 	}
-	row, err := p.queries.ObservePlatformJob(ctx, sqlitedb.ObservePlatformJobParams{
+	row, err := queries.ObservePlatformJob(ctx, sqlitedb.ObservePlatformJobParams{
 		PlatformJobID:           observation.PlatformJobID,
 		CanonicalUrl:            observation.CanonicalURL,
 		JobTitle:                observation.JobTitle,

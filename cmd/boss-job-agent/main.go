@@ -86,6 +86,8 @@ func executeLogsFind(ctx context.Context, args []string, output io.Writer) error
 	flags.StringVar(&query.SearchRole, "search-role", "", "精确搜索岗位")
 	flags.StringVar(&query.SearchCity, "search-city", "", "精确搜索城市")
 	flags.IntVar(&query.PageNo, "page-no", 0, "搜索页码")
+	flags.IntVar(&query.JobOrdinal, "job-ordinal", 0, "页内岗位序号")
+	flags.StringVar(&query.JobIDFingerprint, "job-id-fingerprint", "", "稳定岗位 ID 指纹")
 	if err := flags.Parse(args); err != nil {
 		return fmt.Errorf("解析 logs find 参数: %w", err)
 	}

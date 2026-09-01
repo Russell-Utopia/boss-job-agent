@@ -74,11 +74,11 @@ SearchService / AdviceService / PostService
 | `outcome` | 枚举字符串 | `external_attempt_finished` 必填，值为 `succeeded` 或 `failed`；打招呼的外部影响仍由独立的 `outreach_effect` 表达。 |
 | `trace_id` | 字符串 | 32 个小写十六进制字符、不得全零；一次 Claim → Execute → Finish 业务尝试内的相关记录共用。该形状与 W3C 的 16 字节 trace-id 一致，未来可传播而无需改格式。[W3C Trace Context](https://www.w3.org/TR/trace-context/#trace-id) 由 `crypto/rand.Read` 取得 16 字节后十六进制编码；Go 将其定义为密码学安全随机源。[Go `crypto/rand`](https://pkg.go.dev/crypto/rand) |
 | `flow` | 枚举字符串 | `discovery`、`assessment`、`outreach`，分别对应岗位发现、岗位鉴定、打招呼三条流程。 |
-| `operation` | 枚举字符串 | 至少有 `fetch_page`、`submit_assessment`、`confirm_assessment_results`、`check_contact_status`、`send_first_contact`；区分同一次业务尝试里的不同外部调用。 |
+| `operation` | 枚举字符串 | 至少有 `list_page`、`read_job`、`submit_assessment`、`confirm_assessment_results`、`check_contact_status`、`send_first_contact`；区分同一次业务尝试里的不同外部调用。 |
 | `discovery_run_id` | 整数 | 只用于岗位发现；等于 `discovery_runs.id`。 |
 | `platform_job_id` | 字符串 | 只用于岗位鉴定/打招呼；使用 BOSS 稳定平台岗位标识，作为平台岗位的领域身份。必要时另带诊断用 `platform_job_row_id`，但检索契约不依赖数据库行号。 |
 | `attempt_no` | 整数 | 原样记录所属流程已经持久化的生命周期尝试号：发现用 `attempt_no`，鉴定用 `assessment_attempt_no`，打招呼用 `outreach_attempt_no`；不新造或重置另一套计数。 |
-| `search_role` / `search_city` / `page_no` | 字符串 / 字符串 / 整数 | 只用于 `fetch_page`。发现 `attempt_no` 是整次开始/恢复执行的编号，不是每页调用编号；因此替代键要精确到某次页面调用时必须同时带这三个字段和 `operation`。 |
+| `page_no` / `job_ordinal` / `job_id_fingerprint` | 整数 / 整数 / 64 位十六进制字符串 | `list_page` 记录页码；`read_job` 另记录从 1 开始的页内序号与稳定 ID 的 SHA-256 指纹。发现日志不记录搜索条件、原始稳定 ID、请求或响应材料。 |
 | `error_category` | 枚举字符串 | 失败必填。基础值：`transient`、`authentication_expired`、`verification_required`、`platform_limited`、`invalid_response`、`invalid_protocol`、`unknown`。稳定分类用于检索；三个模块仍各自拥有错误类型和重试决策，不建立公共错误包。 |
 | `error_chain` | 对象数组 | 失败必填；保存从外层语境到底层原因的完整错误树快照，每个节点有 `path`、`type`、`message`。只用于诊断，不从 `type/message` 反推重试。 |
 | `outreach_effect` | 枚举字符串 | 仅打招呼写动作：`confirmed_sent`、`confirmed_no_effect`、`possibly_effective`；它独立于技术错误分类，不能用 `error_category` 猜测外部影响。 |
@@ -88,7 +88,7 @@ SearchService / AdviceService / PostService
 示例失败记录：
 
 ```json
-{"time":"2026-08-29T07:58:40.716Z","level":"ERROR","msg":"external attempt failed","schema_version":1,"event":"external_attempt_finished","outcome":"failed","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","flow":"discovery","operation":"fetch_page","discovery_run_id":42,"attempt_no":7,"search_role":"Go工程师","search_city":"福州","page_no":3,"error_category":"transient","error_chain":[{"path":"0","type":"*fmt.wrapError","message":"fetch page: dial BOSS: context deadline exceeded"},{"path":"0.0","type":"context.deadlineExceededError","message":"context deadline exceeded"}]}
+{"time":"2026-09-01T07:58:40.716Z","level":"ERROR","msg":"external attempt failed","schema_version":1,"event":"external_attempt_finished","outcome":"failed","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","flow":"discovery","operation":"read_job","discovery_run_id":42,"attempt_no":7,"page_no":3,"job_ordinal":4,"job_id_fingerprint":"9542806604c794eebc1517859836f31a3cf607ba0363d16be187120bb497c5fb","error_category":"transient","error_chain":[{"path":"0","type":"*fmt.wrapError","message":"read job: context deadline exceeded"},{"path":"0.0","type":"context.deadlineExceededError","message":"context deadline exceeded"}]}
 ```
 
 ## 完整错误树，不只是 `err.Error()`
@@ -100,7 +100,7 @@ Go 的错误不一定是单链。错误可以实现 `Unwrap() error` 或 `Unwrap
 1. 从外层错误开始记录 `path="0"`、具体 `%T` 和已脱敏 `Error()`；
 2. 优先识别 `interface{ Unwrap() []error }`，按返回顺序递归为 `0.0`、`0.1`；否则识别 `interface{ Unwrap() error }` 并递归为 `0.0`；
 3. 把所有节点放在**同一条** `event=external_attempt_finished, outcome=failed` JSONL 记录内；不能每层一行，否则轮转或进程中断会留下不完整链；
-4. 保留每个节点但对单条 message 做脱敏和长度上限，另记 `message_truncated=true`；禁止记录 Cookie、Authorization、完整简历、完整 JD、招呼语、原始页面 HTML、完整 Prompt 或模型原文；
+4. 保留每个节点但对单条 message 做脱敏和长度上限，另记 `message_truncated=true`；岗位发现的 `ReadJob` 还必须在每个错误树节点中精确替换当前原始稳定 ID，只保留 attempt 上的不可逆 fingerprint；禁止记录 Cookie、Authorization、完整简历、完整 JD、招呼语、原始页面 HTML、完整 Prompt 或模型原文；
 5. `error_category` 在写日志前由所属模块根据自己的类型/`errors.Is`/`errors.As` 映射。日志中的 `type` 和 `message` 是诊断快照，不是业务分支输入。
 6. 对非标准的循环 `Unwrap` 或异常深树设置节点/深度上限，并显式写 `error_chain_truncated=true`；标准库包装和项目 Adapter 返回的正常无环错误树必须完整，不能静默截断。
 
@@ -113,7 +113,8 @@ Go 的错误不一定是单链。错误可以实现 `Unwrap() error` 或 `Unwrap
         + discovery_run_id
         + attempt_no
         + operation
-        + search_role + search_city + page_no（定位具体 FetchPage 时）
+        + page_no
+        + job_ordinal + job_id_fingerprint（定位具体 ReadJob 时）
 
 岗位鉴定：flow=assessment + platform_job_id + attempt_no [+ operation]
 

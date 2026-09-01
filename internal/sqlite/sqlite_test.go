@@ -19,7 +19,7 @@ func TestOpenAppliesGooseMigrationOnceAcrossRestarts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open new database: %v", err)
 	}
-	assertGooseVersion(t, db, 2)
+	assertGooseVersion(t, db, 3)
 	if err := db.Close(); err != nil {
 		t.Fatalf("close new database: %v", err)
 	}
@@ -29,7 +29,7 @@ func TestOpenAppliesGooseMigrationOnceAcrossRestarts(t *testing.T) {
 		t.Fatalf("reopen migrated database: %v", err)
 	}
 	t.Cleanup(func() { _ = restarted.Close() })
-	assertGooseVersion(t, restarted, 2)
+	assertGooseVersion(t, restarted, 3)
 	assertBackupCount(t, path, 0)
 }
 
@@ -69,7 +69,7 @@ func TestOpenUpgradesCandidateAndPreservesExistingData(t *testing.T) {
 		t.Fatalf("upgrade database: %v", err)
 	}
 	t.Cleanup(func() { _ = upgraded.Close() })
-	assertGooseVersion(t, upgraded, 2)
+	assertGooseVersion(t, upgraded, 3)
 
 	assertRepresentativeDataPreserved(t, upgraded)
 	assertNoCandidateFiles(t, path)
@@ -116,7 +116,35 @@ func TestOpenUpgradesAnUnpreparedRunSoItCanEndEarly(t *testing.T) {
 	`); err != nil {
 		t.Fatalf("end upgraded unprepared discovery: %v", err)
 	}
-	assertGooseVersion(t, upgraded, 2)
+	assertGooseVersion(t, upgraded, 3)
+	assertBackupCount(t, path, 1)
+}
+
+func TestOpenUpgradesV2WithAnEmptyPerJobCheckpointAndPreservesData(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "boss-job-agent.db")
+	createDatabaseWithRepresentativeData(t, path, migrationsThroughV2(t))
+
+	upgraded, err := Open(t.Context(), path)
+	if err != nil {
+		t.Fatalf("upgrade v2 database: %v", err)
+	}
+	t.Cleanup(func() { _ = upgraded.Close() })
+	assertGooseVersion(t, upgraded, 3)
+	assertRepresentativeDataPreserved(t, upgraded)
+	var jobIDs sql.NullString
+	var hasMore, ordinal sql.NullInt64
+	if err := upgraded.QueryRowContext(t.Context(), `
+		SELECT current_page_job_ids_json, current_page_has_more, next_job_ordinal
+		FROM discovery_runs
+		WHERE name = 'representative discovery'
+	`).Scan(&jobIDs, &hasMore, &ordinal); err != nil {
+		t.Fatalf("read upgraded page checkpoint: %v", err)
+	}
+	if jobIDs.Valid || hasMore.Valid || ordinal.Valid {
+		t.Fatalf("upgraded v2 page checkpoint = %#v/%#v/%#v, want all empty", jobIDs, hasMore, ordinal)
+	}
 	assertBackupCount(t, path, 1)
 }
 
@@ -131,7 +159,7 @@ func TestBackupFailureLeavesFormalDatabaseUnchanged(t *testing.T) {
 	}
 
 	_, err := openWithMigrations(t.Context(), path, testMigrations(t, map[string]string{
-		"00003_valid.sql": "-- +goose Up\nCREATE INDEX idx_resume_hash_created ON online_resume_versions(resume_hash, created_at);\n",
+		"00004_valid.sql": "-- +goose Up\nCREATE INDEX idx_resume_hash_created ON online_resume_versions(resume_hash, created_at);\n",
 	}))
 	if err == nil {
 		t.Fatal("upgrade succeeded with an unusable backup directory")
@@ -148,7 +176,7 @@ func TestCandidateMigrationFailureLeavesFormalDatabaseUnchanged(t *testing.T) {
 	createV1DatabaseWithRepresentativeData(t, path)
 
 	_, err := openWithMigrations(t.Context(), path, testMigrations(t, map[string]string{
-		"00003_broken.sql": "-- +goose Up\nTHIS IS NOT VALID SQL;\n",
+		"00004_broken.sql": "-- +goose Up\nTHIS IS NOT VALID SQL;\n",
 	}))
 	if err == nil {
 		t.Fatal("invalid candidate migration succeeded")
@@ -166,7 +194,7 @@ func TestCandidateValidationFailureLeavesFormalDatabaseUnchanged(t *testing.T) {
 	createV1DatabaseWithRepresentativeData(t, path)
 
 	_, err := openWithMigrations(t.Context(), path, testMigrations(t, map[string]string{
-		"00003_invalid_schema.sql": "-- +goose Up\nDROP TABLE automation_settings;\n",
+		"00004_invalid_schema.sql": "-- +goose Up\nDROP TABLE automation_settings;\n",
 	}))
 	if err == nil {
 		t.Fatal("candidate with a missing business table passed validation")
@@ -184,7 +212,7 @@ func TestCandidateKeyDataChangeLeavesFormalDatabaseUnchanged(t *testing.T) {
 	createV1DatabaseWithRepresentativeData(t, path)
 
 	_, err := openWithMigrations(t.Context(), path, testMigrations(t, map[string]string{
-		"00003_tamper_resume.sql": `-- +goose Up
+		"00004_tamper_resume.sql": `-- +goose Up
 UPDATE online_resume_versions
 SET resume_json = '{"intent":"tampered"}'
 WHERE version_no = 1;
@@ -204,7 +232,7 @@ func TestNewDatabaseMigrationFailureLeavesNoFormalDatabase(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "boss-job-agent.db")
 	_, err := openWithMigrations(t.Context(), path, testMigrations(t, map[string]string{
-		"00003_broken.sql": "-- +goose Up\nTHIS IS NOT VALID SQL;\n",
+		"00004_broken.sql": "-- +goose Up\nTHIS IS NOT VALID SQL;\n",
 	}))
 	if err == nil {
 		t.Fatal("new database succeeded with an invalid migration")
@@ -217,8 +245,13 @@ func TestNewDatabaseMigrationFailureLeavesNoFormalDatabase(t *testing.T) {
 
 func createV1DatabaseWithRepresentativeData(t *testing.T, path string) {
 	t.Helper()
+	createDatabaseWithRepresentativeData(t, path, initialMigrations(t))
+}
 
-	db, err := openWithMigrations(t.Context(), path, initialMigrations(t))
+func createDatabaseWithRepresentativeData(t *testing.T, path string, migrations fs.FS) {
+	t.Helper()
+
+	db, err := openWithMigrations(t.Context(), path, migrations)
 	if err != nil {
 		t.Fatalf("open v1 database: %v", err)
 	}
@@ -370,9 +403,25 @@ func testMigrations(t *testing.T, additional map[string]string) fs.FS {
 		t.Fatalf("read embedded second migration: %v", err)
 	}
 	migrations["00002_allow_unprepared_discovery_termination.sql"] = &fstest.MapFile{Data: second}
+	third, err := fs.ReadFile(embeddedMigrations, "migrations/00003_add_per_job_discovery_checkpoint.sql")
+	if err != nil {
+		t.Fatalf("read embedded third migration: %v", err)
+	}
+	migrations["00003_add_per_job_discovery_checkpoint.sql"] = &fstest.MapFile{Data: third}
 	for name, contents := range additional {
 		migrations[name] = &fstest.MapFile{Data: []byte(contents)}
 	}
+	return migrations
+}
+
+func migrationsThroughV2(t *testing.T) fstest.MapFS {
+	t.Helper()
+	migrations := initialMigrations(t)
+	second, err := fs.ReadFile(embeddedMigrations, "migrations/00002_allow_unprepared_discovery_termination.sql")
+	if err != nil {
+		t.Fatalf("read embedded second migration: %v", err)
+	}
+	migrations["00002_allow_unprepared_discovery_termination.sql"] = &fstest.MapFile{Data: second}
 	return migrations
 }
 
@@ -462,5 +511,67 @@ func TestV1SchemaHasExactlyFiveBusinessTablesAndEnforcesForeignKeys(t *testing.T
 	`)
 	if err == nil {
 		t.Fatal("orphan discovery run was accepted, want foreign key rejection")
+	}
+}
+
+func TestPerJobDiscoveryCheckpointFieldsAreCollectivelyValid(t *testing.T) {
+	t.Parallel()
+
+	db, err := Open(t.Context(), ":memory:")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.ExecContext(t.Context(), `
+		INSERT INTO online_resume_versions (
+			version_no, resume_json, resume_hash, is_current, created_at
+		) VALUES (1, '{}', 'resume-v1', 1, 1000);
+		INSERT INTO discovery_runs (
+			resume_version_id, current_role, current_city, next_page,
+			status, attempt_no, worker_owner, worker_lease_until,
+			created_at, prepared_at, updated_at
+		) VALUES (1, 'Go 后端工程师', '福州', 1, 'running', 1, 'worker-1', 10000, 1000, 1000, 1000);
+	`); err != nil {
+		t.Fatalf("seed running discovery: %v", err)
+	}
+	for name, update := range map[string]string{
+		"partial checkpoint": `
+			UPDATE discovery_runs
+			SET current_page_job_ids_json = '["boss-job-1"]'
+		`,
+		"duplicate stable IDs": `
+			UPDATE discovery_runs
+			SET current_page_job_ids_json = '["boss-job-1","boss-job-1"]',
+			    current_page_has_more = 0,
+			    next_job_ordinal = 0
+		`,
+		"ordinal after page end": `
+			UPDATE discovery_runs
+			SET current_page_job_ids_json = '["boss-job-1"]',
+			    current_page_has_more = 0,
+			    next_job_ordinal = 2
+		`,
+	} {
+		if _, err := db.ExecContext(t.Context(), update); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+	if _, err := db.ExecContext(t.Context(), `
+		UPDATE discovery_runs
+		SET current_page_job_ids_json = '["boss-job-1","boss-job-2"]',
+		    current_page_has_more = 0,
+		    next_job_ordinal = 1
+	`); err != nil {
+		t.Fatalf("save valid page checkpoint: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(), `
+		UPDATE discovery_runs
+		SET status = 'completed',
+		    worker_owner = NULL,
+		    worker_lease_until = NULL,
+		    finished_at = 2000,
+		    updated_at = 2000
+	`); err == nil {
+		t.Fatal("completed run retained a page checkpoint")
 	}
 }

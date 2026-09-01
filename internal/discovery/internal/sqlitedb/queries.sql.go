@@ -10,9 +10,9 @@ import (
 	"database/sql"
 )
 
-const advanceDiscoveryPage = `-- name: AdvanceDiscoveryPage :one
+const advanceDiscoveryJob = `-- name: AdvanceDiscoveryJob :one
 UPDATE discovery_runs
-SET next_page = ?1,
+SET next_job_ordinal = ?1,
     consecutive_failure_count = 0,
     last_progress_at = ?2,
     worker_lease_until = ?3,
@@ -24,6 +24,74 @@ WHERE id = ?5
   AND current_role = ?8
   AND current_city = ?9
   AND next_page = ?10
+  AND current_page_job_ids_json = ?11
+  AND current_page_has_more = ?12
+  AND next_job_ordinal = ?13
+  AND json_extract(
+        current_page_job_ids_json,
+        '$[' || next_job_ordinal || ']'
+      ) = ?14
+RETURNING id
+`
+
+type AdvanceDiscoveryJobParams struct {
+	NextJobOrdinal    sql.NullInt64
+	ProgressAt        sql.NullInt64
+	WorkerLeaseUntil  sql.NullInt64
+	UpdatedAt         int64
+	RunID             int64
+	AttemptNo         int64
+	WorkerOwner       sql.NullString
+	CurrentRole       sql.NullString
+	CurrentCity       sql.NullString
+	CurrentPage       sql.NullInt64
+	JobIdsJson        sql.NullString
+	HasMore           sql.NullInt64
+	CurrentJobOrdinal sql.NullInt64
+	PlatformJobID     sql.NullString
+}
+
+func (q *Queries) AdvanceDiscoveryJob(ctx context.Context, arg AdvanceDiscoveryJobParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, advanceDiscoveryJob,
+		arg.NextJobOrdinal,
+		arg.ProgressAt,
+		arg.WorkerLeaseUntil,
+		arg.UpdatedAt,
+		arg.RunID,
+		arg.AttemptNo,
+		arg.WorkerOwner,
+		arg.CurrentRole,
+		arg.CurrentCity,
+		arg.CurrentPage,
+		arg.JobIdsJson,
+		arg.HasMore,
+		arg.CurrentJobOrdinal,
+		arg.PlatformJobID,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const advanceDiscoveryPage = `-- name: AdvanceDiscoveryPage :one
+UPDATE discovery_runs
+SET next_page = ?1,
+    current_page_job_ids_json = NULL,
+    current_page_has_more = NULL,
+    next_job_ordinal = NULL,
+    consecutive_failure_count = 0,
+    last_progress_at = ?2,
+    worker_lease_until = ?3,
+    updated_at = ?4
+WHERE id = ?5
+  AND status = 'running'
+  AND attempt_no = ?6
+  AND worker_owner = ?7
+  AND current_role = ?8
+  AND current_city = ?9
+  AND next_page = ?10
+  AND current_page_job_ids_json IS NOT NULL
+  AND next_job_ordinal = json_array_length(current_page_job_ids_json)
 RETURNING id
 `
 
@@ -97,6 +165,9 @@ func (q *Queries) ClaimDueDiscoveryRetry(ctx context.Context, arg ClaimDueDiscov
 const completeDiscoveryRun = `-- name: CompleteDiscoveryRun :one
 UPDATE discovery_runs
 SET status = 'completed',
+    current_page_job_ids_json = NULL,
+    current_page_has_more = NULL,
+    next_job_ordinal = NULL,
     consecutive_failure_count = 0,
     retry_at = NULL,
     worker_owner = NULL,
@@ -111,6 +182,8 @@ WHERE id = ?4
   AND current_role = ?7
   AND current_city = ?8
   AND next_page = ?9
+  AND current_page_job_ids_json IS NOT NULL
+  AND next_job_ordinal = json_array_length(current_page_job_ids_json)
 RETURNING id
 `
 
@@ -239,6 +312,9 @@ func (q *Queries) CreateDiscoveryRun(ctx context.Context, arg CreateDiscoveryRun
 const endDiscoveryRunEarly = `-- name: EndDiscoveryRunEarly :one
 UPDATE discovery_runs
 SET status = 'ended_early',
+    current_page_job_ids_json = NULL,
+    current_page_has_more = NULL,
+    next_job_ordinal = NULL,
     retry_at = NULL,
     worker_owner = NULL,
     worker_lease_until = NULL,
@@ -333,6 +409,61 @@ func (q *Queries) FailDiscoveryRun(ctx context.Context, arg FailDiscoveryRunPara
 	return id, err
 }
 
+const freezeDiscoveryPage = `-- name: FreezeDiscoveryPage :one
+UPDATE discovery_runs
+SET current_page_job_ids_json = ?1,
+    current_page_has_more = ?2,
+    next_job_ordinal = 0,
+    consecutive_failure_count = 0,
+    last_progress_at = ?3,
+    worker_lease_until = ?4,
+    updated_at = ?5
+WHERE id = ?6
+  AND status = 'running'
+  AND attempt_no = ?7
+  AND worker_owner = ?8
+  AND current_role = ?9
+  AND current_city = ?10
+  AND next_page = ?11
+  AND current_page_job_ids_json IS NULL
+  AND current_page_has_more IS NULL
+  AND next_job_ordinal IS NULL
+RETURNING id
+`
+
+type FreezeDiscoveryPageParams struct {
+	JobIdsJson       sql.NullString
+	HasMore          sql.NullInt64
+	ProgressAt       sql.NullInt64
+	WorkerLeaseUntil sql.NullInt64
+	UpdatedAt        int64
+	RunID            int64
+	AttemptNo        int64
+	WorkerOwner      sql.NullString
+	CurrentRole      sql.NullString
+	CurrentCity      sql.NullString
+	NextPage         sql.NullInt64
+}
+
+func (q *Queries) FreezeDiscoveryPage(ctx context.Context, arg FreezeDiscoveryPageParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, freezeDiscoveryPage,
+		arg.JobIdsJson,
+		arg.HasMore,
+		arg.ProgressAt,
+		arg.WorkerLeaseUntil,
+		arg.UpdatedAt,
+		arg.RunID,
+		arg.AttemptNo,
+		arg.WorkerOwner,
+		arg.CurrentRole,
+		arg.CurrentCity,
+		arg.NextPage,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const getActiveDiscoveryResumeUse = `-- name: GetActiveDiscoveryResumeUse :one
 SELECT
     discovery_runs.id AS discovery_run_id,
@@ -369,6 +500,9 @@ SELECT
     discovery_runs.retry_at,
     discovery_runs.worker_owner,
     discovery_runs.worker_lease_until,
+    discovery_runs.current_page_job_ids_json,
+    discovery_runs.current_page_has_more,
+    discovery_runs.next_job_ordinal,
     COALESCE(online_resume_versions.version_no, 0) AS resume_version_no,
     COALESCE(online_resume_versions.resume_json, '') AS resume_json
 FROM discovery_runs
@@ -389,6 +523,9 @@ type GetLatestDiscoveryRunRow struct {
 	RetryAt                 sql.NullInt64
 	WorkerOwner             sql.NullString
 	WorkerLeaseUntil        sql.NullInt64
+	CurrentPageJobIdsJson   sql.NullString
+	CurrentPageHasMore      sql.NullInt64
+	NextJobOrdinal          sql.NullInt64
 	ResumeVersionNo         int64
 	ResumeJson              string
 }
@@ -407,47 +544,64 @@ func (q *Queries) GetLatestDiscoveryRun(ctx context.Context) (GetLatestDiscovery
 		&i.RetryAt,
 		&i.WorkerOwner,
 		&i.WorkerLeaseUntil,
+		&i.CurrentPageJobIdsJson,
+		&i.CurrentPageHasMore,
+		&i.NextJobOrdinal,
 		&i.ResumeVersionNo,
 		&i.ResumeJson,
 	)
 	return i, err
 }
 
-const isCurrentDiscoveryWorker = `-- name: IsCurrentDiscoveryWorker :one
-SELECT EXISTS (
-    SELECT 1
-    FROM discovery_runs
-    WHERE id = ?1
-      AND status = 'running'
-      AND attempt_no = ?2
-      AND worker_owner = ?3
-      AND current_role = ?4
-      AND current_city = ?5
-      AND next_page = ?6
-) AS worker_is_current
+const lockCurrentDiscoveryJob = `-- name: LockCurrentDiscoveryJob :one
+UPDATE discovery_runs
+SET worker_lease_until = worker_lease_until
+WHERE id = ?1
+  AND status = 'running'
+  AND attempt_no = ?2
+  AND worker_owner = ?3
+  AND current_role = ?4
+  AND current_city = ?5
+  AND next_page = ?6
+  AND current_page_job_ids_json = ?7
+  AND current_page_has_more = ?8
+  AND next_job_ordinal = ?9
+  AND json_extract(
+        current_page_job_ids_json,
+        '$[' || next_job_ordinal || ']'
+      ) = ?10
+RETURNING id
 `
 
-type IsCurrentDiscoveryWorkerParams struct {
-	RunID       int64
-	AttemptNo   int64
-	WorkerOwner sql.NullString
-	CurrentRole sql.NullString
-	CurrentCity sql.NullString
-	NextPage    sql.NullInt64
+type LockCurrentDiscoveryJobParams struct {
+	RunID         int64
+	AttemptNo     int64
+	WorkerOwner   sql.NullString
+	CurrentRole   sql.NullString
+	CurrentCity   sql.NullString
+	NextPage      sql.NullInt64
+	JobIdsJson    sql.NullString
+	HasMore       sql.NullInt64
+	JobOrdinal    sql.NullInt64
+	PlatformJobID sql.NullString
 }
 
-func (q *Queries) IsCurrentDiscoveryWorker(ctx context.Context, arg IsCurrentDiscoveryWorkerParams) (bool, error) {
-	row := q.db.QueryRowContext(ctx, isCurrentDiscoveryWorker,
+func (q *Queries) LockCurrentDiscoveryJob(ctx context.Context, arg LockCurrentDiscoveryJobParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, lockCurrentDiscoveryJob,
 		arg.RunID,
 		arg.AttemptNo,
 		arg.WorkerOwner,
 		arg.CurrentRole,
 		arg.CurrentCity,
 		arg.NextPage,
+		arg.JobIdsJson,
+		arg.HasMore,
+		arg.JobOrdinal,
+		arg.PlatformJobID,
 	)
-	var worker_is_current bool
-	err := row.Scan(&worker_is_current)
-	return worker_is_current, err
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const pauseDiscoveryRun = `-- name: PauseDiscoveryRun :one
@@ -479,6 +633,9 @@ UPDATE discovery_runs
 SET current_role = ?1,
     current_city = ?2,
     next_page = 1,
+    current_page_job_ids_json = NULL,
+    current_page_has_more = NULL,
+    next_job_ordinal = NULL,
     consecutive_failure_count = 0,
     last_progress_at = ?3,
     worker_lease_until = ?4,
@@ -490,6 +647,8 @@ WHERE id = ?6
   AND current_role = ?9
   AND current_city = ?10
   AND next_page = ?11
+  AND current_page_job_ids_json IS NOT NULL
+  AND next_job_ordinal = json_array_length(current_page_job_ids_json)
 RETURNING id
 `
 

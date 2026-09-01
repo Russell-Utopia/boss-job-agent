@@ -15,7 +15,7 @@
 
 一个常驻后台进程启动岗位发现、岗位鉴定和打招呼三个执行模块。三个模块不在内存中互相传递任务，SQLite 中的当前业务状态、在线简历版本和自动化设置是进程重启后仍可恢复的衔接点；MVP Web 只调用下面的业务接口和只读查询，不直接访问 SQLite。具体信息架构、文案和验收场景见 [MVP Web 交互规格](./web-mvp.md)。
 
-三个执行模块采用相同但不共享泛型框架的执行形状：`Run` 在启动时立即执行一轮内部 `runSchedulingCycle(ctx, now)`，之后用一分钟周期继续执行；每轮只读取一次本机 `time.Now()` 并把该值传给本轮状态判断。周期扫描同时处理普通可领取工作、已到重试时间的失败工作和过期租约，最终都进入各模块原有的领取路径。v1 接受最多约一个扫描周期加本轮执行时间的调度延迟，不为单个工作建立精确定时器，也不定义 `Clock`、`Retry`、通用 `Worker` 或通用调度器接口。测试直接以固定 `now` 调用单轮逻辑，不等待真实时间。
+三个执行模块采用相同但不共享泛型框架的执行形状：`Run` 在启动时立即执行一轮内部 `runSchedulingCycle(ctx, now)`，之后用一分钟周期继续执行；每轮调度状态判断只读取一次本机 `time.Now()` 并把该值传给本轮扫描。周期扫描同时处理普通可领取工作、已到重试时间的失败工作和过期租约，最终都进入各模块原有的领取路径。岗位发现的一轮扫描可以包含多个串行外部读取，所以每个页面清单或岗位读取返回后再读取当时的 `time.Now()`，用于记录真实进度时间并把 Worker 租约续到该进度之后；这不改变本轮的到期判断，也不建立精确定时器。v1 接受最多约一个扫描周期加本轮执行时间的调度延迟，不定义 `Clock`、`Retry`、通用 `Worker` 或通用调度器接口。测试直接以固定 `now` 调用单轮逻辑，并可让模块时钟前进以验证长页续租，不等待真实时间。
 
 ## 状态所有权
 
@@ -204,15 +204,18 @@ type OnlineResume interface {
 
 ### `JobDiscovery`
 
-由 `SearchService` 定义并调用：
+由 `discovery.Service` 定义并调用：
 
 ```go
 type JobDiscovery interface {
-    FetchPage(context.Context, SearchRange, int) (DiscoveryPage, error)
+    ListPage(context.Context, SearchRange, int) (JobPage, error)
+    ReadJob(context.Context, string) (JobObservation, error)
 }
 ```
 
-第三个参数是从 1 开始的页码。`DiscoveryPage` 包含本页完整的可靠岗位观察和 `HasMore`；任一岗位缺少稳定平台岗位标识、完整 JD 或可靠平台岗位状态时整页失败，调用者不推进检查点。生产 Adapter 使用发现 Worker 独占的 BOSS session，内存 Adapter 按页返回固定结果或指定错误。
+`ListPage` 的第三个参数是从 1 开始的页码，返回本页有序稳定岗位 ID 和显式 `HasMore`。`ReadJob` 每次只返回一个经过稳定 ID、完整 JD 和可靠平台状态校验的岗位观察。`discovery.Service` 拥有遍历顺序、持久化页内检查点、恢复核对、错误分类、重试与页码推进；生产 Adapter 只在发现 Worker 独占的 BOSS session 内暂存读取当前页岗位详情所需的技术参数，不能把端点、Cookie、会话材料或浏览器执行类型放入 interface 或 SQLite。
+
+每个岗位先在短 SQLite 事务中校验当前 Worker 并经 `JobPool.Observe` 写入全局岗位池，事务提交后再单独推进页内序号；跨进程暂停或新尝试不能在校验与岗位写入之间插入旧写。恢复时重新 `ListPage` 并完整核对有序 ID 与 `HasMore`。清单变化时返回 `invalid_response` 并保留原检查点。只有当前页全部岗位完成后才能清除页内检查点，并且只有显式 `HasMore=false` 才能证明当前搜索范围耗尽。生产 Adapter 和受控 Adapter 都实现同一 `ListPage`/`ReadJob` seam；默认测试与 CI 只使用受控 Adapter，不访问 BOSS。
 
 ### `SendFirstContact` 与 `CheckContactStatus`
 

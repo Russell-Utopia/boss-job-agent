@@ -46,6 +46,35 @@ func TestObserveKeepsOneGlobalJobPerStablePlatformID(t *testing.T) {
 	}
 }
 
+func TestObserveInTransactionCommitsOnlyWithItsCaller(t *testing.T) {
+	t.Parallel()
+
+	pool, db := openTestPool(t)
+	transaction, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("begin observation transaction: %v", err)
+	}
+	if _, err := pool.ObserveInTransaction(
+		t.Context(),
+		transaction,
+		1,
+		observedJob("boss-job-transactional"),
+	); err != nil {
+		_ = transaction.Rollback()
+		t.Fatalf("observe in caller transaction: %v", err)
+	}
+	if err := transaction.Rollback(); err != nil {
+		t.Fatalf("roll back observation transaction: %v", err)
+	}
+	jobs, err := pool.ListJobs(t.Context())
+	if err != nil {
+		t.Fatalf("list jobs after rollback: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("jobs after rollback = %#v, want none", jobs)
+	}
+}
+
 func TestAssessmentQueueClaimFinishRejectsLateResults(t *testing.T) {
 	t.Parallel()
 

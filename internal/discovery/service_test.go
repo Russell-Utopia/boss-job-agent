@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Russell-Utopia/boss-job-agent/internal/discovery/internal/sqlitedb"
 	"github.com/Russell-Utopia/boss-job-agent/internal/jobpool"
 	"github.com/Russell-Utopia/boss-job-agent/internal/onlineresume"
 	"github.com/Russell-Utopia/boss-job-agent/internal/runlog"
@@ -28,43 +29,143 @@ type fetchCall struct {
 	Page        int
 }
 
+type controlledPage struct {
+	Observations []JobObservation
+	HasMore      bool
+}
+
 type controlledJobDiscovery struct {
-	pages  map[fetchCall]DiscoveryPage
-	errors map[fetchCall]error
-	calls  []fetchCall
+	pages      map[fetchCall]controlledPage
+	errors     map[fetchCall]error
+	calls      []fetchCall
+	readCalls  []string
+	activeJobs map[string]JobObservation
 }
 
 type blockingJobDiscovery struct {
 	started chan struct{}
 	release chan struct{}
-	page    DiscoveryPage
+	page    controlledPage
 }
 
-func (d *blockingJobDiscovery) FetchPage(
-	ctx context.Context,
-	_ SearchRange,
-	_ int,
-) (DiscoveryPage, error) {
-	close(d.started)
-	select {
-	case <-ctx.Done():
-		return DiscoveryPage{}, ctx.Err()
-	case <-d.release:
-		return d.page, nil
-	}
+type checkpointJobDiscovery struct {
+	page       JobPage
+	jobs       map[string]JobObservation
+	readErrors map[string]error
+	listCalls  []fetchCall
+	readCalls  []string
 }
 
-func (d *controlledJobDiscovery) FetchPage(
+type leaseRenewalJobDiscovery struct {
+	page        JobPage
+	jobs        map[string]JobObservation
+	now         *time.Time
+	blockOnID   string
+	readStarted chan struct{}
+	releaseRead chan struct{}
+}
+
+func (d *checkpointJobDiscovery) ListPage(
 	_ context.Context,
 	searchRange SearchRange,
 	page int,
-) (DiscoveryPage, error) {
+) (JobPage, error) {
+	d.listCalls = append(d.listCalls, fetchCall{SearchRange: searchRange, Page: page})
+	return d.page, nil
+}
+
+func (d *checkpointJobDiscovery) ReadJob(
+	_ context.Context,
+	platformJobID string,
+) (JobObservation, error) {
+	d.readCalls = append(d.readCalls, platformJobID)
+	if err := d.readErrors[platformJobID]; err != nil {
+		return JobObservation{}, err
+	}
+	return d.jobs[platformJobID], nil
+}
+
+func (d *blockingJobDiscovery) ListPage(
+	context.Context,
+	SearchRange,
+	int,
+) (JobPage, error) {
+	jobIDs := make([]string, len(d.page.Observations))
+	for index, observation := range d.page.Observations {
+		jobIDs[index] = observation.PlatformJobID
+	}
+	return JobPage{PlatformJobIDs: jobIDs, HasMore: d.page.HasMore}, nil
+}
+
+func (d *blockingJobDiscovery) ReadJob(ctx context.Context, platformJobID string) (JobObservation, error) {
+	close(d.started)
+	select {
+	case <-ctx.Done():
+		return JobObservation{}, ctx.Err()
+	case <-d.release:
+	}
+	for _, observation := range d.page.Observations {
+		if observation.PlatformJobID == platformJobID {
+			return observation, nil
+		}
+	}
+	return JobObservation{}, fmt.Errorf("unknown controlled job %q", platformJobID)
+}
+
+func (d *leaseRenewalJobDiscovery) ListPage(context.Context, SearchRange, int) (JobPage, error) {
+	return d.page, nil
+}
+
+func (d *leaseRenewalJobDiscovery) ReadJob(
+	ctx context.Context,
+	platformJobID string,
+) (JobObservation, error) {
+	*d.now = d.now.Add(6 * time.Minute)
+	if platformJobID == d.blockOnID {
+		close(d.readStarted)
+		select {
+		case <-ctx.Done():
+			return JobObservation{}, ctx.Err()
+		case <-d.releaseRead:
+			return JobObservation{}, &FetchError{
+				Category: FetchErrorPlatformLimited,
+				Cause:    errors.New("BOSS_PLATFORM_LIMITED"),
+			}
+		}
+	}
+	return d.jobs[platformJobID], nil
+}
+
+func (d *controlledJobDiscovery) ListPage(
+	_ context.Context,
+	searchRange SearchRange,
+	page int,
+) (JobPage, error) {
 	call := fetchCall{SearchRange: searchRange, Page: page}
 	d.calls = append(d.calls, call)
 	if err := d.errors[call]; err != nil {
-		return DiscoveryPage{}, err
+		return JobPage{}, err
 	}
-	return d.pages[call], nil
+	result := d.pages[call]
+	d.activeJobs = make(map[string]JobObservation, len(result.Observations))
+	jobIDs := make([]string, len(result.Observations))
+	for index, observation := range result.Observations {
+		jobIDs[index] = observation.PlatformJobID
+		d.activeJobs[observation.PlatformJobID] = observation
+	}
+	return JobPage{PlatformJobIDs: jobIDs, HasMore: result.HasMore}, nil
+}
+
+func (d *controlledJobDiscovery) ReadJob(
+	_ context.Context,
+	platformJobID string,
+) (JobObservation, error) {
+	d.readCalls = append(d.readCalls, platformJobID)
+	observation, ok := d.activeJobs[platformJobID]
+	if !ok {
+		return JobObservation{}, fmt.Errorf("unknown controlled job %q", platformJobID)
+	}
+	return observation, nil
 }
 
 func (r *resumeReader) Read(context.Context) (onlineresume.ResumeContent, error) {
@@ -102,6 +203,530 @@ func TestStartDependsOnlyOnTheCurrentSavedOnlineResume(t *testing.T) {
 	}
 	if !availability.Allowed {
 		t.Errorf("start availability = %#v, want allowed", availability)
+	}
+}
+
+func TestDiscoveryPersistsEachReliableJobAndResumesFromTheFailedJob(t *testing.T) {
+	t.Parallel()
+
+	discoveryAdapter := &checkpointJobDiscovery{
+		page: JobPage{PlatformJobIDs: []string{"boss-job-1", "boss-job-2", "boss-job-3"}, HasMore: false},
+		jobs: map[string]JobObservation{
+			"boss-job-1": discoveredJob("boss-job-1"),
+		},
+		readErrors: map[string]error{
+			"boss-job-2": &FetchError{
+				Category: FetchErrorPlatformLimited,
+				Cause:    errors.New("BOSS_PLATFORM_LIMITED"),
+			},
+		},
+	}
+	db, _, versions, pool, service, _ := openDiscoveryServiceTest(t, discoveryAdapter)
+	refreshDiscoveryResume(t, versions)
+	runID, err := service.Start(t.Context())
+	if err != nil {
+		t.Fatalf("start discovery: %v", err)
+	}
+
+	err = service.runSchedulingCycle(t.Context(), time.UnixMilli(2000))
+	if err == nil {
+		t.Fatal("discovery cycle succeeded, want second job read to stop the run")
+	}
+	assertGlobalJobIDs(t, pool, "boss-job-1")
+	assertRunCheckpoint(t, service, runID, StatusFailed, 1, 1)
+	assertPersistedPageCheckpoint(t, db, runID, `["boss-job-1","boss-job-2","boss-job-3"]`, false, 1)
+	if got, want := discoveryAdapter.readCalls, []string{"boss-job-1", "boss-job-2"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("read job calls = %#v, want %#v", got, want)
+	}
+
+	delete(discoveryAdapter.readErrors, "boss-job-2")
+	discoveryAdapter.jobs["boss-job-2"] = discoveredJob("boss-job-2")
+	discoveryAdapter.jobs["boss-job-3"] = discoveredJob("boss-job-3")
+	if err := service.Continue(t.Context(), runID); err != nil {
+		t.Fatalf("continue discovery: %v", err)
+	}
+	if err := service.runSchedulingCycle(t.Context(), time.UnixMilli(3000)); err != nil {
+		t.Fatalf("resume discovery: %v", err)
+	}
+	if got, want := discoveryAdapter.readCalls, []string{
+		"boss-job-1", "boss-job-2", "boss-job-2", "boss-job-3",
+	}; !reflect.DeepEqual(got, want) {
+		t.Errorf("all read job calls = %#v, want failed job reread without earlier replay %#v", got, want)
+	}
+	assertGlobalJobIDs(t, pool, "boss-job-1", "boss-job-2", "boss-job-3")
+}
+
+func TestDiscoveryRestartRereadsAtMostTheJobObservedBeforeCheckpointAdvance(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "boss-job-agent.db")
+	logPath := filepath.Join(directory, "boss-job-agent.jsonl")
+	runID, reader := runUntilCheckpointAdvanceFailure(t, databasePath, logPath)
+
+	restartedDB, err := storage.Open(t.Context(), databasePath)
+	if err != nil {
+		t.Fatalf("reopen discovery database: %v", err)
+	}
+	t.Cleanup(func() { _ = restartedDB.Close() })
+	restartedLogs := runlog.Open(logPath)
+	t.Cleanup(func() { _ = restartedLogs.Close() })
+	restartedAdapter := &checkpointJobDiscovery{
+		page: JobPage{PlatformJobIDs: []string{"boss-job-1", "boss-job-2"}, HasMore: false},
+		jobs: map[string]JobObservation{
+			"boss-job-1": discoveredJob("boss-job-1"),
+			"boss-job-2": discoveredJob("boss-job-2"),
+		},
+	}
+	restartedService := New(
+		restartedDB,
+		onlineresume.New(restartedDB, reader, restartedLogs, func() time.Time { return time.UnixMilli(3000) }),
+		jobpool.New(restartedDB),
+		restartedAdapter,
+		restartedLogs,
+		func() time.Time { return time.UnixMilli(3000) },
+	)
+	if err := restartedService.Continue(t.Context(), runID); err != nil {
+		t.Fatalf("continue restarted discovery: %v", err)
+	}
+	if err := restartedService.runSchedulingCycle(t.Context(), time.UnixMilli(3000)); err != nil {
+		t.Fatalf("complete restarted discovery: %v", err)
+	}
+	if got, want := restartedAdapter.readCalls, []string{"boss-job-1", "boss-job-2"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("restarted read calls = %#v, want only current and later jobs %#v", got, want)
+	}
+	assertGlobalJobIDs(t, jobpool.New(restartedDB), "boss-job-1", "boss-job-2")
+	assertCompletedRun(
+		t,
+		restartedService,
+		1,
+		SearchRange{Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职"},
+		1,
+		2,
+	)
+}
+
+func TestDiscoveryRestartRereadsAJobInterruptedBeforeObserve(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "boss-job-agent.db")
+	logPath := filepath.Join(directory, "boss-job-agent.jsonl")
+	db := mustOpenDiscoveryDatabase(t, databasePath)
+	logs := runlog.Open(logPath)
+	reader := &resumeReader{content: discoveryResume("Go 后端工程师")}
+	versions := onlineresume.New(db, reader, logs, func() time.Time { return time.UnixMilli(1000) })
+	refreshDiscoveryResume(t, versions)
+	blocked := &blockingJobDiscovery{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		page: controlledPage{
+			Observations: []JobObservation{discoveredJob("boss-job-1")}, HasMore: false,
+		},
+	}
+	service := New(db, versions, jobpool.New(db), blocked, logs, func() time.Time {
+		return time.UnixMilli(2000)
+	})
+	runID, err := service.Start(t.Context())
+	if err != nil {
+		t.Fatalf("start discovery: %v", err)
+	}
+	cycleResult := make(chan error, 1)
+	go func() {
+		cycleResult <- service.runSchedulingCycle(t.Context(), time.UnixMilli(2000))
+	}()
+	<-blocked.started
+	assertPersistedPageCheckpoint(t, db, runID, `["boss-job-1"]`, false, 0)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close database before observing the job: %v", err)
+	}
+	close(blocked.release)
+	if err := <-cycleResult; err == nil {
+		t.Fatal("interrupted discovery cycle succeeded after its database closed")
+	}
+	if err := logs.Close(); err != nil {
+		t.Fatalf("close interrupted runlog: %v", err)
+	}
+
+	restartedDB := mustOpenDiscoveryDatabase(t, databasePath)
+	t.Cleanup(func() { _ = restartedDB.Close() })
+	restartedLogs := runlog.Open(logPath)
+	t.Cleanup(func() { _ = restartedLogs.Close() })
+	restartedAdapter := &checkpointJobDiscovery{
+		page: JobPage{PlatformJobIDs: []string{"boss-job-1"}, HasMore: false},
+		jobs: map[string]JobObservation{"boss-job-1": discoveredJob("boss-job-1")},
+	}
+	restartedService := New(
+		restartedDB,
+		onlineresume.New(restartedDB, reader, restartedLogs, func() time.Time { return time.UnixMilli(700_000) }),
+		jobpool.New(restartedDB),
+		restartedAdapter,
+		restartedLogs,
+		func() time.Time { return time.UnixMilli(700_000) },
+	)
+	if err := restartedService.runSchedulingCycle(t.Context(), time.UnixMilli(700_000)); err != nil {
+		t.Fatalf("expire interrupted discovery worker: %v", err)
+	}
+	if err := restartedService.Continue(t.Context(), runID); err != nil {
+		t.Fatalf("continue interrupted discovery: %v", err)
+	}
+	if err := restartedService.runSchedulingCycle(t.Context(), time.UnixMilli(700_000)); err != nil {
+		t.Fatalf("complete interrupted discovery: %v", err)
+	}
+	if got, want := restartedAdapter.readCalls, []string{"boss-job-1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("restarted read calls = %#v, want interrupted job once %#v", got, want)
+	}
+	assertGlobalJobIDs(t, jobpool.New(restartedDB), "boss-job-1")
+}
+
+func TestDiscoveryRestartFinishesAPageBeforeSwitchingSearchRange(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "boss-job-agent.db")
+	logPath := filepath.Join(directory, "boss-job-agent.jsonl")
+	db := mustOpenDiscoveryDatabase(t, databasePath)
+	logs := runlog.Open(logPath)
+	reader := &resumeReader{content: discoveryResume("Go 后端工程师")}
+	firstRange := SearchRange{
+		Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职",
+	}
+	secondRange := SearchRange{
+		Role: "平台工程师", City: "厦门", Salary: "25-35K", EmploymentType: "全职",
+	}
+	reader.content.JobIntentions = []onlineresume.JobIntention{
+		{Role: firstRange.Role, City: firstRange.City, Salary: firstRange.Salary, EmploymentType: firstRange.EmploymentType},
+		{Role: secondRange.Role, City: secondRange.City, Salary: secondRange.Salary, EmploymentType: secondRange.EmploymentType},
+	}
+	adapter := discoveryAcrossRanges(firstRange, secondRange)
+	versions := onlineresume.New(db, reader, logs, func() time.Time { return time.UnixMilli(1000) })
+	refreshDiscoveryResume(t, versions)
+	service := New(db, versions, jobpool.New(db), adapter, logs, func() time.Time {
+		return time.UnixMilli(2000)
+	})
+	runID, err := service.Start(t.Context())
+	if err != nil {
+		t.Fatalf("start discovery: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(), `
+		CREATE TRIGGER fail_discovery_range_switch
+		BEFORE UPDATE OF current_role ON discovery_runs
+		WHEN OLD.current_role = 'Go 后端工程师' AND NEW.current_role = '平台工程师'
+		BEGIN
+			SELECT RAISE(ABORT, 'simulated crash before range switch');
+		END
+	`); err != nil {
+		t.Fatalf("create range switch failure trigger: %v", err)
+	}
+	if err := service.runSchedulingCycle(t.Context(), time.UnixMilli(2000)); err == nil {
+		t.Fatal("discovery cycle succeeded, want range switch failure")
+	}
+	assertPersistedPageCheckpoint(t, db, runID, `["boss-job-1"]`, false, 1)
+	if _, err := db.ExecContext(t.Context(), `DROP TRIGGER fail_discovery_range_switch`); err != nil {
+		t.Fatalf("drop range switch failure trigger: %v", err)
+	}
+	if err := logs.Close(); err != nil {
+		t.Fatalf("close first runlog: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close first discovery database: %v", err)
+	}
+
+	restartedDB := mustOpenDiscoveryDatabase(t, databasePath)
+	t.Cleanup(func() { _ = restartedDB.Close() })
+	restartedLogs := runlog.Open(logPath)
+	t.Cleanup(func() { _ = restartedLogs.Close() })
+	restartedAdapter := discoveryAcrossRanges(firstRange, secondRange)
+	restartedService := New(
+		restartedDB,
+		onlineresume.New(restartedDB, reader, restartedLogs, func() time.Time { return time.UnixMilli(3000) }),
+		jobpool.New(restartedDB),
+		restartedAdapter,
+		restartedLogs,
+		func() time.Time { return time.UnixMilli(3000) },
+	)
+	if err := restartedService.Continue(t.Context(), runID); err != nil {
+		t.Fatalf("continue discovery after range switch crash: %v", err)
+	}
+	if err := restartedService.runSchedulingCycle(t.Context(), time.UnixMilli(3000)); err != nil {
+		t.Fatalf("complete discovery after range switch crash: %v", err)
+	}
+	if got, want := restartedAdapter.readCalls, []string{"boss-job-2"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("restarted reads = %#v, want only next range job %#v", got, want)
+	}
+	assertGlobalJobIDs(t, jobpool.New(restartedDB), "boss-job-1", "boss-job-2")
+}
+
+func discoveryAcrossRanges(firstRange, secondRange SearchRange) *controlledJobDiscovery {
+	return &controlledJobDiscovery{pages: map[fetchCall]controlledPage{
+		{SearchRange: firstRange, Page: 1}: {
+			Observations: []JobObservation{discoveredJob("boss-job-1")}, HasMore: false,
+		},
+		{SearchRange: secondRange, Page: 1}: {
+			Observations: []JobObservation{discoveredJob("boss-job-2")}, HasMore: false,
+		},
+	}}
+}
+
+func runUntilCheckpointAdvanceFailure(t *testing.T, databasePath, logPath string) (int64, *resumeReader) {
+	t.Helper()
+
+	db, err := storage.Open(t.Context(), databasePath)
+	if err != nil {
+		t.Fatalf("open discovery database: %v", err)
+	}
+	logs := runlog.Open(logPath)
+	reader := &resumeReader{content: discoveryResume("Go 后端工程师")}
+	versions := onlineresume.New(db, reader, logs, func() time.Time { return time.UnixMilli(1000) })
+	refreshDiscoveryResume(t, versions)
+	firstAdapter := &checkpointJobDiscovery{
+		page: JobPage{PlatformJobIDs: []string{"boss-job-1", "boss-job-2"}, HasMore: false},
+		jobs: map[string]JobObservation{
+			"boss-job-1": discoveredJob("boss-job-1"),
+			"boss-job-2": discoveredJob("boss-job-2"),
+		},
+	}
+	firstPool := jobpool.New(db)
+	firstService := New(db, versions, firstPool, firstAdapter, logs, func() time.Time {
+		return time.UnixMilli(2000)
+	})
+	runID, err := firstService.Start(t.Context())
+	if err != nil {
+		t.Fatalf("start discovery: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(), `
+		CREATE TRIGGER fail_first_job_checkpoint_advance
+		BEFORE UPDATE OF next_job_ordinal ON discovery_runs
+		WHEN OLD.next_job_ordinal = 0 AND NEW.next_job_ordinal = 1
+		BEGIN
+			SELECT RAISE(ABORT, 'simulated crash before checkpoint advance');
+		END
+	`); err != nil {
+		t.Fatalf("create checkpoint failure trigger: %v", err)
+	}
+	if err := firstService.runSchedulingCycle(t.Context(), time.UnixMilli(2000)); err == nil {
+		t.Fatal("first discovery cycle succeeded, want checkpoint advance failure")
+	}
+	assertGlobalJobIDs(t, firstPool, "boss-job-1")
+	assertPersistedPageCheckpoint(t, db, runID, `["boss-job-1","boss-job-2"]`, false, 0)
+	if _, err := db.ExecContext(t.Context(), `DROP TRIGGER fail_first_job_checkpoint_advance`); err != nil {
+		t.Fatalf("drop checkpoint failure trigger: %v", err)
+	}
+	if err := logs.Close(); err != nil {
+		t.Fatalf("close first runlog: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close first discovery process database: %v", err)
+	}
+	return runID, reader
+}
+
+func TestDiscoveryRejectsAChangedListBeforeResumingTheFrozenPage(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "boss-job-agent.db")
+	logPath := filepath.Join(directory, "boss-job-agent.jsonl")
+	runID, reader := runUntilSecondJobPlatformLimit(t, databasePath, logPath)
+
+	changedAdapter := &checkpointJobDiscovery{
+		page: JobPage{PlatformJobIDs: []string{"boss-job-1", "boss-job-3"}, HasMore: false},
+		jobs: map[string]JobObservation{"boss-job-3": discoveredJob("boss-job-3")},
+	}
+	db := mustOpenDiscoveryDatabase(t, databasePath)
+	t.Cleanup(func() { _ = db.Close() })
+	logs := runlog.Open(logPath)
+	t.Cleanup(func() { _ = logs.Close() })
+	pool := jobpool.New(db)
+	service := New(
+		db,
+		onlineresume.New(db, reader, logs, func() time.Time { return time.UnixMilli(3000) }),
+		pool,
+		changedAdapter,
+		logs,
+		func() time.Time { return time.UnixMilli(3000) },
+	)
+	if err := service.Continue(t.Context(), runID); err != nil {
+		t.Fatalf("continue discovery: %v", err)
+	}
+	err := service.runSchedulingCycle(t.Context(), time.UnixMilli(3000))
+	var fetchErr *FetchError
+	if !errors.As(err, &fetchErr) || fetchErr.Category != FetchErrorInvalidResponse {
+		t.Fatalf("changed list error = %v, want invalid_response", err)
+	}
+	if len(changedAdapter.readCalls) != 0 {
+		t.Errorf("jobs read from changed list = %#v, want none", changedAdapter.readCalls)
+	}
+	assertGlobalJobIDs(t, pool, "boss-job-1")
+	assertPersistedPageCheckpoint(t, db, runID, `["boss-job-1","boss-job-2"]`, false, 1)
+	_ = service.runSchedulingCycle(t.Context(), time.UnixMilli(3_603_000))
+	if len(changedAdapter.listCalls) != 1 {
+		t.Errorf("changed list calls = %d, want no automatic retry after invalid_response", len(changedAdapter.listCalls))
+	}
+}
+
+func runUntilSecondJobPlatformLimit(t *testing.T, databasePath, logPath string) (int64, *resumeReader) {
+	t.Helper()
+	db := mustOpenDiscoveryDatabase(t, databasePath)
+	logs := runlog.Open(logPath)
+	reader := &resumeReader{content: discoveryResume("Go 后端工程师")}
+	versions := onlineresume.New(db, reader, logs, func() time.Time { return time.UnixMilli(1000) })
+	firstAdapter := &checkpointJobDiscovery{
+		page: JobPage{PlatformJobIDs: []string{"boss-job-1", "boss-job-2"}, HasMore: false},
+		jobs: map[string]JobObservation{"boss-job-1": discoveredJob("boss-job-1")},
+		readErrors: map[string]error{
+			"boss-job-2": &FetchError{Category: FetchErrorPlatformLimited, Cause: errors.New("BOSS_PLATFORM_LIMITED")},
+		},
+	}
+	pool := jobpool.New(db)
+	service := New(db, versions, pool, firstAdapter, logs, func() time.Time {
+		return time.UnixMilli(2000)
+	})
+	refreshDiscoveryResume(t, versions)
+	runID, err := service.Start(t.Context())
+	if err != nil {
+		t.Fatalf("start discovery: %v", err)
+	}
+	if err := service.runSchedulingCycle(t.Context(), time.UnixMilli(2000)); err == nil {
+		t.Fatal("first cycle succeeded, want second job failure")
+	}
+	assertPersistedPageCheckpoint(t, db, runID, `["boss-job-1","boss-job-2"]`, false, 1)
+	assertGlobalJobIDs(t, pool, "boss-job-1")
+	if err := logs.Close(); err != nil {
+		t.Fatalf("close first runlog: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close first discovery database: %v", err)
+	}
+	return runID, reader
+}
+
+func TestDiscoveryRunlogSeparatesPageListsAndJobReadsWithoutStableIDs(t *testing.T) {
+	t.Parallel()
+
+	const platformJobID = "boss-sensitive-job-1"
+	discoveryAdapter := &checkpointJobDiscovery{
+		page: JobPage{PlatformJobIDs: []string{platformJobID}, HasMore: false},
+		jobs: map[string]JobObservation{platformJobID: discoveredJob(platformJobID)},
+	}
+	db, _, versions := openDiscoveryResumeTest(t)
+	logPath := filepath.Join(t.TempDir(), "discovery.jsonl")
+	logs := runlog.Open(logPath)
+	t.Cleanup(func() { _ = logs.Close() })
+	service := New(
+		db,
+		versions,
+		jobpool.New(db),
+		discoveryAdapter,
+		logs,
+		func() time.Time { return time.UnixMilli(2000) },
+	)
+	refreshDiscoveryResume(t, versions)
+	if _, err := service.Start(t.Context()); err != nil {
+		t.Fatalf("start discovery: %v", err)
+	}
+	if err := service.runSchedulingCycle(t.Context(), time.UnixMilli(2000)); err != nil {
+		t.Fatalf("run discovery: %v", err)
+	}
+	records, err := os.ReadFile(logPath) // #nosec G304 -- the test owns this temporary runlog path.
+	if err != nil {
+		t.Fatalf("read discovery runlog: %v", err)
+	}
+	text := string(records)
+	for _, want := range []string{
+		`"operation":"list_page"`,
+		`"operation":"read_job"`,
+		`"page_no":1`,
+		`"job_ordinal":1`,
+		`"job_id_fingerprint":"9542806604c794eebc1517859836f31a3cf607ba0363d16be187120bb497c5fb"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("discovery runlog does not contain %q: %s", want, text)
+		}
+	}
+	for _, forbidden := range []string{platformJobID, `"search_role"`, `"search_city"`} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("discovery runlog contains forbidden value %q: %s", forbidden, text)
+		}
+	}
+}
+
+func TestDiscoveryRunlogRedactsStableIDsFromFailedJobErrorTrees(t *testing.T) {
+	t.Parallel()
+
+	const requestedID = "boss-sensitive-requested-job"
+	const returnedID = "boss-sensitive-returned-job"
+	discoveryAdapter := &checkpointJobDiscovery{
+		page: JobPage{PlatformJobIDs: []string{requestedID}, HasMore: false},
+		jobs: map[string]JobObservation{requestedID: discoveredJob(returnedID)},
+	}
+	db, _, versions := openDiscoveryResumeTest(t)
+	logPath := filepath.Join(t.TempDir(), "discovery-redaction.jsonl")
+	logs := runlog.Open(logPath)
+	t.Cleanup(func() { _ = logs.Close() })
+	service := New(
+		db,
+		versions,
+		jobpool.New(db),
+		discoveryAdapter,
+		logs,
+		func() time.Time { return time.UnixMilli(2000) },
+	)
+	refreshDiscoveryResume(t, versions)
+	if _, err := service.Start(t.Context()); err != nil {
+		t.Fatalf("start discovery: %v", err)
+	}
+	if err := service.runSchedulingCycle(t.Context(), time.UnixMilli(2000)); err == nil {
+		t.Fatal("run discovery succeeded with a mismatched stable ID")
+	}
+	records, err := os.ReadFile(logPath) // #nosec G304 -- the test owns this temporary runlog path.
+	if err != nil {
+		t.Fatalf("read discovery runlog: %v", err)
+	}
+	text := string(records)
+	for _, forbidden := range []string{requestedID, returnedID} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("failed discovery runlog contains raw stable ID %q: %s", forbidden, text)
+		}
+	}
+	if !strings.Contains(text, `"job_id_fingerprint"`) || !strings.Contains(text, `"error_chain"`) {
+		t.Errorf("failed discovery runlog lacks fingerprint or error chain: %s", text)
+	}
+}
+
+func assertPersistedPageCheckpoint(
+	t *testing.T,
+	db *sql.DB,
+	runID int64,
+	wantJobIDs string,
+	wantHasMore bool,
+	wantOrdinal int,
+) {
+	t.Helper()
+	var jobIDs string
+	var hasMore int
+	var ordinal int
+	if err := db.QueryRowContext(t.Context(), `
+		SELECT current_page_job_ids_json, current_page_has_more, next_job_ordinal
+		FROM discovery_runs
+		WHERE id = ?
+	`, runID).Scan(&jobIDs, &hasMore, &ordinal); err != nil {
+		t.Fatalf("read discovery page checkpoint: %v", err)
+	}
+	wantHasMoreInt := 0
+	if wantHasMore {
+		wantHasMoreInt = 1
+	}
+	if jobIDs != wantJobIDs || hasMore != wantHasMoreInt || ordinal != wantOrdinal {
+		t.Errorf(
+			"page checkpoint = %q/%d/%d, want %q/%d/%d",
+			jobIDs,
+			hasMore,
+			ordinal,
+			wantJobIDs,
+			wantHasMoreInt,
+			wantOrdinal,
+		)
 	}
 }
 
@@ -167,7 +792,7 @@ func TestSchedulingCycleCoversEverySavedSearchRangeInOrderAndResetsThePage(t *te
 	secondRange := SearchRange{
 		Role: "平台工程师", City: "厦门", Salary: "25-35K", EmploymentType: "全职",
 	}
-	discoveryAdapter := &controlledJobDiscovery{pages: map[fetchCall]DiscoveryPage{
+	discoveryAdapter := &controlledJobDiscovery{pages: map[fetchCall]controlledPage{
 		{SearchRange: firstRange, Page: 1}: {
 			Observations: []JobObservation{discoveredJob("boss-job-1")}, HasMore: true,
 		},
@@ -215,7 +840,7 @@ func TestPauseInvalidatesAnInFlightWorkerAndContinueResumesTheSameCheckpoint(t *
 	blocked := &blockingJobDiscovery{
 		started: make(chan struct{}),
 		release: make(chan struct{}),
-		page: DiscoveryPage{
+		page: controlledPage{
 			Observations: []JobObservation{discoveredJob("late-job")}, HasMore: false,
 		},
 	}
@@ -244,9 +869,9 @@ func TestPauseInvalidatesAnInFlightWorkerAndContinueResumesTheSameCheckpoint(t *
 	searchRange := SearchRange{
 		Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职",
 	}
-	service.discovery = &controlledJobDiscovery{pages: map[fetchCall]DiscoveryPage{
+	service.discovery = &controlledJobDiscovery{pages: map[fetchCall]controlledPage{
 		{SearchRange: searchRange, Page: 1}: {
-			Observations: []JobObservation{discoveredJob("resumed-job")}, HasMore: false,
+			Observations: []JobObservation{discoveredJob("late-job")}, HasMore: false,
 		},
 	}}
 	if err := service.Continue(t.Context(), runID); err != nil {
@@ -256,7 +881,179 @@ func TestPauseInvalidatesAnInFlightWorkerAndContinueResumesTheSameCheckpoint(t *
 		t.Fatalf("run continued discovery: %v", err)
 	}
 	assertRunCheckpoint(t, service, runID, StatusCompleted, 1, 1)
-	assertGlobalJobIDs(t, pool, "resumed-job")
+	assertGlobalJobIDs(t, pool, "late-job")
+}
+
+func TestCrossProcessPauseCannotOvertakeCurrentJobObservation(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "boss-job-agent.db")
+	db := mustOpenDiscoveryDatabase(t, databasePath)
+	t.Cleanup(func() { _ = db.Close() })
+	logs := runlog.Open(filepath.Join(directory, "first.jsonl"))
+	t.Cleanup(func() { _ = logs.Close() })
+	reader := &resumeReader{content: discoveryResume("Go 后端工程师")}
+	versions := onlineresume.New(db, reader, logs, func() time.Time { return time.UnixMilli(1000) })
+	refreshDiscoveryResume(t, versions)
+	pool := jobpool.New(db)
+	service := New(db, versions, pool, &checkpointJobDiscovery{}, logs, func() time.Time {
+		return time.UnixMilli(2000)
+	})
+	runID, err := service.Start(t.Context())
+	if err != nil {
+		t.Fatalf("start discovery: %v", err)
+	}
+	searchRange := SearchRange{
+		Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职",
+	}
+	worker := workerAttempt{
+		runID: runID, attemptNo: 1, owner: service.workerOwner,
+		currentSearchRange: searchRange, nextPage: 1,
+	}
+	checkpoint, err := service.freezePage(t.Context(), worker, JobPage{
+		PlatformJobIDs: []string{"boss-job-1"}, HasMore: false,
+	}, time.UnixMilli(2000))
+	if err != nil {
+		t.Fatalf("freeze discovery page: %v", err)
+	}
+	worker.pageCheckpoint = checkpoint
+	secondDB := mustOpenDiscoveryDatabase(t, databasePath)
+	t.Cleanup(func() { _ = secondDB.Close() })
+	secondLogs := runlog.Open(filepath.Join(directory, "second.jsonl"))
+	t.Cleanup(func() { _ = secondLogs.Close() })
+	secondService := New(
+		secondDB,
+		onlineresume.New(secondDB, reader, secondLogs, func() time.Time { return time.UnixMilli(3000) }),
+		jobpool.New(secondDB),
+		&checkpointJobDiscovery{},
+		secondLogs,
+		func() time.Time { return time.UnixMilli(3000) },
+	)
+
+	transaction, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("begin current job observation: %v", err)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	transactionQueries := service.queries.WithTx(transaction)
+	if _, err := transactionQueries.LockCurrentDiscoveryJob(
+		t.Context(),
+		lockCurrentJobParams(worker, "boss-job-1", 0),
+	); err != nil {
+		t.Fatalf("lock current discovery job: %v", err)
+	}
+
+	pauseContext, cancelPause := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancelPause()
+	if err := secondService.Pause(pauseContext, runID); err == nil {
+		t.Fatal("cross-process pause overtook a locked current job observation")
+	}
+	if _, err := pool.ObserveInTransaction(
+		t.Context(), transaction, runID, toPoolObservation(discoveredJob("boss-job-1"), time.UnixMilli(2000)),
+	); err != nil {
+		t.Fatalf("observe locked current discovery job: %v", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		t.Fatalf("commit locked current discovery job: %v", err)
+	}
+	if err := secondService.Pause(t.Context(), runID); err != nil {
+		t.Fatalf("pause after current job observation committed: %v", err)
+	}
+	_, err = service.queries.AdvanceDiscoveryJob(t.Context(), sqlitedb.AdvanceDiscoveryJobParams{
+		NextJobOrdinal:    nullInt64(1),
+		ProgressAt:        nullInt64(2000),
+		WorkerLeaseUntil:  nullInt64(time.UnixMilli(2000).Add(discoveryWorkerLease).UnixMilli()),
+		UpdatedAt:         2000,
+		RunID:             runID,
+		AttemptNo:         1,
+		WorkerOwner:       nullString(worker.owner),
+		CurrentRole:       nullString(searchRange.Role),
+		CurrentCity:       nullString(searchRange.City),
+		CurrentPage:       nullInt64(1),
+		JobIdsJson:        nullString(checkpoint.encodedJobIDs),
+		HasMore:           nullInt64(0),
+		CurrentJobOrdinal: nullInt64(0),
+		PlatformJobID:     nullString("boss-job-1"),
+	})
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("old worker checkpoint advance error = %v, want stale no rows", err)
+	}
+	assertGlobalJobIDs(t, pool, "boss-job-1")
+}
+
+func lockCurrentJobParams(
+	worker workerAttempt,
+	platformJobID string,
+	jobOrdinal int,
+) sqlitedb.LockCurrentDiscoveryJobParams {
+	return sqlitedb.LockCurrentDiscoveryJobParams{
+		RunID:         worker.runID,
+		AttemptNo:     worker.attemptNo,
+		WorkerOwner:   nullString(worker.owner),
+		CurrentRole:   nullString(worker.currentSearchRange.Role),
+		CurrentCity:   nullString(worker.currentSearchRange.City),
+		NextPage:      nullInt64(int64(worker.nextPage)),
+		JobIdsJson:    nullString(worker.pageCheckpoint.encodedJobIDs),
+		HasMore:       nullInt64(boolInt64(worker.pageCheckpoint.hasMore)),
+		JobOrdinal:    nullInt64(int64(jobOrdinal)),
+		PlatformJobID: nullString(platformJobID),
+	}
+}
+
+func TestEachPersistedJobRenewsTheWorkerLeaseUsingFreshTime(t *testing.T) {
+	t.Parallel()
+
+	now := time.UnixMilli(2000)
+	adapter := &leaseRenewalJobDiscovery{
+		page: JobPage{
+			PlatformJobIDs: []string{"boss-job-1", "boss-job-2", "boss-job-3"},
+			HasMore:        false,
+		},
+		jobs: map[string]JobObservation{
+			"boss-job-1": discoveredJob("boss-job-1"),
+			"boss-job-2": discoveredJob("boss-job-2"),
+		},
+		now:         &now,
+		blockOnID:   "boss-job-3",
+		readStarted: make(chan struct{}),
+		releaseRead: make(chan struct{}),
+	}
+	db, _, versions, _, service, _ := openDiscoveryServiceTest(t, adapter)
+	service.now = func() time.Time { return now }
+	refreshDiscoveryResume(t, versions)
+	runID, err := service.Start(t.Context())
+	if err != nil {
+		t.Fatalf("start discovery: %v", err)
+	}
+	cycleResult := make(chan error, 1)
+	go func() {
+		cycleResult <- service.runSchedulingCycle(t.Context(), time.UnixMilli(2000))
+	}()
+	<-adapter.readStarted
+
+	var progressAt, leaseUntil int64
+	if err := db.QueryRowContext(t.Context(), `
+		SELECT last_progress_at, worker_lease_until
+		FROM discovery_runs
+		WHERE id = ?
+	`, runID).Scan(&progressAt, &leaseUntil); err != nil {
+		t.Fatalf("read renewed discovery lease: %v", err)
+	}
+	wantProgress := time.UnixMilli(2000).Add(12 * time.Minute)
+	if progressAt != wantProgress.UnixMilli() || leaseUntil != wantProgress.Add(discoveryWorkerLease).UnixMilli() {
+		t.Errorf(
+			"progress/lease = %d/%d, want %d/%d",
+			progressAt,
+			leaseUntil,
+			wantProgress.UnixMilli(),
+			wantProgress.Add(discoveryWorkerLease).UnixMilli(),
+		)
+	}
+	close(adapter.releaseRead)
+	if err := <-cycleResult; err == nil {
+		t.Fatal("discovery cycle succeeded after the blocked job returned platform_limited")
+	}
 }
 
 func TestTransientFailureRetriesAtMostThreeTimesWithoutHumanIntervention(t *testing.T) {
@@ -304,23 +1101,24 @@ func TestHumanActionErrorsDoNotRetryWithoutContinue(t *testing.T) {
 		category := category
 		t.Run(string(category), func(t *testing.T) {
 			t.Parallel()
-			searchRange := SearchRange{
-				Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职",
+			discoveryAdapter := &checkpointJobDiscovery{
+				page: JobPage{PlatformJobIDs: []string{"boss-job-1"}, HasMore: false},
+				readErrors: map[string]error{
+					"boss-job-1": &FetchError{Category: category, Cause: errors.New("human action required")},
+				},
 			}
-			call := fetchCall{SearchRange: searchRange, Page: 1}
-			discoveryAdapter := &controlledJobDiscovery{errors: map[fetchCall]error{
-				call: &FetchError{Category: category, Cause: errors.New("human action required")},
-			}}
-			_, _, versions, _, service, _ := openDiscoveryServiceTest(t, discoveryAdapter)
+			db, _, versions, _, service, _ := openDiscoveryServiceTest(t, discoveryAdapter)
 			refreshDiscoveryResume(t, versions)
-			if _, err := service.Start(t.Context()); err != nil {
+			runID, err := service.Start(t.Context())
+			if err != nil {
 				t.Fatalf("start discovery: %v", err)
 			}
 			_ = service.runSchedulingCycle(t.Context(), time.UnixMilli(2000))
 			_ = service.runSchedulingCycle(t.Context(), time.UnixMilli(3_602_000))
-			if got := len(discoveryAdapter.calls); got != 1 {
-				t.Fatalf("fetch calls = %d, want one attempt before human Continue", got)
+			if got := len(discoveryAdapter.readCalls); got != 1 {
+				t.Fatalf("read calls = %d, want one attempt before human Continue", got)
 			}
+			assertPersistedPageCheckpoint(t, db, runID, `["boss-job-1"]`, false, 0)
 		})
 	}
 }
@@ -537,7 +1335,7 @@ func assertGlobalJobIDs(t *testing.T, pool *jobpool.Pool, wants ...string) {
 	}
 }
 
-func TestInvalidObservationFailsTheWholePageWithoutAdvancingOrSavingJobs(t *testing.T) {
+func TestInvalidObservationKeepsEarlierReliableJobsAndStopsAtItsOwnCheckpoint(t *testing.T) {
 	t.Parallel()
 
 	invalid := discoveredJob("boss-job-invalid")
@@ -545,7 +1343,7 @@ func TestInvalidObservationFailsTheWholePageWithoutAdvancingOrSavingJobs(t *test
 	searchRange := SearchRange{
 		Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职",
 	}
-	discoveryAdapter := &controlledJobDiscovery{pages: map[fetchCall]DiscoveryPage{
+	discoveryAdapter := &controlledJobDiscovery{pages: map[fetchCall]controlledPage{
 		{SearchRange: searchRange, Page: 1}: {
 			Observations: []JobObservation{discoveredJob("boss-job-1"), invalid}, HasMore: false,
 		},
@@ -554,29 +1352,14 @@ func TestInvalidObservationFailsTheWholePageWithoutAdvancingOrSavingJobs(t *test
 	refreshDiscoveryResume(t, versions)
 
 	runID, err := service.Start(t.Context())
-	if err == nil {
-		err = service.runSchedulingCycle(t.Context(), time.UnixMilli(2000))
+	if err != nil {
+		t.Fatalf("start discovery: %v", err)
 	}
-	if err == nil {
+	if err := service.runSchedulingCycle(t.Context(), time.UnixMilli(2000)); err == nil {
 		t.Fatal("start discovery succeeded, want unreliable page failure")
 	}
-	if runID <= 0 {
-		t.Fatalf("failed discovery run ID = %d, want positive", runID)
-	}
-	run, viewErr := service.GetLatestRun(t.Context())
-	if viewErr != nil {
-		t.Fatalf("get failed discovery run: %v", viewErr)
-	}
-	if run == nil || run.Status != StatusFailed || run.NextPage != 1 {
-		t.Errorf("failed discovery progress = %#v, want failed at page 1", run)
-	}
-	jobs, listErr := pool.ListJobs(t.Context())
-	if listErr != nil {
-		t.Fatalf("list jobs after invalid page: %v", listErr)
-	}
-	if len(jobs) != 0 {
-		t.Errorf("jobs saved from invalid page = %d, want 0", len(jobs))
-	}
+	assertRunCheckpoint(t, service, runID, StatusFailed, 1, 1)
+	assertGlobalJobIDs(t, pool, "boss-job-1")
 }
 
 func TestObservationWithoutReliableSalaryCanBeSaved(t *testing.T) {
@@ -587,7 +1370,7 @@ func TestObservationWithoutReliableSalaryCanBeSaved(t *testing.T) {
 	searchRange := SearchRange{
 		Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职",
 	}
-	discoveryAdapter := &controlledJobDiscovery{pages: map[fetchCall]DiscoveryPage{
+	discoveryAdapter := &controlledJobDiscovery{pages: map[fetchCall]controlledPage{
 		{SearchRange: searchRange, Page: 1}: {Observations: []JobObservation{job}, HasMore: false},
 	}}
 	_, _, versions, pool, service, _ := openDiscoveryServiceTest(t, discoveryAdapter)
@@ -708,6 +1491,15 @@ func openDiscoveryResumeTest(t *testing.T) (*sql.DB, *resumeReader, *onlineresum
 	reader := &resumeReader{content: discoveryResume("Go 后端工程师")}
 	versions := onlineresume.New(db, reader, logs, func() time.Time { return time.UnixMilli(1000) })
 	return db, reader, versions
+}
+
+func mustOpenDiscoveryDatabase(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := storage.Open(t.Context(), path)
+	if err != nil {
+		t.Fatalf("open discovery database %q: %v", path, err)
+	}
+	return db
 }
 
 func refreshDiscoveryResume(t *testing.T, versions *onlineresume.Versions) onlineresume.RefreshResult {

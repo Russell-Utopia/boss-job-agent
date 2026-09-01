@@ -23,7 +23,8 @@ type Operation string
 
 const (
 	OperationReadOnlineResume         Operation = "read_online_resume"
-	OperationFetchPage                Operation = "fetch_page"
+	OperationListPage                 Operation = "list_page"
+	OperationReadJob                  Operation = "read_job"
 	OperationSubmitAssessment         Operation = "submit_assessment"
 	OperationConfirmAssessmentResults Operation = "confirm_assessment_results"
 	OperationCheckContactStatus       Operation = "check_contact_status"
@@ -60,14 +61,16 @@ const (
 // Attempt contains the stable business keys for exactly one external call or
 // one item in a batched Pi call.
 type Attempt struct {
-	Flow           Flow
-	Operation      Operation
-	DiscoveryRunID int64
-	PlatformJobID  string
-	AttemptNo      int64
-	SearchRole     string
-	SearchCity     string
-	PageNo         int
+	Flow             Flow
+	Operation        Operation
+	DiscoveryRunID   int64
+	PlatformJobID    string
+	AttemptNo        int64
+	SearchRole       string
+	SearchCity       string
+	PageNo           int
+	JobOrdinal       int
+	JobIDFingerprint string
 }
 
 // Trace is returned only after the start record has persisted successfully.
@@ -87,6 +90,7 @@ type AttemptResult struct {
 	ErrorCategory   ErrorCategory
 	ExternalFailure *ExternalFailureEvidence
 	Err             error
+	ErrorRedactions []string
 	OutreachEffect  OutreachEffect
 }
 
@@ -102,6 +106,7 @@ type ExternalFailureEvidence struct {
 var (
 	externalFailureStagePattern = regexp.MustCompile(`^[a-z_]{1,64}$`)
 	upstreamCodePattern         = regexp.MustCompile(`^-?\d{1,10}$`)
+	jobIDFingerprintPattern     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // Start is the fail-closed seam for a new BOSS or Pi attempt. It returns a
@@ -222,7 +227,7 @@ func terminalRecord(at time.Time, trace Trace, attempt Attempt, itemIndex int, r
 		}
 	}
 	if result.Err != nil {
-		chain, truncated := snapshotErrorTree(result.Err)
+		chain, truncated := snapshotErrorTree(result.Err, result.ErrorRedactions...)
 		attrs = append(attrs, slog.Any("error_chain", chain))
 		if truncated {
 			attrs = append(attrs, slog.Bool("error_chain_truncated", true))
@@ -270,6 +275,12 @@ func attemptAttrs(traceID string, attempt Attempt, event string, itemIndex, batc
 	}
 	if attempt.PageNo != 0 {
 		attrs = append(attrs, slog.Int("page_no", attempt.PageNo))
+	}
+	if attempt.JobOrdinal != 0 {
+		attrs = append(attrs, slog.Int("job_ordinal", attempt.JobOrdinal))
+	}
+	if attempt.JobIDFingerprint != "" {
+		attrs = append(attrs, slog.String("job_id_fingerprint", attempt.JobIDFingerprint))
 	}
 	return attrs
 }
@@ -338,11 +349,29 @@ func validateDiscoveryAttempt(attempt Attempt) error {
 	if attempt.DiscoveryRunID <= 0 {
 		return fmt.Errorf("discovery attempt requires discovery run ID")
 	}
-	if attempt.Operation != OperationFetchPage {
+	switch attempt.Operation {
+	case OperationListPage:
+		return validateListPageAttempt(attempt)
+	case OperationReadJob:
+		return validateReadJobAttempt(attempt)
+	default:
 		return fmt.Errorf("unsupported discovery operation %q", attempt.Operation)
 	}
-	if attempt.SearchRole == "" || attempt.SearchCity == "" || attempt.PageNo <= 0 {
-		return fmt.Errorf("fetch_page requires search role, search city, and positive page number")
+}
+
+func validateListPageAttempt(attempt Attempt) error {
+	if attempt.PageNo <= 0 || attempt.SearchRole != "" || attempt.SearchCity != "" ||
+		attempt.PlatformJobID != "" || attempt.JobOrdinal != 0 || attempt.JobIDFingerprint != "" {
+		return fmt.Errorf("list_page requires only a positive page number")
+	}
+	return nil
+}
+
+func validateReadJobAttempt(attempt Attempt) error {
+	if attempt.PageNo <= 0 || attempt.SearchRole != "" || attempt.SearchCity != "" ||
+		attempt.PlatformJobID != "" || attempt.JobOrdinal <= 0 ||
+		!jobIDFingerprintPattern.MatchString(attempt.JobIDFingerprint) {
+		return fmt.Errorf("read_job requires page, positive job ordinal, and stable ID fingerprint")
 	}
 	return nil
 }
@@ -384,8 +413,10 @@ func validateExternalFailure(attempt Attempt, result AttemptResult) error {
 	if result.ExternalFailure == nil {
 		return nil
 	}
-	if result.Outcome != OutcomeFailed || attempt.Operation != OperationFetchPage {
-		return fmt.Errorf("external failure evidence is only valid for failed fetch_page results")
+	if result.Outcome != OutcomeFailed ||
+		(attempt.Operation != OperationListPage &&
+			attempt.Operation != OperationReadJob) {
+		return fmt.Errorf("external failure evidence is only valid for failed discovery reads")
 	}
 	evidence := result.ExternalFailure
 	if evidence.RequestOrdinal < 0 || evidence.DetailOrdinal < 0 ||

@@ -13,9 +13,10 @@ import (
 	"github.com/Russell-Utopia/boss-job-agent/internal/runlog"
 )
 
-// JobDiscovery is the one-page BOSS search owned by this module.
+// JobDiscovery is the BOSS search seam owned by this module.
 type JobDiscovery interface {
-	FetchPage(context.Context, SearchRange, int) (DiscoveryPage, error)
+	ListPage(context.Context, SearchRange, int) (JobPage, error)
+	ReadJob(context.Context, string) (JobObservation, error)
 }
 
 type SearchRange struct {
@@ -45,9 +46,9 @@ type JobObservation struct {
 	PlatformClosedReason string         `json:"platformClosedReason,omitempty"`
 }
 
-type DiscoveryPage struct {
-	Observations []JobObservation `json:"observations"`
-	HasMore      bool             `json:"hasMore"`
+type JobPage struct {
+	PlatformJobIDs []string `json:"platformJobIds"`
+	HasMore        bool     `json:"hasMore"`
 }
 
 type FetchErrorCategory string
@@ -133,17 +134,6 @@ func (r *Rejection) RejectionCode() string {
 
 func (r *Rejection) RejectionReason() string {
 	return r.Reason
-}
-
-// ValidatePage enforces the complete-page contract implemented by production
-// and controlled JobDiscovery adapters.
-func ValidatePage(page DiscoveryPage) error {
-	for index, observation := range page.Observations {
-		if err := validateObservation(observation); err != nil {
-			return fmt.Errorf("discovery page observation %d is unreliable: %w", index+1, err)
-		}
-	}
-	return nil
 }
 
 func validateObservation(observation JobObservation) error {

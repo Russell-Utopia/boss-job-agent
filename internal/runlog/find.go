@@ -18,15 +18,17 @@ const maxJSONLLineBytes = 256 * 1024
 var rotatedLogName = regexp.MustCompile(`^boss-job-agent-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}\.jsonl$`)
 
 type Query struct {
-	TraceID        string
-	Flow           Flow
-	Operation      Operation
-	DiscoveryRunID int64
-	PlatformJobID  string
-	AttemptNo      int64
-	SearchRole     string
-	SearchCity     string
-	PageNo         int
+	TraceID          string
+	Flow             Flow
+	Operation        Operation
+	DiscoveryRunID   int64
+	PlatformJobID    string
+	AttemptNo        int64
+	SearchRole       string
+	SearchCity       string
+	PageNo           int
+	JobOrdinal       int
+	JobIDFingerprint string
 }
 
 type Report struct {
@@ -44,17 +46,19 @@ func (e *IncompleteError) Error() string {
 }
 
 type storedEvent struct {
-	Time           string    `json:"time"`
-	SchemaVersion  int       `json:"schema_version"`
-	TraceID        string    `json:"trace_id"`
-	Flow           Flow      `json:"flow"`
-	Operation      Operation `json:"operation"`
-	DiscoveryRunID int64     `json:"discovery_run_id"`
-	PlatformJobID  string    `json:"platform_job_id"`
-	AttemptNo      int64     `json:"attempt_no"`
-	SearchRole     string    `json:"search_role"`
-	SearchCity     string    `json:"search_city"`
-	PageNo         int       `json:"page_no"`
+	Time             string    `json:"time"`
+	SchemaVersion    int       `json:"schema_version"`
+	TraceID          string    `json:"trace_id"`
+	Flow             Flow      `json:"flow"`
+	Operation        Operation `json:"operation"`
+	DiscoveryRunID   int64     `json:"discovery_run_id"`
+	PlatformJobID    string    `json:"platform_job_id"`
+	AttemptNo        int64     `json:"attempt_no"`
+	SearchRole       string    `json:"search_role"`
+	SearchCity       string    `json:"search_city"`
+	PageNo           int       `json:"page_no"`
+	JobOrdinal       int       `json:"job_ordinal"`
+	JobIDFingerprint string    `json:"job_id_fingerprint"`
 }
 
 type locatedEvent struct {
@@ -209,7 +213,9 @@ func queryIdentityMatches(query Query, event storedEvent) bool {
 func querySearchMatches(query Query, event storedEvent) bool {
 	return (query.SearchRole == "" || query.SearchRole == event.SearchRole) &&
 		(query.SearchCity == "" || query.SearchCity == event.SearchCity) &&
-		(query.PageNo == 0 || query.PageNo == event.PageNo)
+		(query.PageNo == 0 || query.PageNo == event.PageNo) &&
+		(query.JobOrdinal == 0 || query.JobOrdinal == event.JobOrdinal) &&
+		(query.JobIDFingerprint == "" || query.JobIDFingerprint == event.JobIDFingerprint)
 }
 
 func uniqueSorted(values []string) []string {

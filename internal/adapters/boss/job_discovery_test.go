@@ -12,42 +12,37 @@ import (
 	"github.com/Russell-Utopia/boss-job-agent/internal/discovery"
 )
 
-func TestJobDiscoveryFetchesOneCompleteReliablePageThroughKimiWebBridge(t *testing.T) {
+func TestJobDiscoveryListsStableIDsThenReadsOneReliableJob(t *testing.T) {
 	t.Parallel()
 
-	want := discovery.DiscoveryPage{
-		Observations: []discovery.JobObservation{{
-			PlatformJobID:    "boss-job-1",
-			CanonicalURL:     "https://www.zhipin.com/job_detail/boss-job-1.html",
-			JobTitle:         "Go 后端工程师",
-			CompanyName:      "示例科技",
-			City:             "福州",
-			Salary:           "20-30K",
-			Responsibilities: "负责 Go 服务开发",
-			Requirements:     "熟悉 Go 与 SQLite",
-			PlatformStatus:   discovery.PlatformStatusOpen,
-		}},
-		HasMore: false,
-	}
-	rawPage := map[string]any{
+	listJSON := mustEncodeDiscoveryFixture(t, map[string]any{
 		"jobs": []map[string]any{{
-			"platformJobId":          "boss-job-1",
-			"detailPlatformJobId":    "boss-job-1",
-			"platformStatusEvidence": "招聘中",
-			"canonicalUrl":           "https://www.zhipin.com/job_detail/boss-job-1.html",
-			"jobTitle":               "Go 后端工程师",
-			"companyName":            "示例科技",
-			"city":                   "福州",
-			"salary":                 "20-30K",
-			"fullJD":                 "负责 Go 服务开发\n任职要求：熟悉 Go 与 SQLite",
+			"platformJobId": "boss-job-1",
+			"securityId":    "ephemeral-security",
+			"lid":           "ephemeral-list",
+			"jobTitle":      "Go 后端工程师",
+			"companyName":   "示例科技",
+			"city":          "福州",
+			"salary":        "20-30K",
 		}},
 		"hasMore": false,
+	})
+	jobJSON := mustEncodeDiscoveryFixture(t, map[string]any{
+		"platformJobId":          "boss-job-1",
+		"detailPlatformJobId":    "boss-job-1",
+		"platformStatusEvidence": "招聘中",
+		"canonicalUrl":           "https://www.zhipin.com/job_detail/boss-job-1.html",
+		"jobTitle":               "Go 后端工程师",
+		"companyName":            "示例科技",
+		"city":                   "福州",
+		"salary":                 "20-30K",
+		"salaryEvidence":         "readable",
+		"fullJD":                 "负责 Go 服务开发\n任职要求：熟悉 Go 与 SQLite",
+	})
+	fixture := &separatedJobDiscoveryFixture{
+		t:                 t,
+		evaluationResults: []string{listJSON, jobJSON},
 	}
-	encoded, err := json.Marshal(rawPage)
-	if err != nil {
-		t.Fatalf("encode discovery page fixture: %v", err)
-	}
-	fixture := &successfulJobDiscoveryFixture{t: t, encodedPage: string(encoded)}
 	server := httptest.NewServer(fixture)
 	t.Cleanup(server.Close)
 	adapter := NewJobDiscovery(server.URL, server.Client())
@@ -55,52 +50,111 @@ func TestJobDiscoveryFetchesOneCompleteReliablePageThroughKimiWebBridge(t *testi
 		Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职",
 	}
 
-	got, err := adapter.FetchPage(t.Context(), searchRange, 3)
+	page, err := adapter.ListPage(t.Context(), searchRange, 3)
 	if err != nil {
-		t.Fatalf("fetch discovery page: %v", err)
+		t.Fatalf("list discovery page: %v", err)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("discovery page = %#v, want %#v", got, want)
+	if want := (discovery.JobPage{PlatformJobIDs: []string{"boss-job-1"}, HasMore: false}); !reflect.DeepEqual(page, want) {
+		t.Errorf("discovery list = %#v, want %#v", page, want)
 	}
-	if !reflect.DeepEqual(fixture.actions, []string{"find_tab", "navigate", "evaluate"}) {
+	job, err := adapter.ReadJob(t.Context(), "boss-job-1")
+	if err != nil {
+		t.Fatalf("read discovery job: %v", err)
+	}
+	wantJob := discovery.JobObservation{
+		PlatformJobID: "boss-job-1", CanonicalURL: "https://www.zhipin.com/job_detail/boss-job-1.html",
+		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		PlatformStatus: discovery.PlatformStatusOpen,
+	}
+	if !reflect.DeepEqual(job, wantJob) {
+		t.Errorf("discovery job = %#v, want %#v", job, wantJob)
+	}
+	if !reflect.DeepEqual(fixture.actions, []string{"find_tab", "navigate", "evaluate", "evaluate"}) {
 		t.Errorf("WebBridge actions = %#v", fixture.actions)
 	}
-	for _, expected := range []string{
-		"Go 后端工程师", "福州", "20-30K", "全职", `"page":3`,
-		"/wapi/zpgeek/search/joblist.json", "/wapi/zpgeek/job/detail.json", "hasMore",
-		"resolveSalaryOption", "conditions.salaryList", "requestOrdinal++",
-		`request("city_metadata", 0`, `request("filter_conditions", 0`,
-		`request("job_list", 0`, `request("job_detail", detailOrdinal`,
-	} {
-		if !strings.Contains(fixture.evaluationScript, expected) {
-			t.Errorf("evaluation script does not contain %q", expected)
-		}
+	if len(fixture.evaluationScripts) != 2 {
+		t.Fatalf("evaluation scripts = %d, want 2", len(fixture.evaluationScripts))
+	}
+	if strings.Contains(fixture.evaluationScripts[0], "/wapi/zpgeek/job/detail.json") {
+		t.Error("ListPage script reads job details")
+	}
+	if !strings.Contains(fixture.evaluationScripts[1], "/wapi/zpgeek/job/detail.json") ||
+		strings.Contains(fixture.evaluationScripts[1], "/wapi/zpgeek/search/joblist.json") {
+		t.Error("ReadJob script does not isolate one detail read")
 	}
 }
 
-func TestJobDiscoveryRejectsTheWholePageWhenOneObservationIsUnreliable(t *testing.T) {
+func TestJobDiscoveryPreservesUnavailableSalaryAndRejectsPrivateUseText(t *testing.T) {
 	t.Parallel()
 
-	page := discovery.DiscoveryPage{
-		Observations: []discovery.JobObservation{{
-			JobTitle: "缺少稳定 ID 的岗位",
-		}},
-		HasMore: false,
+	tests := []struct {
+		name           string
+		salary         string
+		salaryEvidence string
+		wantSalary     string
+		wantError      bool
+	}{
+		{name: "unavailable salary remains empty", salaryEvidence: "unavailable"},
+		{
+			name: "private-use salary cannot be claimed as readable", salary: "\ue031\ue032K",
+			salaryEvidence: "readable", wantError: true,
+		},
 	}
-	encoded, err := json.Marshal(page)
-	if err != nil {
-		t.Fatalf("encode unreliable discovery page: %v", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			job, script, err := readDiscoveryFixtureJob(t, map[string]any{
+				"platformJobId": "boss-job-1", "detailPlatformJobId": "boss-job-1",
+				"platformStatusEvidence": "招聘中",
+				"canonicalUrl":           "https://www.zhipin.com/job_detail/boss-job-1.html",
+				"jobTitle":               "Go 后端工程师", "companyName": "示例科技", "city": "福州",
+				"salary": test.salary, "salaryEvidence": test.salaryEvidence,
+				"fullJD": "负责 Go 服务开发\n任职要求：熟悉 Go 与 SQLite",
+			})
+			if test.wantError {
+				var fetchErr *discovery.FetchError
+				if !errors.As(err, &fetchErr) || fetchErr.Category != discovery.FetchErrorInvalidResponse {
+					t.Fatalf("read salary error = %v, want invalid_response", err)
+				}
+				return
+			}
+			if err != nil || job.Salary != test.wantSalary {
+				t.Fatalf("read salary = %q, err=%v, want %q", job.Salary, err, test.wantSalary)
+			}
+			for _, want := range []string{"salaryEvidence", "hasPrivateUseCharacters"} {
+				if !strings.Contains(script, want) {
+					t.Errorf("ReadJob script does not contain %q", want)
+				}
+			}
+		})
 	}
-	fixture := &successfulJobDiscoveryFixture{t: t, encodedPage: string(encoded)}
+}
+
+func TestJobDiscoveryRejectsOneUnreliableJobWithoutInvalidatingTheList(t *testing.T) {
+	t.Parallel()
+
+	listJSON := mustEncodeDiscoveryFixture(t, reliableListedJobFixture())
+	jobJSON := mustEncodeDiscoveryFixture(t, map[string]any{
+		"platformJobId": "boss-job-1", "detailPlatformJobId": "boss-job-1",
+		"platformStatusEvidence": "招聘中", "jobTitle": "缺少可靠 JD 的岗位",
+		"salary": "20-30K", "salaryEvidence": "readable",
+	})
+	fixture := &separatedJobDiscoveryFixture{t: t, evaluationResults: []string{listJSON, jobJSON}}
 	server := httptest.NewServer(fixture)
 	t.Cleanup(server.Close)
+	adapter := NewJobDiscovery(server.URL, server.Client())
 
-	_, err = NewJobDiscovery(server.URL, server.Client()).FetchPage(t.Context(), discovery.SearchRange{
+	page, err := adapter.ListPage(t.Context(), discovery.SearchRange{
 		Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职",
 	}, 1)
+	if err != nil || !reflect.DeepEqual(page.PlatformJobIDs, []string{"boss-job-1"}) {
+		t.Fatalf("list unreliable job page = %#v, err=%v", page, err)
+	}
+	_, err = adapter.ReadJob(t.Context(), "boss-job-1")
 	var fetchErr *discovery.FetchError
 	if !errors.As(err, &fetchErr) {
-		t.Fatalf("fetch error = %v, want discovery.FetchError", err)
+		t.Fatalf("read error = %v, want discovery.FetchError", err)
 	}
 	if fetchErr.Category != discovery.FetchErrorInvalidResponse {
 		t.Errorf("fetch error category = %q, want invalid_response", fetchErr.Category)
@@ -157,27 +211,28 @@ func TestJobDiscoveryRejectsAmbiguousJDAndUnconfirmedLiveDetail(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			rawPage := map[string]any{
-				"jobs": []map[string]any{{
-					"platformJobId": "boss-job-1", "detailPlatformJobId": test.detailPlatformJobID,
-					"platformStatusEvidence": test.platformStatus,
-					"canonicalUrl":           "https://www.zhipin.com/job_detail/boss-job-1.html",
-					"jobTitle":               "Go 后端工程师", "companyName": "示例科技",
-					"city": "福州", "salary": "20-30K", "fullJD": test.fullJD,
-				}},
-				"hasMore": false,
+			listJSON := mustEncodeDiscoveryFixture(t, reliableListedJobFixture())
+			jobJSON := mustEncodeDiscoveryFixture(t, map[string]any{
+				"platformJobId": "boss-job-1", "detailPlatformJobId": test.detailPlatformJobID,
+				"platformStatusEvidence": test.platformStatus,
+				"canonicalUrl":           "https://www.zhipin.com/job_detail/boss-job-1.html",
+				"jobTitle":               "Go 后端工程师", "companyName": "示例科技",
+				"city": "福州", "salary": "20-30K", "salaryEvidence": "readable", "fullJD": test.fullJD,
+			})
+			fixture := &separatedJobDiscoveryFixture{
+				t: t, evaluationResults: []string{listJSON, jobJSON},
 			}
-			encoded, err := json.Marshal(rawPage)
-			if err != nil {
-				t.Fatalf("encode raw page: %v", err)
-			}
-			fixture := &successfulJobDiscoveryFixture{t: t, encodedPage: string(encoded)}
 			server := httptest.NewServer(fixture)
 			t.Cleanup(server.Close)
+			adapter := NewJobDiscovery(server.URL, server.Client())
 
-			_, err = NewJobDiscovery(server.URL, server.Client()).FetchPage(t.Context(), discovery.SearchRange{
+			_, err := adapter.ListPage(t.Context(), discovery.SearchRange{
 				Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职",
 			}, 1)
+			if err != nil {
+				t.Fatalf("list discovery page: %v", err)
+			}
+			_, err = adapter.ReadJob(t.Context(), "boss-job-1")
 			var fetchErr *discovery.FetchError
 			if !errors.As(err, &fetchErr) || fetchErr.Category != discovery.FetchErrorInvalidResponse {
 				t.Fatalf("fetch error = %v, want invalid_response", err)
@@ -186,14 +241,58 @@ func TestJobDiscoveryRejectsAmbiguousJDAndUnconfirmedLiveDetail(t *testing.T) {
 	}
 }
 
-type successfulJobDiscoveryFixture struct {
-	t                *testing.T
-	encodedPage      string
-	actions          []string
-	evaluationScript string
+func readDiscoveryFixtureJob(
+	t *testing.T,
+	rawJob map[string]any,
+) (discovery.JobObservation, string, error) {
+	t.Helper()
+	fixture := &separatedJobDiscoveryFixture{
+		t: t,
+		evaluationResults: []string{
+			mustEncodeDiscoveryFixture(t, reliableListedJobFixture()),
+			mustEncodeDiscoveryFixture(t, rawJob),
+		},
+	}
+	server := httptest.NewServer(fixture)
+	t.Cleanup(server.Close)
+	adapter := NewJobDiscovery(server.URL, server.Client())
+	_, err := adapter.ListPage(t.Context(), discovery.SearchRange{
+		Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职",
+	}, 1)
+	if err != nil {
+		t.Fatalf("list discovery page: %v", err)
+	}
+	job, err := adapter.ReadJob(t.Context(), "boss-job-1")
+	return job, fixture.evaluationScripts[1], err
 }
 
-func (f *successfulJobDiscoveryFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func reliableListedJobFixture() map[string]any {
+	return map[string]any{
+		"jobs": []map[string]any{{
+			"platformJobId": "boss-job-1", "securityId": "ephemeral-security", "lid": "ephemeral-list",
+			"jobTitle": "Go 后端工程师", "companyName": "示例科技", "city": "福州", "salary": "20-30K",
+		}},
+		"hasMore": false,
+	}
+}
+
+func mustEncodeDiscoveryFixture(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("encode discovery fixture: %v", err)
+	}
+	return string(encoded)
+}
+
+type separatedJobDiscoveryFixture struct {
+	t                 *testing.T
+	evaluationResults []string
+	actions           []string
+	evaluationScripts []string
+}
+
+func (f *separatedJobDiscoveryFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var command struct {
 		Action  string         `json:"action"`
 		Args    map[string]any `json:"args"`
@@ -221,9 +320,16 @@ func (f *successfulJobDiscoveryFixture) ServeHTTP(w http.ResponseWriter, r *http
 			"ok": true, "data": map[string]any{"success": true, "url": jobSearchURL, "tabId": 43},
 		})
 	case "evaluate":
-		f.evaluationScript, _ = command.Args["code"].(string)
+		script, _ := command.Args["code"].(string)
+		f.evaluationScripts = append(f.evaluationScripts, script)
+		resultIndex := len(f.evaluationScripts) - 1
+		if resultIndex >= len(f.evaluationResults) {
+			f.t.Errorf("unexpected evaluation %d", resultIndex+1)
+			http.Error(w, "unexpected evaluation", http.StatusBadRequest)
+			return
+		}
 		writeFixtureJSON(f.t, w, map[string]any{
-			"ok": true, "data": map[string]any{"type": "string", "value": f.encodedPage},
+			"ok": true, "data": map[string]any{"type": "string", "value": f.evaluationResults[resultIndex]},
 		})
 	default:
 		f.t.Errorf("unexpected WebBridge action %q", command.Action)

@@ -26,27 +26,30 @@ func TestJobDiscoveryLiveReadsAuthenticatedBossPages(t *testing.T) {
 	adapter := NewDefaultJobDiscovery()
 	seen := make(map[string]struct{})
 	for pageNo := 1; pageNo <= 3; pageNo++ {
-		page, err := adapter.FetchPage(t.Context(), searchRange, pageNo)
+		page, err := adapter.ListPage(t.Context(), searchRange, pageNo)
 		if err != nil {
 			var fetchErr *discovery.FetchError
 			if !errors.As(err, &fetchErr) {
 				t.Errorf("live failure has no stable discovery.FetchError classification: %v", err)
 			}
-			t.Fatalf("fetch authenticated BOSS job page %d: %v", pageNo, err)
-		}
-		if err := discovery.ValidatePage(page); err != nil {
-			t.Fatalf("live page %d contract: %v", pageNo, err)
+			t.Fatalf("list authenticated BOSS job page %d: %v", pageNo, err)
 		}
 		newJobs := 0
-		for _, observation := range page.Observations {
-			if _, exists := seen[observation.PlatformJobID]; !exists {
-				seen[observation.PlatformJobID] = struct{}{}
+		observations := make([]discovery.JobObservation, 0, len(page.PlatformJobIDs))
+		for _, platformJobID := range page.PlatformJobIDs {
+			observation, err := adapter.ReadJob(t.Context(), platformJobID)
+			if err != nil {
+				t.Fatalf("read authenticated BOSS job %q on page %d: %v", platformJobID, pageNo, err)
+			}
+			observations = append(observations, observation)
+			if _, exists := seen[platformJobID]; !exists {
+				seen[platformJobID] = struct{}{}
 				newJobs++
 			}
 		}
 		t.Logf(
 			"BOSS discovery page %d verified: jobs=%d new_stable_ids=%d total_stable_ids=%d has_more=%t samples=%v",
-			pageNo, len(page.Observations), newJobs, len(seen), page.HasMore, liveJobSamples(page),
+			pageNo, len(page.PlatformJobIDs), newJobs, len(seen), page.HasMore, liveJobSamples(observations),
 		)
 		if !page.HasMore {
 			return
@@ -54,10 +57,10 @@ func TestJobDiscoveryLiveReadsAuthenticatedBossPages(t *testing.T) {
 	}
 }
 
-func liveJobSamples(page discovery.DiscoveryPage) []string {
-	limit := min(3, len(page.Observations))
+func liveJobSamples(observations []discovery.JobObservation) []string {
+	limit := min(3, len(observations))
 	samples := make([]string, 0, limit)
-	for _, observation := range page.Observations[:limit] {
+	for _, observation := range observations[:limit] {
 		samples = append(samples, observation.JobTitle+" / "+observation.CompanyName+" / "+observation.Salary)
 	}
 	return samples

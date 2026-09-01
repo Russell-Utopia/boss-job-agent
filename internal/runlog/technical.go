@@ -10,13 +10,14 @@ import (
 // TechnicalError is one operational failure that is not itself an external
 // attempt result. Business tables keep only the state required for recovery.
 type TechnicalError struct {
-	Flow           Flow
-	Stage          string
-	TraceID        string
-	DiscoveryRunID int64
-	PlatformJobID  string
-	AttemptNo      int64
-	Err            error
+	Flow            Flow
+	Stage           string
+	TraceID         string
+	DiscoveryRunID  int64
+	PlatformJobID   string
+	AttemptNo       int64
+	Err             error
+	ErrorRedactions []string
 }
 
 func (l *Log) RecordTechnicalError(ctx context.Context, failure TechnicalError) error {
@@ -31,7 +32,7 @@ func (l *Log) RecordTechnicalError(ctx context.Context, failure TechnicalError) 
 			return fmt.Errorf("generate technical error trace ID: %w", err)
 		}
 	}
-	chain, truncated := snapshotErrorTree(failure.Err)
+	chain, truncated := snapshotErrorTree(failure.Err, failure.ErrorRedactions...)
 	record := slog.NewRecord(l.now().UTC(), slog.LevelError, "technical error", 0)
 	attrs := []slog.Attr{
 		slog.Int("schema_version", 1),

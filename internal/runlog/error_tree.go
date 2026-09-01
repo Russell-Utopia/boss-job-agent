@@ -24,7 +24,7 @@ type errorNode struct {
 	MessageTruncated bool   `json:"message_truncated,omitempty"`
 }
 
-func snapshotErrorTree(root error) ([]errorNode, bool) {
+func snapshotErrorTree(root error, redactedValues ...string) ([]errorNode, bool) {
 	nodes := make([]errorNode, 0, 4)
 	truncated := false
 	var visit func(error, string, int)
@@ -36,7 +36,7 @@ func snapshotErrorTree(root error) ([]errorNode, bool) {
 			truncated = true
 			return
 		}
-		message, messageTruncated := sanitizeErrorMessage(current.Error())
+		message, messageTruncated := sanitizeErrorMessage(current.Error(), redactedValues)
 		nodes = append(nodes, errorNode{
 			Path:             path,
 			Type:             fmt.Sprintf("%T", current),
@@ -57,7 +57,12 @@ func snapshotErrorTree(root error) ([]errorNode, bool) {
 	return nodes, truncated
 }
 
-func sanitizeErrorMessage(message string) (string, bool) {
+func sanitizeErrorMessage(message string, redactedValues []string) (string, bool) {
+	for _, value := range redactedValues {
+		if value != "" {
+			message = strings.ReplaceAll(message, value, "[REDACTED]")
+		}
+	}
 	if match := sensitiveAssignmentPattern.FindStringSubmatchIndex(message); match != nil {
 		message = message[:match[0]] + message[match[2]:match[3]] + "=[REDACTED]"
 	}

@@ -47,20 +47,21 @@ func (r *webResumeReader) Read(context.Context) (onlineresume.ResumeContent, err
 
 type webJobDiscovery struct{}
 
-func (d *webJobDiscovery) FetchPage(
+func (d *webJobDiscovery) ListPage(
 	context.Context,
 	discovery.SearchRange,
 	int,
-) (discovery.DiscoveryPage, error) {
-	jobWithoutSalary := webDiscoveredJob("boss-job-2", "Go 平台工程师", "另一科技")
-	jobWithoutSalary.Salary = ""
-	return discovery.DiscoveryPage{
-		Observations: []discovery.JobObservation{
-			webDiscoveredJob("boss-job-1", "Go 后端工程师", "示例科技"),
-			jobWithoutSalary,
-		},
-		HasMore: false,
-	}, nil
+) (discovery.JobPage, error) {
+	return discovery.JobPage{PlatformJobIDs: []string{"boss-job-1", "boss-job-2"}, HasMore: false}, nil
+}
+
+func (d *webJobDiscovery) ReadJob(_ context.Context, platformJobID string) (discovery.JobObservation, error) {
+	if platformJobID == "boss-job-2" {
+		job := webDiscoveredJob(platformJobID, "Go 平台工程师", "另一科技")
+		job.Salary = ""
+		return job, nil
+	}
+	return webDiscoveredJob(platformJobID, "Go 后端工程师", "示例科技"), nil
 }
 
 func webDiscoveredJob(platformJobID, title, company string) discovery.JobObservation {

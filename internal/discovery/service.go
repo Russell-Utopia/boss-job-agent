@@ -21,6 +21,7 @@ var workerSequence atomic.Uint64
 // Service owns job discovery runs.
 type Service struct {
 	mu             sync.Mutex
+	db             *sql.DB
 	resumeVersions *onlineresume.Versions
 	pool           *jobpool.Pool
 	discovery      JobDiscovery
@@ -40,6 +41,7 @@ func New(
 	now func() time.Time,
 ) *Service {
 	return &Service{
+		db:             db,
 		resumeVersions: resumeVersions,
 		pool:           pool,
 		discovery:      discovery,

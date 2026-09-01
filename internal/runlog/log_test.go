@@ -100,13 +100,13 @@ func TestTechnicalErrorPersistsDiscoveryIdentityAndErrorTree(t *testing.T) {
 func writeFailedAttempt(t *testing.T, logs *Log) Trace {
 	t.Helper()
 	trace, err := logs.Start(t.Context(), Attempt{
-		Flow:           FlowDiscovery,
-		Operation:      OperationFetchPage,
-		DiscoveryRunID: 42,
-		AttemptNo:      7,
-		SearchRole:     "Go工程师",
-		SearchCity:     "福州",
-		PageNo:         3,
+		Flow:             FlowDiscovery,
+		Operation:        OperationReadJob,
+		DiscoveryRunID:   42,
+		AttemptNo:        7,
+		PageNo:           3,
+		JobOrdinal:       4,
+		JobIDFingerprint: "9542806604c794eebc1517859836f31a3cf607ba0363d16be187120bb497c5fb",
 	})
 	if err != nil {
 		t.Fatalf("start attempt: %v", err)
@@ -146,12 +146,12 @@ func assertFailureRecord(t *testing.T, finish map[string]any, traceID string) {
 	assertJSONField(t, finish, "outcome", "failed")
 	assertJSONField(t, finish, "trace_id", traceID)
 	assertJSONField(t, finish, "flow", "discovery")
-	assertJSONField(t, finish, "operation", "fetch_page")
+	assertJSONField(t, finish, "operation", "read_job")
 	assertJSONField(t, finish, "discovery_run_id", float64(42))
 	assertJSONField(t, finish, "attempt_no", float64(7))
-	assertJSONField(t, finish, "search_role", "Go工程师")
-	assertJSONField(t, finish, "search_city", "福州")
 	assertJSONField(t, finish, "page_no", float64(3))
+	assertJSONField(t, finish, "job_ordinal", float64(4))
+	assertJSONField(t, finish, "job_id_fingerprint", "9542806604c794eebc1517859836f31a3cf607ba0363d16be187120bb497c5fb")
 	assertJSONField(t, finish, "error_category", "transient")
 	assertJSONField(t, finish, "request_ordinal", float64(7))
 	assertJSONField(t, finish, "stage", "job_detail")
@@ -413,11 +413,9 @@ func waitForHealthy(t *testing.T, ctx context.Context, logs *Log) {
 func testDiscoveryAttempt(attemptNo int64) Attempt {
 	return Attempt{
 		Flow:           FlowDiscovery,
-		Operation:      OperationFetchPage,
+		Operation:      OperationListPage,
 		DiscoveryRunID: 42,
 		AttemptNo:      attemptNo,
-		SearchRole:     "Go工程师",
-		SearchCity:     "福州",
 		PageNo:         1,
 	}
 }
@@ -430,12 +428,12 @@ func TestStartRejectsIncompleteExternalAttemptBeforeWriting(t *testing.T) {
 	t.Cleanup(func() { _ = logs.Close() })
 	_, err := logs.Start(t.Context(), Attempt{
 		Flow:           FlowDiscovery,
-		Operation:      OperationFetchPage,
+		Operation:      OperationListPage,
 		DiscoveryRunID: 42,
 		AttemptNo:      1,
 	})
 	if err == nil {
-		t.Fatal("incomplete fetch_page attempt was accepted")
+		t.Fatal("incomplete list_page attempt was accepted")
 	}
 	if records := readJSONL(t, path); len(records) != 1 {
 		t.Fatalf("record count = %d, want only startup record", len(records))
