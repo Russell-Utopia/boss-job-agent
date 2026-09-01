@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.PageTitle}} · BOSS Job Agent</title>
   <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
 </head>
 <body>
   <aside class="sidebar">
@@ -289,6 +290,66 @@
         </form>
         <p class="muted">开关只控制新的自动入队；关闭后，已有待鉴定、鉴定中和自动重试仍会继续。调低上限不会取消已经开始的岗位。</p>
       </article>
+    </section>
+
+    <section class="card policy-optimization" id="policy-optimization">
+      <div class="detail-heading">
+        <div>
+          <p class="eyebrow">策略优化</p>
+          <h2>生成临时策略候选稿</h2>
+          <p class="muted">只使用当前在线简历和仍对应当前 JD 的人工“适合/不适合”复核。候选稿、样本选择和验收报告只存在本页面，离开后永久消失。</p>
+        </div>
+        <span class="safe-badge">不会改写岗位结论</span>
+      </div>
+      {{if .State.PolicyOptimization.CurrentResume}}
+      <div class="policy-session" data-sample-count="{{len .State.PolicyOptimization.Samples}}">
+        <div class="policy-sample-picker">
+          <div class="policy-picker-heading">
+            <h3>生成样本</h3>
+            <span class="muted">{{len .State.PolicyOptimization.Samples}} 条有效人工复核</span>
+          </div>
+          {{if .State.PolicyOptimization.Samples}}
+          <p class="muted">默认关闭验收时会使用全部样本；开启验收后默认选择约一半，可在生成前调整。</p>
+          <div class="policy-samples">
+            {{range .State.PolicyOptimization.Samples}}
+            <label class="policy-sample">
+              <input type="checkbox" class="policy-sample-checkbox" value="{{.JobID}}" checked>
+              <span><strong>{{.JobTitle}}</strong><small>{{.CompanyName}} · {{.City}} · {{if eq .Verdict "suitable"}}人工适合{{else}}人工不适合{{end}}</small></span>
+            </label>
+            {{end}}
+          </div>
+          <label class="assessment-toggle policy-validation-toggle">
+            <input type="checkbox" id="policy-validation-enabled">
+            同时验收候选策略（会产生额外模型调用）
+          </label>
+          <p class="reason">候选稿依据在线简历 v{{.State.PolicyOptimization.CurrentResume.Version}} 和当前策略 v{{.State.PolicyOptimization.ActivePolicy.Version}} 生成。</p>
+          <button type="button" id="policy-generate">生成候选策略</button>
+          {{else}}
+          <p class="muted">当前还没有与 JD 一致的有效人工复核；先在岗位详情页完成人工复核，才能生成候选稿。</p>
+          {{end}}
+        </div>
+        <div id="policy-draft-panel" class="policy-draft-panel" hidden>
+          <div class="policy-picker-heading">
+            <h3>当前候选稿</h3>
+            <span id="policy-draft-validation-state" class="safe-badge">未经独立验收</span>
+          </div>
+          <p class="muted">生成时间：<span id="policy-draft-generated-at"></span> · 在线简历 v<span id="policy-draft-resume-version"></span> · 策略 v<span id="policy-draft-policy-version"></span> · 生成样本 <span id="policy-draft-sample-count"></span> 条</p>
+          <label for="policy-draft-text">完整、可编辑的候选策略</label>
+          <textarea id="policy-draft-text" rows="9"></textarea>
+          <div class="policy-diff-heading"><h4>逐行差异</h4><span class="muted">删除为红色，新增为绿色；此处计算不调用模型</span></div>
+          <div id="policy-diff" class="policy-diff" aria-live="polite"></div>
+          <div id="policy-validation-report" class="policy-validation-report" hidden></div>
+          <div class="button-row">
+            <button type="button" id="policy-validate" disabled>验收当前候选稿</button>
+            <button type="button" id="policy-adopt">采用此策略</button>
+            <button type="button" id="policy-discard" class="secondary-button">取消并丢弃</button>
+            <button type="button" id="policy-regenerate" class="secondary-button">重新生成</button>
+          </div>
+        </div>
+      </div>
+      {{else}}
+      <p class="muted">后台还没有保存在线简历；刷新并保存后才能生成策略候选稿。</p>
+      {{end}}
     </section>
     {{end}}
 

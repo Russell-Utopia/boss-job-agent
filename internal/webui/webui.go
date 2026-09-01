@@ -20,7 +20,7 @@ import (
 	"github.com/Russell-Utopia/boss-job-agent/internal/runlog"
 )
 
-//go:embed templates/*.html assets/*.css
+//go:embed templates/*.html assets/*.css assets/*.js
 var files embed.FS
 
 var pageTemplate = template.Must(template.New("page.html").Funcs(template.FuncMap{
@@ -130,14 +130,15 @@ type pageData struct {
 }
 
 type startupState struct {
-	CurrentResume   *onlineresume.Version      `json:"currentResume"`
-	ActivePolicy    assessment.Policy          `json:"activePolicy"`
-	Automation      automationsettings.View    `json:"automation"`
-	Actions         firstUseActions            `json:"actions"`
-	RunlogHealth    runlog.Health              `json:"runlogHealth"`
-	ActiveResumeUse *discovery.ActiveResumeUse `json:"activeDiscoveryResumeUse,omitempty"`
-	DiscoveryRun    *discovery.RunView         `json:"discoveryRun,omitempty"`
-	Jobs            []jobpool.JobView          `json:"jobs"`
+	CurrentResume      *onlineresume.Version             `json:"currentResume"`
+	ActivePolicy       assessment.Policy                 `json:"activePolicy"`
+	PolicyOptimization assessment.PolicyOptimizationView `json:"policyOptimization"`
+	Automation         automationsettings.View           `json:"automation"`
+	Actions            firstUseActions                   `json:"actions"`
+	RunlogHealth       runlog.Health                     `json:"runlogHealth"`
+	ActiveResumeUse    *discovery.ActiveResumeUse        `json:"activeDiscoveryResumeUse,omitempty"`
+	DiscoveryRun       *discovery.RunView                `json:"discoveryRun,omitempty"`
+	Jobs               []jobpool.JobView                 `json:"jobs"`
 }
 
 type resumeFeedback struct {
@@ -179,6 +180,7 @@ func New(dependencies Dependencies) http.Handler {
 	mux.HandleFunc("POST /discovery-runs/{runID}/continue", h.discoveryCommandPage(h.dependencies.Discovery.Continue))
 	mux.HandleFunc("POST /discovery-runs/{runID}/end-early", h.discoveryCommandPage(h.dependencies.Discovery.EndEarly))
 	mux.HandleFunc("GET /assets/app.css", serveCSS)
+	mux.HandleFunc("GET /assets/app.js", serveJS)
 	mux.HandleFunc("GET /api/startup-state", h.startupState)
 	mux.HandleFunc("GET /api/runlog/health", h.runlogHealth)
 	mux.HandleFunc("POST /api/runlog/recheck", h.recheckRunlogAPI)
@@ -190,6 +192,9 @@ func New(dependencies Dependencies) http.Handler {
 	mux.HandleFunc("POST /api/assessments", h.assessmentCommandAPI(h.dependencies.Jobs.QueueAssessments))
 	mux.HandleFunc("POST /api/assessments/retry", h.assessmentCommandAPI(h.dependencies.Jobs.RetryAssessmentFailures))
 	mux.HandleFunc("POST /api/outreach/real", h.queueReal)
+	mux.HandleFunc("POST /api/policy/draft", h.generatePolicyDraft)
+	mux.HandleFunc("POST /api/policy/validate", h.validatePolicyDraft)
+	mux.HandleFunc("POST /api/policy/adopt", h.adoptPolicy)
 	return mux
 }
 
@@ -335,7 +340,7 @@ func (h *handler) jobsState(ctx context.Context) (startupState, error) {
 }
 
 func (h *handler) assessmentsState(ctx context.Context) (startupState, error) {
-	policy, err := h.dependencies.Assessment.GetActivePolicy(ctx)
+	optimization, err := h.dependencies.Assessment.GetPolicyOptimization(ctx)
 	if err != nil {
 		return startupState{}, err
 	}
@@ -344,10 +349,73 @@ func (h *handler) assessmentsState(ctx context.Context) (startupState, error) {
 		return startupState{}, err
 	}
 	return startupState{
-		ActivePolicy: policy,
+		ActivePolicy: optimization.ActivePolicy, PolicyOptimization: optimization,
 		Automation:   settings,
 		RunlogHealth: h.dependencies.Runlog.Health(),
 	}, nil
+}
+
+func (h *handler) generatePolicyDraft(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		JobIDs            []int64 `json:"jobIds"`
+		ValidationEnabled bool    `json:"validationEnabled"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	draft, err := h.dependencies.Assessment.GeneratePolicyDraft(r.Context(), request.JobIDs)
+	if err != nil {
+		h.writePolicyError(w, err)
+		return
+	}
+	draft.ValidationEnabled = request.ValidationEnabled
+	writeJSON(w, http.StatusOK, draft)
+}
+
+func (h *handler) validatePolicyDraft(w http.ResponseWriter, r *http.Request) {
+	var draft assessment.PolicyDraft
+	if !decodeJSON(w, r, &draft) {
+		return
+	}
+	report, err := h.dependencies.Assessment.ValidatePolicyDraft(r.Context(), draft)
+	if err != nil {
+		h.writePolicyError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (h *handler) adoptPolicy(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Text            string `json:"text"`
+		ChangeNote      string `json:"changeNote"`
+		PolicyVersionID int64  `json:"policyVersionId"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	rules, err := assessment.ParsePolicyRules(request.Text)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "policy_rules_required", "reason": "策略必须包含至少一条完整规则"})
+		return
+	}
+	versionID, err := h.dependencies.Assessment.CreatePolicyVersionIfCurrent(r.Context(), rules, request.ChangeNote, request.PolicyVersionID)
+	if err != nil {
+		h.writePolicyError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int64{"policyVersionId": versionID})
+}
+
+func (h *handler) writePolicyError(w http.ResponseWriter, err error) {
+	var rejection businessRejection
+	if errors.As(err, &rejection) {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"code": rejection.RejectionCode(), "reason": rejection.RejectionReason(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"reason": "策略操作失败，请稍后重试"})
 }
 
 func (h *handler) configureAssessmentPage(w http.ResponseWriter, r *http.Request) {
@@ -509,6 +577,16 @@ func serveCSS(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	_, _ = w.Write(content)
+}
+
+func serveJS(w http.ResponseWriter, _ *http.Request) {
+	content, err := files.ReadFile("assets/app.js")
+	if err != nil {
+		http.Error(w, "无法读取页面脚本", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	_, _ = w.Write(content)
 }
 

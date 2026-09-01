@@ -27,6 +27,8 @@ const (
 	OperationReadJob                  Operation = "read_job"
 	OperationSubmitAssessment         Operation = "submit_assessment"
 	OperationConfirmAssessmentResults Operation = "confirm_assessment_results"
+	OperationGeneratePolicy           Operation = "generate_policy"
+	OperationValidatePolicy           Operation = "validate_policy"
 	OperationCheckContactStatus       Operation = "check_contact_status"
 	OperationSendFirstContact         Operation = "send_first_contact"
 )
@@ -390,9 +392,26 @@ func validateReadJobAttempt(attempt Attempt) error {
 }
 
 func validateAssessmentAttempt(attempt Attempt) error {
+	if attempt.Operation == OperationGeneratePolicy || attempt.Operation == OperationValidatePolicy {
+		return validatePolicyAttempt(attempt)
+	}
 	if attempt.PlatformJobID == "" {
 		return fmt.Errorf("assessment attempt requires platform job ID")
 	}
+	return validateAssessmentOperation(attempt)
+}
+
+func validatePolicyAttempt(attempt Attempt) error {
+	if attempt.AttemptNo != 1 {
+		return fmt.Errorf("policy attempt requires attempt number 1")
+	}
+	if attempt.PlatformJobID != "" || attempt.DiscoveryRunID != 0 || attempt.SearchRole != "" || attempt.SearchCity != "" || attempt.PageNo != 0 || attempt.JobOrdinal != 0 || attempt.JobIDFingerprint != "" {
+		return fmt.Errorf("policy attempt cannot contain a platform job")
+	}
+	return nil
+}
+
+func validateAssessmentOperation(attempt Attempt) error {
 	if attempt.Operation != OperationSubmitAssessment && attempt.Operation != OperationConfirmAssessmentResults {
 		return fmt.Errorf("unsupported assessment operation %q", attempt.Operation)
 	}

@@ -3,6 +3,11 @@ SELECT id, version_no, resume_json, resume_hash, created_at
 FROM online_resume_versions
 WHERE is_current = 1;
 
+-- name: GetOnlineResumeVersion :one
+SELECT id, version_no, resume_json, resume_hash, created_at
+FROM online_resume_versions
+WHERE id = sqlc.arg(resume_id);
+
 -- name: GetNextOnlineResumeVersionNumber :one
 SELECT COALESCE(MAX(version_no), 0) + 1
 FROM online_resume_versions;

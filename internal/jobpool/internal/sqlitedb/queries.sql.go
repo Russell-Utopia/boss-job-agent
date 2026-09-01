@@ -624,6 +624,77 @@ func (q *Queries) GetPlatformJob(ctx context.Context, jobID int64) (PlatformJob,
 	return i, err
 }
 
+const listEffectiveHumanReviews = `-- name: ListEffectiveHumanReviews :many
+SELECT
+    id,
+    platform_job_id,
+    canonical_url,
+    job_title,
+    company_name,
+    city_text,
+    salary_text,
+    jd_json,
+    jd_hash,
+    human_verdict,
+    human_reviewed_at,
+    human_review_note
+FROM platform_jobs
+WHERE human_verdict IN ('suitable', 'unsuitable')
+  AND human_reviewed_jd_hash = jd_hash
+ORDER BY human_reviewed_at, id
+`
+
+type ListEffectiveHumanReviewsRow struct {
+	ID              int64
+	PlatformJobID   string
+	CanonicalUrl    string
+	JobTitle        string
+	CompanyName     sql.NullString
+	CityText        sql.NullString
+	SalaryText      sql.NullString
+	JdJson          string
+	JdHash          string
+	HumanVerdict    sql.NullString
+	HumanReviewedAt sql.NullInt64
+	HumanReviewNote sql.NullString
+}
+
+func (q *Queries) ListEffectiveHumanReviews(ctx context.Context) ([]ListEffectiveHumanReviewsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listEffectiveHumanReviews)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListEffectiveHumanReviewsRow
+	for rows.Next() {
+		var i ListEffectiveHumanReviewsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PlatformJobID,
+			&i.CanonicalUrl,
+			&i.JobTitle,
+			&i.CompanyName,
+			&i.CityText,
+			&i.SalaryText,
+			&i.JdJson,
+			&i.JdHash,
+			&i.HumanVerdict,
+			&i.HumanReviewedAt,
+			&i.HumanReviewNote,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPlatformJobs = `-- name: ListPlatformJobs :many
 SELECT id, platform_job_id, canonical_url, job_title, company_name, city_text, salary_text, jd_json, jd_hash, platform_status, platform_closed_reason, platform_status_checked_at, assessment_status, assessment_resume_version_id, assessment_jd_hash, assessment_policy_version_id, evaluator_version, assessment_attempt_no, assessment_consecutive_failure_count, assessment_reason, assessment_evidence_json, assessment_retry_at, assessed_at, human_verdict, human_reviewed_jd_hash, human_reviewed_at, human_review_note, outreach_status, outreach_greeting_text, outreach_attempt_no, outreach_consecutive_failure_count, outreach_last_attempt_at, outreach_retry_at, outreach_evidence_json, contact_source, contacted_at, lease_stage, lease_owner, lease_until, first_seen_at, last_seen_at, updated_at
 FROM platform_jobs

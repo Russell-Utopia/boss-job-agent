@@ -139,6 +139,27 @@ func (v *Versions) GetCurrent(ctx context.Context) (*Version, error) {
 	return &current, nil
 }
 
+// Get returns an immutable saved resume version by its internal reference.
+// Policy validation uses this to keep the resume used for a page-session draft
+// stable even if the user refreshes the online resume before validating it.
+func (v *Versions) Get(ctx context.Context, id int64) (*Version, error) {
+	if id <= 0 {
+		return nil, fmt.Errorf("query online resume version: ID must be positive")
+	}
+	row, err := v.queries.GetOnlineResumeVersion(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query online resume version %d: %w", id, err)
+	}
+	version, err := versionFromRow(row.ID, row.VersionNo, row.ResumeJson, row.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &version, nil
+}
+
 func (v *Versions) RefreshFromBoss(ctx context.Context) (RefreshResult, error) {
 	attempt := runlog.Attempt{
 		Flow:      runlog.FlowOnlineResume,

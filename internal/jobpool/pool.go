@@ -176,6 +176,25 @@ type JobDetailView struct {
 	SupervisionLabel  HumanVerdict
 }
 
+// HumanReviewSample is a current-JD human review that can supervise policy
+// optimization. It contains the complete job input so the advisor never has
+// to reach into JobPool's database or reconstruct a partial example.
+type HumanReviewSample struct {
+	JobID            int64        `json:"jobId"`
+	PlatformJobID    string       `json:"platformJobId"`
+	CanonicalURL     string       `json:"canonicalUrl"`
+	JobTitle         string       `json:"jobTitle"`
+	CompanyName      string       `json:"companyName"`
+	City             string       `json:"city"`
+	Salary           string       `json:"salary"`
+	Responsibilities string       `json:"responsibilities"`
+	Requirements     string       `json:"requirements"`
+	JDHash           string       `json:"jdHash"`
+	Verdict          HumanVerdict `json:"verdict"`
+	ReviewedAt       time.Time    `json:"reviewedAt"`
+	Note             string       `json:"note"`
+}
+
 type ReviewDecision struct {
 	JobID          int64
 	ExpectedJDHash string
@@ -373,6 +392,38 @@ func (p *Pool) ListJobs(ctx context.Context) ([]JobView, error) {
 		jobs = append(jobs, job)
 	}
 	return jobs, nil
+}
+
+// ListEffectiveHumanReviews returns only reviews whose recorded JD is still
+// the current JD. Stale reviews remain visible on the job but cannot affect a
+// newly generated policy candidate.
+func (p *Pool) ListEffectiveHumanReviews(ctx context.Context) ([]HumanReviewSample, error) {
+	rows, err := p.queries.ListEffectiveHumanReviews(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list effective human reviews: %w", err)
+	}
+	samples := make([]HumanReviewSample, 0, len(rows))
+	for _, row := range rows {
+		job, err := newJobView(
+			row.ID, row.PlatformJobID, row.CanonicalUrl, row.JobTitle,
+			row.CompanyName, row.CityText, row.SalaryText, row.JdJson, row.JdHash,
+			"", sql.NullString{}, 0, 0,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("decode policy sample job %d: %w", row.ID, err)
+		}
+		if !row.HumanReviewedAt.Valid {
+			return nil, fmt.Errorf("policy sample job %d has no review time", row.ID)
+		}
+		samples = append(samples, HumanReviewSample{
+			JobID: job.ID, PlatformJobID: job.PlatformJobID, CanonicalURL: job.CanonicalURL,
+			JobTitle: job.JobTitle, CompanyName: job.CompanyName, City: job.City, Salary: job.Salary,
+			Responsibilities: job.Responsibilities, Requirements: job.Requirements, JDHash: job.JDHash,
+			Verdict: HumanVerdict(row.HumanVerdict.String), ReviewedAt: time.UnixMilli(row.HumanReviewedAt.Int64),
+			Note: row.HumanReviewNote.String,
+		})
+	}
+	return samples, nil
 }
 
 func (p *Pool) GetJob(ctx context.Context, jobID int64) (JobView, error) {

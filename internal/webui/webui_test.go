@@ -34,6 +34,28 @@ type testWeb struct {
 	pool      *jobpool.Pool
 }
 
+type webPolicyAdvisor struct{}
+
+func (webPolicyAdvisor) Generate(context.Context, assessment.PolicyGenerationRequest) (assessment.PolicyDraft, error) {
+	return assessment.PolicyDraft{Text: "明确匹配时判为适合\n信息不足时交给人工确认"}, nil
+}
+
+func (webPolicyAdvisor) Validate(_ context.Context, request assessment.PolicyValidationRequest) (assessment.PolicyValidationResult, error) {
+	results := make([]assessment.PolicyValidationComparison, 0, len(request.Samples))
+	for _, sample := range request.Samples {
+		current := jobpool.AssessmentStatusNeedsUserConfirmation
+		candidate := jobpool.AssessmentStatusUnsuitable
+		if sample.Verdict == jobpool.HumanVerdictSuitable {
+			current = jobpool.AssessmentStatusSuitable
+			candidate = jobpool.AssessmentStatusSuitable
+		}
+		results = append(results, assessment.PolicyValidationComparison{
+			JobID: sample.JobID, CurrentStatus: current, CandidateStatus: candidate,
+		})
+	}
+	return assessment.PolicyValidationResult{Results: results}, nil
+}
+
 type webResumeReader struct {
 	content onlineresume.ResumeContent
 	err     error
@@ -187,10 +209,15 @@ func assertAssessmentUnchangedByReview(t *testing.T, detail jobpool.JobDetailVie
 
 func openTestWeb(t *testing.T, path string) *testWeb {
 	t.Helper()
-	return openTestWebWithLogPath(t, path, filepath.Join(t.TempDir(), "boss-job-agent.jsonl"))
+	return openTestWebWithAdvisor(t, path, filepath.Join(t.TempDir(), "boss-job-agent.jsonl"), nil)
 }
 
 func openTestWebWithLogPath(t *testing.T, databasePath, logPath string) *testWeb {
+	t.Helper()
+	return openTestWebWithAdvisor(t, databasePath, logPath, nil)
+}
+
+func openTestWebWithAdvisor(t *testing.T, databasePath, logPath string, advisor assessment.PolicyAdvisor) *testWeb {
 	t.Helper()
 	db, err := storage.Open(t.Context(), databasePath)
 	if err != nil {
@@ -202,7 +229,7 @@ func openTestWebWithLogPath(t *testing.T, databasePath, logPath string) *testWeb
 	logs := runlog.Open(logPath)
 	resumeReader := &webResumeReader{content: webResumeContent("Go 后端工程师")}
 	resumeVersions := onlineresume.New(db, resumeReader, logs, func() time.Time { return now })
-	assessmentService := assessment.New(db, resumeVersions, pool, settings, nil, logs, func() time.Time { return now })
+	assessmentService := assessment.New(db, resumeVersions, pool, settings, nil, advisor, logs, func() time.Time { return now })
 	if err := assessmentService.EnsureDefaultPolicy(t.Context(), now); err != nil {
 		_ = db.Close()
 		t.Fatalf("ensure default policy: %v", err)
@@ -964,6 +991,128 @@ func TestWebRestoresSavedPolicyAndAutomationSettings(t *testing.T) {
 		"<dd>按已配置时间段打招呼</dd>",
 		"当前没有可真实打招呼的岗位",
 	})
+}
+
+func TestPolicyOptimizationPageAndAPIsKeepDraftInTheBrowserSession(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWebWithAdvisor(t, ":memory:", filepath.Join(t.TempDir(), "policy.jsonl"), webPolicyAdvisor{})
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+
+	resumeResponse := postFormResponse(t, server.Client(), server.URL+"/resume/refresh", url.Values{})
+	defer closeResponseBody(t, resumeResponse.Body)
+	if resumeResponse.StatusCode != http.StatusOK {
+		t.Fatalf("refresh test resume status = %d", resumeResponse.StatusCode)
+	}
+	first := seedPolicyWebSamples(t, runtime.pool)
+
+	assertPageContains(t, server.Client(), server.URL+"/assessments", []string{
+		"策略优化", "生成临时策略候选稿", "同时验收候选策略（会产生额外模型调用）", "Go 后端工程师",
+	})
+	draft := generatePolicyWebDraft(t, server.Client(), server.URL)
+	validatePolicyWebDraft(t, server.Client(), server.URL, draft)
+	adoptPolicyWebDraft(t, server.Client(), server.URL, draft.PolicyVersionID)
+	active, err := runtime.pool.GetJob(t.Context(), first.ID)
+	if err != nil {
+		t.Fatalf("read platform job after policy adoption: %v", err)
+	}
+	if active.AssessmentStatus != jobpool.AssessmentStatusNotQueued {
+		t.Errorf("platform job assessment status after policy adoption = %q, want unchanged", active.AssessmentStatus)
+	}
+}
+
+func seedPolicyWebSamples(t *testing.T, pool *jobpool.Pool) jobpool.JobView {
+	t.Helper()
+	if _, err := pool.Observe(t.Context(), 1, jobpool.Observation{
+		PlatformJobID: "web-policy-1", CanonicalURL: "https://www.zhipin.com/job_detail/web-policy-1.html",
+		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责 Go 服务", Requirements: "熟悉 Go", PlatformStatus: jobpool.PlatformStatusOpen,
+		ObservedAt: time.UnixMilli(2000),
+	}); err != nil {
+		t.Fatalf("observe first policy job: %v", err)
+	}
+	first := mustObserveWebJob(t, pool, jobpool.Observation{
+		PlatformJobID: "web-policy-2", CanonicalURL: "https://www.zhipin.com/job_detail/web-policy-2.html",
+		JobTitle: "Go 平台工程师", CompanyName: "另一科技", City: "福州", Salary: "20-30K",
+		Responsibilities: "负责平台服务", Requirements: "熟悉 Go", PlatformStatus: jobpool.PlatformStatusOpen,
+		ObservedAt: time.UnixMilli(2001),
+	})
+	firstDetail, err := pool.GetJobDetail(t.Context(), 1)
+	if err != nil {
+		t.Fatalf("get first policy job detail: %v", err)
+	}
+	if err := pool.Review(t.Context(), []jobpool.ReviewDecision{{
+		JobID: 1, ExpectedJDHash: firstDetail.JDHash, Verdict: jobpool.HumanVerdictUnsuitable,
+	}}); err != nil {
+		t.Fatalf("review first policy job: %v", err)
+	}
+	if err := pool.Review(t.Context(), []jobpool.ReviewDecision{{
+		JobID: first.ID, ExpectedJDHash: first.JDHash, Verdict: jobpool.HumanVerdictSuitable,
+	}}); err != nil {
+		t.Fatalf("review second policy job: %v", err)
+	}
+	return first
+}
+
+func generatePolicyWebDraft(t *testing.T, client *http.Client, baseURL string) assessment.PolicyDraft {
+	t.Helper()
+	response := postJSONResponse(t, client, baseURL+"/api/policy/draft", `{"jobIds":[1],"validationEnabled":true}`)
+	defer closeResponseBody(t, response.Body)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("generate policy draft status = %d", response.StatusCode)
+	}
+	var draft assessment.PolicyDraft
+	if err := json.NewDecoder(response.Body).Decode(&draft); err != nil {
+		t.Fatalf("decode policy draft: %v", err)
+	}
+	if !draft.ValidationEnabled || draft.GenerationSampleCount != 1 || draft.Text == "" {
+		t.Fatalf("draft = %#v, want browser-session metadata", draft)
+	}
+	return draft
+}
+
+func validatePolicyWebDraft(t *testing.T, client *http.Client, baseURL string, draft assessment.PolicyDraft) {
+	t.Helper()
+	response := postJSONResponse(t, client, baseURL+"/api/policy/validate", mustJSON(t, draft))
+	defer closeResponseBody(t, response.Body)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("validate policy draft status = %d", response.StatusCode)
+	}
+	var report assessment.PolicyValidationReport
+	if err := json.NewDecoder(response.Body).Decode(&report); err != nil {
+		t.Fatalf("decode policy validation report: %v", err)
+	}
+	if report.Status != assessment.PolicyValidationPassed || len(report.FullResults) != 2 || len(report.UngeneratedResults) != 1 {
+		t.Errorf("policy validation report = %#v", report)
+	}
+}
+
+func adoptPolicyWebDraft(t *testing.T, client *http.Client, baseURL string, policyVersionID int64) {
+	t.Helper()
+	payload := mustJSON(t, map[string]any{
+		"text": "新的完整规则\n信息不足时人工确认", "policyVersionId": policyVersionID,
+	})
+	response := postJSONResponse(t, client, baseURL+"/api/policy/adopt", payload)
+	defer closeResponseBody(t, response.Body)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("adopt policy status = %d", response.StatusCode)
+	}
+	retry := postJSONResponse(t, client, baseURL+"/api/policy/adopt", payload)
+	defer closeResponseBody(t, retry.Body)
+	if retry.StatusCode != http.StatusConflict {
+		t.Fatalf("retry adopt policy status = %d, want conflict", retry.StatusCode)
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("encode JSON fixture: %v", err)
+	}
+	return string(encoded)
 }
 
 func seedSavedPolicyAndSettings(t *testing.T, path string) {

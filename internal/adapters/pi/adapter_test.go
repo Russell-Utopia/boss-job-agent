@@ -530,7 +530,7 @@ func newConfirmationIntegrationFixture(t *testing.T) confirmationIntegrationFixt
 		t.Fatalf("claim assessments: work=%#v err=%v", work, err)
 	}
 	return confirmationIntegrationFixture{
-		service: assessment.New(db, nil, pool, nil, nil, logs, func() time.Time { return time.UnixMilli(3_000) }),
+		service: assessment.New(db, nil, pool, nil, nil, nil, logs, func() time.Time { return time.UnixMilli(3_000) }),
 		pool:    pool, jobs: jobs,
 	}
 }

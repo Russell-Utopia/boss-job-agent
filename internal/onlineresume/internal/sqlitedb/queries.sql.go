@@ -102,3 +102,30 @@ func (q *Queries) GetNextOnlineResumeVersionNumber(ctx context.Context) (int64, 
 	err := row.Scan(&column_1)
 	return column_1, err
 }
+
+const getOnlineResumeVersion = `-- name: GetOnlineResumeVersion :one
+SELECT id, version_no, resume_json, resume_hash, created_at
+FROM online_resume_versions
+WHERE id = ?1
+`
+
+type GetOnlineResumeVersionRow struct {
+	ID         int64
+	VersionNo  int64
+	ResumeJson string
+	ResumeHash string
+	CreatedAt  int64
+}
+
+func (q *Queries) GetOnlineResumeVersion(ctx context.Context, resumeID int64) (GetOnlineResumeVersionRow, error) {
+	row := q.db.QueryRowContext(ctx, getOnlineResumeVersion, resumeID)
+	var i GetOnlineResumeVersionRow
+	err := row.Scan(
+		&i.ID,
+		&i.VersionNo,
+		&i.ResumeJson,
+		&i.ResumeHash,
+		&i.CreatedAt,
+	)
+	return i, err
+}

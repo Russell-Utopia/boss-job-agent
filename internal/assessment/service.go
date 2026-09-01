@@ -19,14 +19,17 @@ const defaultPolicyJSON = `{"rules":["只依据本次实际采用的在线简历
 
 // Service owns assessment policies.
 type Service struct {
+	db             *sql.DB
 	queries        *sqlitedb.Queries
 	resumeVersions *onlineresume.Versions
 	pool           *jobpool.Pool
 	settings       *automationsettings.Settings
 	submitter      AssessmentSubmitter
+	advisor        PolicyAdvisor
 	logs           *runlog.Log
 	now            func() time.Time
 	cycleMu        sync.Mutex
+	policyMu       sync.Mutex
 }
 
 type Policy struct {
@@ -42,15 +45,30 @@ func New(
 	pool *jobpool.Pool,
 	settings *automationsettings.Settings,
 	submitter AssessmentSubmitter,
+	advisor PolicyAdvisor,
+	logs *runlog.Log,
+	now func() time.Time,
+) *Service {
+	return newService(db, resumeVersions, pool, settings, submitter, advisor, logs, now)
+}
+
+func newService(
+	db *sql.DB,
+	resumeVersions *onlineresume.Versions,
+	pool *jobpool.Pool,
+	settings *automationsettings.Settings,
+	submitter AssessmentSubmitter,
+	advisor PolicyAdvisor,
 	logs *runlog.Log,
 	now func() time.Time,
 ) *Service {
 	return &Service{
-		queries:        sqlitedb.New(db),
+		db: db, queries: sqlitedb.New(db),
 		resumeVersions: resumeVersions,
 		pool:           pool,
 		settings:       settings,
 		submitter:      submitter,
+		advisor:        advisor,
 		logs:           logs,
 		now:            now,
 	}

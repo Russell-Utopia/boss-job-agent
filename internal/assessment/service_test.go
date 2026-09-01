@@ -65,7 +65,7 @@ func openTestService(t *testing.T) (*Service, *sql.DB) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return New(db, nil, nil, nil, nil, nil, time.Now), db
+	return New(db, nil, nil, nil, nil, nil, nil, time.Now), db
 }
 
 func TestDefaultPolicyIsReadyForTheFirstAssessment(t *testing.T) {
@@ -203,7 +203,7 @@ func newAssessmentRunFixture(t *testing.T) assessmentRunFixture {
 	}
 
 	submitter := &controlledAssessmentSubmitter{requests: make(chan AssessmentRequest, 1)}
-	service := New(db, resumeVersions, pool, settings, submitter, logs, func() time.Time { return now })
+	service := New(db, resumeVersions, pool, settings, submitter, nil, logs, func() time.Time { return now })
 	if err := service.EnsureDefaultPolicy(t.Context(), time.UnixMilli(1_000)); err != nil {
 		t.Fatalf("ensure default policy: %v", err)
 	}
@@ -612,7 +612,7 @@ func TestConfirmAcceptsThreeSuggestionsWithoutLettingInvalidOrStaleItemsHideThem
 	logs := runlog.Open(filepath.Join(t.TempDir(), "assessment-confirm.jsonl"))
 	t.Cleanup(func() { _ = logs.Close() })
 	pool := jobpool.New(db)
-	service := New(db, nil, pool, nil, nil, logs, func() time.Time { return time.UnixMilli(3_000) })
+	service := New(db, nil, pool, nil, nil, nil, logs, func() time.Time { return time.UnixMilli(3_000) })
 	jobs := prepareClaimedAssessmentJobs(t, db, pool, 5)
 
 	receipt, err := service.Confirm(t.Context(), ConfirmationBatch{Results: []AssessmentConfirmation{

@@ -182,6 +182,33 @@ dd { margin: 0; font-weight: 720; text-align: right; }
 .review-card textarea { width: 100%; padding: 12px; border: 1px solid #cad6d0; border-radius: 10px; font: inherit; resize: vertical; }
 .review-actions { margin-top: 16px; display: flex; justify-content: flex-end; gap: 10px; }
 .secondary-button { background: #566760; }
+.policy-optimization { max-width: 1080px; margin: 22px auto 0; }
+.policy-session { margin-top: 24px; display: grid; grid-template-columns: .85fr 1.15fr; gap: 24px; }
+.policy-sample-picker, .policy-draft-panel { padding: 20px; border-radius: 14px; background: #f7f9f8; }
+.policy-picker-heading, .policy-diff-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; }
+.policy-picker-heading h3, .policy-diff-heading h4 { margin: 0; }
+.policy-samples { max-height: 310px; overflow: auto; margin: 14px 0 18px; display: grid; gap: 8px; }
+.policy-sample { display: flex; align-items: flex-start; gap: 10px; padding: 11px; border: 1px solid #dfe8e2; border-radius: 10px; background: white; cursor: pointer; }
+.policy-sample span { display: grid; gap: 3px; }
+.policy-sample small { color: #64736d; }
+.policy-validation-toggle { margin: 18px 0; }
+.policy-draft-panel label { display: block; margin: 16px 0 8px; color: #4c5b55; font-weight: 700; }
+.policy-draft-panel textarea { width: 100%; padding: 12px; border: 1px solid #cad6d0; border-radius: 10px; font: inherit; line-height: 1.6; resize: vertical; }
+.policy-diff-heading { margin-top: 18px; }
+.policy-diff { max-height: 240px; overflow: auto; margin-top: 8px; padding: 12px; border-radius: 10px; background: #17211d; color: #dce9e4; font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+.policy-diff-line { display: block; padding: 1px 6px; }
+.policy-diff-line.deleted { color: #ffb5a7; background: rgba(155,61,47,.28); }
+.policy-diff-line.added { color: #a8f0cc; background: rgba(36,181,125,.18); }
+.policy-diff-line.unchanged { color: #91a29a; }
+.policy-validation-report { margin-top: 18px; padding: 16px; border: 1px solid #d8e3dc; border-radius: 10px; background: white; }
+.policy-validation-report h4 { margin: 0 0 8px; }
+.policy-validation-report p { margin: 6px 0; }
+.policy-report-status { font-weight: 800; }
+.policy-report-status.passed { color: #18704f; }
+.policy-report-status.failed, .policy-report-status.insufficient { color: #83582b; }
+.policy-report-status.tradeoff { color: #9b3d2f; }
+.policy-report-table { width: 100%; margin-top: 12px; border-collapse: collapse; font-size: 13px; }
+.policy-report-table th, .policy-report-table td { padding: 7px; border-bottom: 1px solid #edf0ee; text-align: left; }
 
 @media (max-width: 760px) {
   body { display: block; }
@@ -194,6 +221,6 @@ dd { margin: 0; font-weight: 720; text-align: right; }
   .health-actions { margin-top: 18px; justify-content: flex-start; }
   .hero-card { display: block; }
   .action-block { margin-top: 24px; max-width: none; text-align: left; }
-  .summary-grid, .settings-grid, .detail-grid, .jd-grid { grid-template-columns: 1fr; }
+  .summary-grid, .settings-grid, .detail-grid, .jd-grid, .policy-session { grid-template-columns: 1fr; }
   .detail-heading { display: block; }
 }

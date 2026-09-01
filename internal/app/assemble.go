@@ -57,6 +57,7 @@ func assemble(ctx context.Context, config Config) (*assembled, error) {
 		pool,
 		settings,
 		assessmentAdapter,
+		assessmentAdapter,
 		logs,
 		config.Now,
 	)

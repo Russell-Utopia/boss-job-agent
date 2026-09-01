@@ -510,3 +510,22 @@ WHERE outreach_status = 'failed'
 SELECT *
 FROM platform_jobs
 ORDER BY first_seen_at, id;
+
+-- name: ListEffectiveHumanReviews :many
+SELECT
+    id,
+    platform_job_id,
+    canonical_url,
+    job_title,
+    company_name,
+    city_text,
+    salary_text,
+    jd_json,
+    jd_hash,
+    human_verdict,
+    human_reviewed_at,
+    human_review_note
+FROM platform_jobs
+WHERE human_verdict IN ('suitable', 'unsuitable')
+  AND human_reviewed_jd_hash = jd_hash
+ORDER BY human_reviewed_at, id;

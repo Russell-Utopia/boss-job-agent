@@ -10,6 +10,57 @@ import (
 	"database/sql"
 )
 
+const createPolicyVersion = `-- name: CreatePolicyVersion :one
+INSERT INTO assessment_policy_versions (
+    version_no, rules_json, is_active, change_note, created_at
+) VALUES (
+    ?1, ?2, 1, ?3, ?4
+)
+RETURNING id, version_no, rules_json, change_note
+`
+
+type CreatePolicyVersionParams struct {
+	VersionNo  int64
+	RulesJson  string
+	ChangeNote sql.NullString
+	CreatedAt  int64
+}
+
+type CreatePolicyVersionRow struct {
+	ID         int64
+	VersionNo  int64
+	RulesJson  string
+	ChangeNote sql.NullString
+}
+
+func (q *Queries) CreatePolicyVersion(ctx context.Context, arg CreatePolicyVersionParams) (CreatePolicyVersionRow, error) {
+	row := q.db.QueryRowContext(ctx, createPolicyVersion,
+		arg.VersionNo,
+		arg.RulesJson,
+		arg.ChangeNote,
+		arg.CreatedAt,
+	)
+	var i CreatePolicyVersionRow
+	err := row.Scan(
+		&i.ID,
+		&i.VersionNo,
+		&i.RulesJson,
+		&i.ChangeNote,
+	)
+	return i, err
+}
+
+const deactivatePolicies = `-- name: DeactivatePolicies :exec
+UPDATE assessment_policy_versions
+SET is_active = 0
+WHERE is_active = 1
+`
+
+func (q *Queries) DeactivatePolicies(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, deactivatePolicies)
+	return err
+}
+
 const ensureDefaultPolicy = `-- name: EnsureDefaultPolicy :exec
 INSERT OR IGNORE INTO assessment_policy_versions (
   version_no, rules_json, is_active, change_note, created_at
@@ -45,6 +96,43 @@ type GetActivePolicyRow struct {
 func (q *Queries) GetActivePolicy(ctx context.Context) (GetActivePolicyRow, error) {
 	row := q.db.QueryRowContext(ctx, getActivePolicy)
 	var i GetActivePolicyRow
+	err := row.Scan(
+		&i.ID,
+		&i.VersionNo,
+		&i.RulesJson,
+		&i.ChangeNote,
+	)
+	return i, err
+}
+
+const getNextPolicyVersionNumber = `-- name: GetNextPolicyVersionNumber :one
+SELECT COALESCE(MAX(version_no), 0) + 1
+FROM assessment_policy_versions
+`
+
+func (q *Queries) GetNextPolicyVersionNumber(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getNextPolicyVersionNumber)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const getPolicyVersion = `-- name: GetPolicyVersion :one
+SELECT id, version_no, rules_json, change_note
+FROM assessment_policy_versions
+WHERE id = ?1
+`
+
+type GetPolicyVersionRow struct {
+	ID         int64
+	VersionNo  int64
+	RulesJson  string
+	ChangeNote sql.NullString
+}
+
+func (q *Queries) GetPolicyVersion(ctx context.Context, policyID int64) (GetPolicyVersionRow, error) {
+	row := q.db.QueryRowContext(ctx, getPolicyVersion, policyID)
+	var i GetPolicyVersionRow
 	err := row.Scan(
 		&i.ID,
 		&i.VersionNo,
