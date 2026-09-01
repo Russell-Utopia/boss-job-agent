@@ -52,10 +52,12 @@ func (d *webJobDiscovery) FetchPage(
 	discovery.SearchRange,
 	int,
 ) (discovery.DiscoveryPage, error) {
+	jobWithoutSalary := webDiscoveredJob("boss-job-2", "Go 平台工程师", "另一科技")
+	jobWithoutSalary.Salary = ""
 	return discovery.DiscoveryPage{
 		Observations: []discovery.JobObservation{
 			webDiscoveredJob("boss-job-1", "Go 后端工程师", "示例科技"),
-			webDiscoveredJob("boss-job-2", "Go 平台工程师", "另一科技"),
+			jobWithoutSalary,
 		},
 		HasMore: false,
 	}, nil
@@ -384,6 +386,7 @@ func TestJobsPageDisplaysDiscoveryInputsProgressSettingsHintsAndGlobalJobs(t *te
 		"Go 平台工程师",
 		"另一科技",
 		`style="width: 100%"`,
+		"薪资仅可在 BOSS 页面查看",
 	})
 
 	runtime.resume.content = webResumeContent("Go 研发工程师")
@@ -937,10 +940,12 @@ func seedWebActiveDiscovery(t *testing.T, db *sql.DB, resumeVersionID int64) int
 
 func completeWebDiscovery(t *testing.T, runtime *testWeb, runID int64) {
 	t.Helper()
-	for _, observation := range []discovery.JobObservation{
+	observations := []discovery.JobObservation{
 		webDiscoveredJob("boss-job-1", "Go 后端工程师", "示例科技"),
 		webDiscoveredJob("boss-job-2", "Go 平台工程师", "另一科技"),
-	} {
+	}
+	observations[1].Salary = ""
+	for _, observation := range observations {
 		if _, err := runtime.pool.Observe(t.Context(), runID, jobpool.Observation{
 			PlatformJobID: observation.PlatformJobID, CanonicalURL: observation.CanonicalURL,
 			JobTitle: observation.JobTitle, CompanyName: observation.CompanyName,

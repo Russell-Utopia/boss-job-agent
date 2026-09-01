@@ -280,7 +280,10 @@ func (s *Service) fetchReliablePage(
 	if fetchErr != nil {
 		category := fetchErrorCategory(fetchErr)
 		finishErr := s.logs.Finish(ctx, trace, runlog.AttemptResult{
-			Outcome: runlog.OutcomeFailed, ErrorCategory: category, Err: fetchErr,
+			Outcome:         runlog.OutcomeFailed,
+			ErrorCategory:   category,
+			ExternalFailure: runlogFailureEvidence(fetchErr),
+			Err:             fetchErr,
 		})
 		return DiscoveryPage{}, trace.ID(), errors.Join(fmt.Errorf("fetch discovery page %d: %w", pageNo, fetchErr), finishErr)
 	}

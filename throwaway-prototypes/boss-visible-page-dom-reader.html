@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BOSS 可见页面 DOM 严格读取实验</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f4f7f5;
+      color: #17231f;
+    }
+    body { margin: 0; padding: 36px; }
+    main { max-width: 1100px; margin: 0 auto; }
+    h1 { margin: 0 0 10px; font-size: 30px; }
+    .question { margin: 0 0 26px; color: #49615a; font-size: 17px; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .case { border: 1px solid #d8e2dd; border-radius: 16px; background: white; padding: 18px; box-shadow: 0 12px 30px rgba(29, 60, 50, .07); }
+    .case h2 { margin: 0 0 6px; font-size: 18px; }
+    .case p { color: #60736d; min-height: 42px; }
+    .fixture { border: 1px dashed #b7c7c0; border-radius: 12px; padding: 12px; background: #fbfdfc; }
+    .job-card-box { list-style: none; }
+    .job-card-box a, .job-detail-header a { color: #087a63; font-weight: 700; }
+    .job-detail-body { margin-top: 10px; white-space: pre-line; }
+    .result { margin-top: 14px; padding: 12px; border-radius: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .pass { background: #e8f7ef; color: #175c3d; }
+    .blocked { background: #fff0e7; color: #8b3e12; }
+    .summary { margin-top: 22px; border-radius: 14px; padding: 18px; background: #17231f; color: #e9f4ef; }
+    .summary strong { color: #7de0bd; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    @media (max-width: 850px) { .grid { grid-template-columns: 1fr; } body { padding: 20px; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>原生 DOM 详情读取：什么时候才算可靠？</h1>
+  <p class="question">问题：只看已登录浏览器当前可见 DOM，能否拒绝“右侧仍是上一个岗位”的错误 JD，并只输出目标岗位的可靠观察？</p>
+
+  <section class="grid">
+    <article class="case" data-case="matching">
+      <h2>1. 目标岗位匹配</h2>
+      <p>列表卡片和右侧详情都指向 <code>job-a</code>，且有明确招聘中与完整 JD。</p>
+      <div class="fixture">
+        <ul class="job-list-box">
+          <li class="job-card-box"><a class="job-name" href="/job_detail/job-a.html">Go 后端工程师</a><span class="company-name">示例科技</span><span class="job-area">福州</span><span class="salary">20-30K</span></li>
+        </ul>
+        <section class="job-detail-container">
+          <header class="job-detail-header"><a class="job-name" href="/job_detail/job-a.html">Go 后端工程师</a><span class="job-status">招聘中</span></header>
+          <div class="job-detail-body"><div class="desc">负责 Go 服务开发
+任职要求：熟悉 Go 与 SQLite</div></div>
+        </section>
+      </div>
+      <div class="result"></div>
+    </article>
+
+    <article class="case" data-case="stale">
+      <h2>2. 右侧残留旧岗位</h2>
+      <p>列表目标是 <code>job-b</code>，但右侧虽有内容，链接仍指向 <code>job-a</code>。</p>
+      <div class="fixture">
+        <ul class="job-list-box">
+          <li class="job-card-box"><a class="job-name" href="/job_detail/job-b.html">平台工程师</a><span class="company-name">示例云</span><span class="job-area">厦门</span><span class="salary">18-25K</span></li>
+        </ul>
+        <section class="job-detail-container">
+          <header class="job-detail-header"><a class="job-name" href="/job_detail/job-a.html">Go 后端工程师</a><span class="job-status">招聘中</span></header>
+          <div class="job-detail-body"><div class="desc">负责 Go 服务开发
+任职要求：熟悉 Go 与 SQLite</div></div>
+        </section>
+      </div>
+      <div class="result"></div>
+    </article>
+
+    <article class="case" data-case="missing">
+      <h2>3. 关键证据缺失</h2>
+      <p>岗位 ID 匹配，但页面没有明确招聘状态，JD 也没有职责/要求边界。</p>
+      <div class="fixture">
+        <ul class="job-list-box">
+          <li class="job-card-box"><a class="job-name" href="/job_detail/job-c.html">基础架构工程师</a><span class="company-name">示例网络</span><span class="job-area">福州</span><span class="salary">25-35K</span></li>
+        </ul>
+        <section class="job-detail-container">
+          <header class="job-detail-header"><a class="job-name" href="/job_detail/job-c.html">基础架构工程师</a></header>
+          <div class="job-detail-body"><div class="desc">参与基础设施建设</div></div>
+        </section>
+      </div>
+      <div class="result"></div>
+    </article>
+
+    <article class="case" data-case="live-shape">
+      <h2>4. 真实页面结构快照</h2>
+      <p>使用 live 只读检查观察到的字段类名、详情链接和“立即沟通”开放证据。</p>
+      <div class="fixture">
+        <ul class="job-list-box">
+          <li class="job-card-box"><a class="job-name" href="/job_detail/job-d.html">Go 服务端工程师</a><span class="boss-name">示例数据</span><span class="company-location">厦门·思明区</span><span class="job-salary">20-30K</span></li>
+        </ul>
+        <section class="job-detail-container">
+          <a class="more-job-btn" href="/job_detail/job-d.html">查看更多信息</a>
+          <a class="op-btn-chat">立即沟通</a>
+          <div class="job-detail-body"><div class="desc">负责 Go 平台服务
+任职要求：熟悉 Go 与分布式系统</div></div>
+        </section>
+      </div>
+      <div class="result"></div>
+    </article>
+
+    <article class="case" data-case="hidden-noise">
+      <h2>5. 隐藏节点不进入 JD</h2>
+      <p>详情包含隐藏样式与不可见干扰文本；输出只能包含浏览器实际渲染的 JD。</p>
+      <div class="fixture">
+        <ul class="job-list-box">
+          <li class="job-card-box"><a class="job-name" href="/job_detail/job-e.html">招聘运营</a><span class="boss-name">示例人力</span><span class="company-location">厦门·湖里区</span><span class="job-salary">12-18K</span></li>
+        </ul>
+        <section class="job-detail-container">
+          <a class="more-job-btn" href="/job_detail/job-e.html">查看更多信息</a>
+          <a class="op-btn-chat">立即沟通</a>
+          <div class="job-detail-body"><div class="desc"><style>.hidden-copy { display: none; }</style><span class="hidden-copy">不可见干扰文本</span>岗位职责：负责招聘运营
+任职要求：至少 3 年工作经验</div></div>
+        </section>
+      </div>
+      <div class="result"></div>
+    </article>
+
+    <article class="case" data-case="responsibilities-only">
+      <h2>6. 可见 JD 只有职责标题</h2>
+      <p>身份、开放状态与完整可见 JD 均可靠；缺少独立要求段不再让 DOM 读取失败，结构化缺口交给后续归一化标记。</p>
+      <div class="fixture">
+        <ul class="job-list-box">
+          <li class="job-card-box"><a class="job-name" href="/job_detail/job-f.html">HRBP</a><span class="boss-name">示例组织</span><span class="company-location">厦门·思明区</span><span class="job-salary">15-20K</span></li>
+        </ul>
+        <section class="job-detail-container">
+          <a class="more-job-btn" href="/job_detail/job-f.html">查看更多信息</a>
+          <a class="op-btn-chat">立即沟通</a>
+          <div class="job-detail-body"><div class="desc">岗位职责:侧重招聘、员工关系、企业文化职位描述至少3年工作经验</div></div>
+        </section>
+      </div>
+      <div class="result"></div>
+    </article>
+
+    <article class="case" data-case="private-use-salary">
+      <h2>7. 薪资只有私用区字形</h2>
+      <p>字段虽然非空，但不能作为可读生产数据；岗位继续输出，薪资清空并明确标记为不可用。</p>
+      <div class="fixture">
+        <ul class="job-list-box">
+          <li class="job-card-box"><a class="job-name" href="/job_detail/job-g.html">Go 工程师</a><span class="boss-name">示例平台</span><span class="company-location">厦门</span><span class="job-salary">-K</span></li>
+        </ul>
+        <section class="job-detail-container">
+          <a class="more-job-btn" href="/job_detail/job-g.html">查看更多信息</a>
+          <a class="op-btn-chat">立即沟通</a>
+          <div class="job-detail-body"><div class="desc">完整职位描述</div></div>
+        </section>
+      </div>
+      <div class="result"></div>
+    </article>
+  </section>
+
+  <section class="summary" id="summary">正在执行离线对照……</section>
+</main>
+
+<script src="../internal/adapters/boss/visible_page_probe.js"></script>
+<script>
+  const expectations = {
+    matching: "success",
+    stale: "blocked",
+    missing: "blocked",
+    "live-shape": "success",
+    "hidden-noise": "success",
+    "responsibilities-only": "success",
+    "private-use-salary": "success"
+  };
+  const outcomes = [];
+  document.querySelectorAll("[data-case]").forEach(article => {
+    const name = article.dataset.case;
+    const result = article.querySelector(".result");
+    let outcome;
+    try {
+      const observation = BossVisiblePageProbe.readObservation(article.querySelector(".fixture"));
+      outcome = "success";
+      result.className = "result pass";
+      result.textContent = "PASS  " + JSON.stringify(observation, null, 2);
+    } catch (error) {
+      outcome = "blocked";
+      result.className = "result blocked";
+      result.textContent = "BLOCK " + error.message;
+    }
+    outcomes.push({name, outcome, expected: expectations[name]});
+  });
+  const allExpected = outcomes.every(item => item.outcome === item.expected);
+  const hiddenNoiseResult = outcomes.find(item => item.name === "hidden-noise");
+  const hiddenNoiseText = document.querySelector("[data-case='hidden-noise'] .result").textContent;
+  const hiddenNoiseExcluded = hiddenNoiseResult?.outcome === "success" && !hiddenNoiseText.includes("不可见干扰文本");
+  const privateUseText = document.querySelector("[data-case='private-use-salary'] .result").textContent;
+  const privateUseSanitized = privateUseText.includes('"salary": ""')
+    && privateUseText.includes('"salaryEvidence": "unavailable"')
+    && !privateUseText.includes("-K");
+  document.getElementById("summary").innerHTML = allExpected
+    && hiddenNoiseExcluded && privateUseSanitized
+    ? "<strong>7/7 场景符合预期。</strong> 岗位 ID、可沟通证据和浏览器可见完整 JD 同时成立才输出；隐藏节点被排除，职责/要求缺段不再伪装成 DOM 读取失败，私用区薪资被清空并标记为不可用。"
+    : "存在与预期不一致的场景：" + JSON.stringify(outcomes);
+  document.documentElement.dataset.fixtureResult = allExpected && hiddenNoiseExcluded && privateUseSanitized ? "pass" : "fail";
+</script>
+</body>
+</html>
