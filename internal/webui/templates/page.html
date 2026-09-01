@@ -170,6 +170,9 @@
     {{if $.ReviewSaved}}
     <section class="card detail-card" role="status"><p class="muted">人工复核已保存。</p></section>
     {{end}}
+    {{if $.AssessmentFeedback}}
+    <section class="card detail-card" role="status"><p class="muted">{{$.AssessmentFeedback}}</p></section>
+    {{end}}
     <section class="card detail-card">
       <div class="detail-heading">
         <div>
@@ -205,6 +208,30 @@
         </dl>
         {{else}}
         <p class="muted">尚无 AI 鉴定实际输入版本。</p>
+        {{end}}
+        <div class="inline-actions">
+          {{if eq .AssessmentStatus "failed"}}
+          {{if .AssessmentRetryAction.Allowed}}
+          <form method="post" action="/jobs/{{.ID}}/assessment/retry"><button type="submit">重试 AI 鉴定</button></form>
+          {{else}}
+          <button type="button" disabled>重试 AI 鉴定</button>
+          {{end}}
+          {{else if .AssessmentAction.Allowed}}
+          <form method="post" action="/jobs/{{.ID}}/assessment"><button type="submit">安排 AI 鉴定</button></form>
+          {{else}}
+          <button type="button" disabled>安排 AI 鉴定</button>
+          {{end}}
+        </div>
+        {{if eq .AssessmentStatus "failed"}}
+        {{if .AssessmentRetryAction.Allowed}}
+        <p class="reason">只有这个明确失败的鉴定会开启新的人工重试周期。</p>
+        {{else}}
+        <p class="reason">{{.AssessmentRetryAction.Reason}}</p>
+        {{end}}
+        {{else if .AssessmentAction.Allowed}}
+        <p class="reason">此操作只加入待鉴定队列，尚未选择在线简历、JD、策略或鉴定器版本。</p>
+        {{else}}
+        <p class="reason">{{.AssessmentAction.Reason}}</p>
         {{end}}
       </article>
 

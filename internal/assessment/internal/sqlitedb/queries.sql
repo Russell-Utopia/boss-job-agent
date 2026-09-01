@@ -6,6 +6,6 @@ INSERT OR IGNORE INTO assessment_policy_versions (
 );
 
 -- name: GetActivePolicy :one
-SELECT version_no, rules_json, change_note
+SELECT id, version_no, rules_json, change_note
 FROM assessment_policy_versions
 WHERE is_active = 1;

@@ -89,42 +89,43 @@ type Observation struct {
 }
 
 type JobView struct {
-	ID                   int64
-	PlatformJobID        string
-	CanonicalURL         string
-	JobTitle             string
-	CompanyName          string
-	City                 string
-	Salary               string
-	Responsibilities     string
-	Requirements         string
-	JDHash               string
-	PlatformStatus       PlatformStatus
-	PlatformClosedReason string
-	AssessmentStatus     AssessmentStatus
-	AssessmentJDHash     string
-	AssessmentAttemptNo  int64
-	AssessmentReason     string
-	AssessmentEvidence   json.RawMessage
-	AssessmentLeaseOwner string
-	AssessmentLeaseUntil *time.Time
-	HumanVerdict         HumanVerdict
-	HumanReviewedJDHash  string
-	HumanReviewedAt      *time.Time
-	HumanReviewNote      string
-	OutreachStatus       OutreachStatus
-	OutreachGreetingText string
-	OutreachAttemptNo    int64
-	OutreachEvidence     json.RawMessage
-	ContactSource        ContactSource
-	ContactedAt          *time.Time
-	OutreachLeaseOwner   string
-	OutreachLeaseUntil   *time.Time
-	AssessmentAction     ActionAvailability
-	ReviewAction         ActionAvailability
-	OutreachAction       ActionAvailability
-	FirstSeenAt          time.Time
-	LastSeenAt           time.Time
+	ID                    int64
+	PlatformJobID         string
+	CanonicalURL          string
+	JobTitle              string
+	CompanyName           string
+	City                  string
+	Salary                string
+	Responsibilities      string
+	Requirements          string
+	JDHash                string
+	PlatformStatus        PlatformStatus
+	PlatformClosedReason  string
+	AssessmentStatus      AssessmentStatus
+	AssessmentJDHash      string
+	AssessmentAttemptNo   int64
+	AssessmentReason      string
+	AssessmentEvidence    json.RawMessage
+	AssessmentLeaseOwner  string
+	AssessmentLeaseUntil  *time.Time
+	HumanVerdict          HumanVerdict
+	HumanReviewedJDHash   string
+	HumanReviewedAt       *time.Time
+	HumanReviewNote       string
+	OutreachStatus        OutreachStatus
+	OutreachGreetingText  string
+	OutreachAttemptNo     int64
+	OutreachEvidence      json.RawMessage
+	ContactSource         ContactSource
+	ContactedAt           *time.Time
+	OutreachLeaseOwner    string
+	OutreachLeaseUntil    *time.Time
+	AssessmentAction      ActionAvailability
+	AssessmentRetryAction ActionAvailability
+	ReviewAction          ActionAvailability
+	OutreachAction        ActionAvailability
+	FirstSeenAt           time.Time
+	LastSeenAt            time.Time
 }
 
 type AssessmentInputVersions struct {
@@ -622,6 +623,7 @@ func jobViewFromPlatformRow(row sqlitedb.PlatformJob) (JobView, error) {
 		job.OutreachLeaseUntil = timePointer(row.LeaseUntil)
 	}
 	job.AssessmentAction = assessmentActionAvailability(row)
+	job.AssessmentRetryAction = assessmentRetryActionAvailability(row)
 	job.ReviewAction = ActionAvailability{Allowed: true}
 	job.OutreachAction = outreachActionAvailability(row)
 	return job, nil
@@ -634,6 +636,22 @@ func assessmentActionAvailability(row sqlitedb.PlatformJob) ActionAvailability {
 		return ActionAvailability{Allowed: true}
 	}
 	rejection := assessmentQueueRejection(row)
+	return ActionAvailability{Code: rejection.Code, Reason: rejection.Reason}
+}
+
+func assessmentRetryActionAvailability(row sqlitedb.PlatformJob) ActionAvailability {
+	if PlatformStatus(row.PlatformStatus) == PlatformStatusOpen &&
+		OutreachStatus(row.OutreachStatus) != OutreachStatusContacted &&
+		AssessmentStatus(row.AssessmentStatus) == AssessmentStatusFailed &&
+		!row.LeaseStage.Valid {
+		return ActionAvailability{Allowed: true}
+	}
+	rejection := assessmentQueueRejection(row)
+	if AssessmentStatus(row.AssessmentStatus) != AssessmentStatusFailed {
+		rejection.Code, rejection.Reason = "assessment_failure_required", "只有明确失败的 AI 鉴定可以重试"
+	} else if row.LeaseStage.Valid {
+		rejection.Code, rejection.Reason = "assessment_processing", "岗位正在进行 AI 鉴定"
+	}
 	return ActionAvailability{Code: rejection.Code, Reason: rejection.Reason}
 }
 
@@ -862,11 +880,10 @@ func (p *Pool) RetryAssessmentFailures(ctx context.Context, jobIDs []int64) (Bat
 		if getErr != nil {
 			return BatchActionResult{}, fmt.Errorf("recheck assessment retry job %d: %w", jobID, getErr)
 		}
-		rejection := assessmentQueueRejection(row)
-		if AssessmentStatus(row.AssessmentStatus) != AssessmentStatusFailed {
-			rejection.Code, rejection.Reason = "assessment_failure_required", "只有明确失败的 AI 鉴定可以重试"
-		}
-		result.Skipped = append(result.Skipped, rejection)
+		availability := assessmentRetryActionAvailability(row)
+		result.Skipped = append(result.Skipped, SkippedAction{
+			JobID: jobID, Code: availability.Code, Reason: availability.Reason,
+		})
 	}
 	if err := transaction.Commit(); err != nil {
 		return BatchActionResult{}, fmt.Errorf("retry assessment failures: commit transaction: %w", err)
