@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,7 +91,7 @@ func TestAssessmentQueueClaimFinishRejectsLateResults(t *testing.T) {
 		ResumeVersionID:  resumeID,
 		PolicyVersionID:  policyID,
 		EvaluatorVersion: 7,
-		Limit:            1,
+		ProcessingLimit:  1,
 		ClaimedAt:        time.UnixMilli(2000),
 		LeaseUntil:       time.UnixMilli(3000),
 	}
@@ -130,6 +131,106 @@ func TestAssessmentQueueClaimFinishRejectsLateResults(t *testing.T) {
 	assertBatchResult(t, requeued, 0, 1, "assessment_already_completed")
 }
 
+func TestConcurrentAssessmentClaimsRespectTheGlobalProcessingLimitWithoutDuplicates(t *testing.T) {
+	t.Parallel()
+
+	pool, db := openTestPool(t)
+	resumeID, policyID := seedAssessmentInputs(t, db)
+	jobIDs := seedAssessmentJobs(t, pool, 8)
+	assertBatchResult(t, mustQueueAssessments(t, pool, jobIDs...), len(jobIDs), 0, "")
+
+	const (
+		processingLimit = 3
+		claimers        = 5
+	)
+	results := runConcurrentAssessmentClaims(t, pool, resumeID, policyID, processingLimit, claimers)
+	assertUniqueClaimedJobCount(t, results, processingLimit)
+	assertProcessingAssessmentCount(t, db, processingLimit)
+}
+
+func seedAssessmentJobs(t *testing.T, pool *Pool, count int) []int64 {
+	t.Helper()
+	jobIDs := make([]int64, count)
+	for index := range jobIDs {
+		job := mustObserve(t, pool, int64(index+1), observedJob(fmt.Sprintf("boss-job-limit-%d", index+1)))
+		jobIDs[index] = job.ID
+	}
+	return jobIDs
+}
+
+type assessmentClaimResult struct {
+	work []AssessmentWork
+	err  error
+}
+
+func runConcurrentAssessmentClaims(
+	t *testing.T,
+	pool *Pool,
+	resumeID int64,
+	policyID int64,
+	processingLimit int,
+	claimers int,
+) [][]AssessmentWork {
+	t.Helper()
+	start := make(chan struct{})
+	resultChannel := make(chan assessmentClaimResult, claimers)
+	var group sync.WaitGroup
+	for index := range claimers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			work, err := pool.ClaimAssessments(t.Context(), AssessmentClaim{
+				Worker:          fmt.Sprintf("assessment-worker-%d", index+1),
+				ResumeVersionID: resumeID, PolicyVersionID: policyID, EvaluatorVersion: 1,
+				ProcessingLimit: processingLimit, ClaimedAt: time.UnixMilli(2_000), LeaseUntil: time.UnixMilli(3_000),
+			})
+			resultChannel <- assessmentClaimResult{work: work, err: err}
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(resultChannel)
+
+	results := make([][]AssessmentWork, 0, claimers)
+	for result := range resultChannel {
+		if result.err != nil {
+			t.Fatalf("concurrent assessment claim: %v", result.err)
+		}
+		results = append(results, result.work)
+	}
+	return results
+}
+
+func assertUniqueClaimedJobCount(t *testing.T, results [][]AssessmentWork, want int) {
+	t.Helper()
+	claimedJobIDs := make(map[int64]struct{})
+	for _, work := range results {
+		for _, item := range work {
+			if _, duplicate := claimedJobIDs[item.JobID]; duplicate {
+				t.Errorf("platform job %d was claimed more than once", item.JobID)
+			}
+			claimedJobIDs[item.JobID] = struct{}{}
+		}
+	}
+	if len(claimedJobIDs) != want {
+		t.Errorf("concurrent claims returned %d jobs, want global limit %d", len(claimedJobIDs), want)
+	}
+}
+
+func assertProcessingAssessmentCount(t *testing.T, db *sql.DB, want int) {
+	t.Helper()
+	var processing int
+	if err := db.QueryRowContext(t.Context(), `
+		SELECT count(*) FROM platform_jobs WHERE assessment_status = 'processing'
+	`).Scan(&processing); err != nil {
+		t.Fatalf("count processing assessments: %v", err)
+	}
+	if processing != want {
+		t.Errorf("processing assessments = %d, want global limit %d", processing, want)
+	}
+}
+
 func TestExpiredAssessmentLeaseCountsFailuresStopsAtTheLimitAndRejectsTheOldWorker(t *testing.T) {
 	t.Parallel()
 
@@ -139,22 +240,22 @@ func TestExpiredAssessmentLeaseCountsFailuresStopsAtTheLimitAndRejectsTheOldWork
 	assertBatchResult(t, mustQueueAssessments(t, pool, job.ID), 1, 0, "")
 	first := mustClaimAssessments(t, pool, AssessmentClaim{
 		Worker: "assessment-worker-1", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 1, Limit: 1, ClaimedAt: time.UnixMilli(2000), LeaseUntil: time.UnixMilli(3000),
+		EvaluatorVersion: 1, ProcessingLimit: 1, ClaimedAt: time.UnixMilli(2000), LeaseUntil: time.UnixMilli(3000),
 	})
 	requireAssessmentWork(t, first, job.ID, 1)
 	second := mustClaimAssessments(t, pool, AssessmentClaim{
 		Worker: "assessment-worker-2", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 1, Limit: 1, ClaimedAt: time.UnixMilli(4000), LeaseUntil: time.UnixMilli(5000),
+		EvaluatorVersion: 1, ProcessingLimit: 1, ClaimedAt: time.UnixMilli(4000), LeaseUntil: time.UnixMilli(5000),
 	})
 	requireAssessmentWork(t, second, job.ID, 2)
 	third := mustClaimAssessments(t, pool, AssessmentClaim{
 		Worker: "assessment-worker-3", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 1, Limit: 1, ClaimedAt: time.UnixMilli(6000), LeaseUntil: time.UnixMilli(7000),
+		EvaluatorVersion: 1, ProcessingLimit: 1, ClaimedAt: time.UnixMilli(6000), LeaseUntil: time.UnixMilli(7000),
 	})
 	requireAssessmentWork(t, third, job.ID, 3)
 	stopped := mustClaimAssessments(t, pool, AssessmentClaim{
 		Worker: "assessment-worker-4", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 1, Limit: 1, ClaimedAt: time.UnixMilli(8000), LeaseUntil: time.UnixMilli(9000),
+		EvaluatorVersion: 1, ProcessingLimit: 1, ClaimedAt: time.UnixMilli(8000), LeaseUntil: time.UnixMilli(9000),
 	})
 	assertNoAssessmentWork(t, stopped)
 	assertAssessmentFailureLimit(t, db, job.ID, 3)
@@ -174,7 +275,7 @@ func TestExpiredAssessmentLeaseCountsFailuresStopsAtTheLimitAndRejectsTheOldWork
 	}
 	restarted := mustClaimAssessments(t, pool, AssessmentClaim{
 		Worker: "assessment-worker-5", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 1, Limit: 1, ClaimedAt: time.UnixMilli(9000), LeaseUntil: time.UnixMilli(10000),
+		EvaluatorVersion: 1, ProcessingLimit: 1, ClaimedAt: time.UnixMilli(9000), LeaseUntil: time.UnixMilli(10000),
 	})
 	work := requireAssessmentWork(t, restarted, job.ID, 4)
 	if work.JDHash != updated.JDHash {
@@ -185,18 +286,22 @@ func TestExpiredAssessmentLeaseCountsFailuresStopsAtTheLimitAndRejectsTheOldWork
 func assertAssessmentFailureLimit(t *testing.T, db *sql.DB, jobID int64, wantFailures int) {
 	t.Helper()
 	var status string
+	var reason sql.NullString
 	var failures int
 	var retryAt sql.NullInt64
 	err := db.QueryRowContext(t.Context(), `
-		SELECT assessment_status, assessment_consecutive_failure_count, assessment_retry_at
+		SELECT assessment_status, assessment_reason, assessment_consecutive_failure_count, assessment_retry_at
 		FROM platform_jobs
 		WHERE id = ?
-	`, jobID).Scan(&status, &failures, &retryAt)
+	`, jobID).Scan(&status, &reason, &failures, &retryAt)
 	if err != nil {
 		t.Fatalf("read assessment failure limit: %v", err)
 	}
 	if status != string(AssessmentStatusFailed) || failures != wantFailures || retryAt.Valid {
 		t.Errorf("assessment failure state = (%q, %d, %#v), want failed, %d, no retry", status, failures, retryAt, wantFailures)
+	}
+	if !reason.Valid || reason.String != "自动重试已达上限，请手工重试" {
+		t.Errorf("assessment failure reason = %#v, want exhausted retry guidance", reason)
 	}
 }
 
@@ -332,7 +437,7 @@ func TestPlatformClosureStopsClaimsAndReopeningRestoresUnchangedWork(t *testing.
 
 	claim := AssessmentClaim{
 		Worker: "assessment-worker", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 1, Limit: 1, ClaimedAt: time.UnixMilli(2100), LeaseUntil: time.UnixMilli(3100),
+		EvaluatorVersion: 1, ProcessingLimit: 1, ClaimedAt: time.UnixMilli(2100), LeaseUntil: time.UnixMilli(3100),
 	}
 	work := mustClaimAssessments(t, pool, claim)
 	assertNoAssessmentWork(t, work)
@@ -357,7 +462,7 @@ func TestJDChangeInvalidatesUncontactedAssessmentAndMakesHumanReviewStale(t *tes
 	assertBatchResult(t, mustQueueAssessments(t, pool, job.ID), 1, 0, "")
 	work := mustClaimAssessments(t, pool, AssessmentClaim{
 		Worker: "assessment-worker", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 1, Limit: 1, ClaimedAt: time.UnixMilli(1500), LeaseUntil: time.UnixMilli(2500),
+		EvaluatorVersion: 1, ProcessingLimit: 1, ClaimedAt: time.UnixMilli(1500), LeaseUntil: time.UnixMilli(2500),
 	})
 	claimed := requireAssessmentWork(t, work, job.ID, 1)
 	assertBatchResult(t, mustFinishAssessments(t, pool, AssessmentOutcome{
@@ -404,7 +509,7 @@ func TestJDChangeKeepsPendingAssessmentQueuedForTheLatestJD(t *testing.T) {
 
 	work := mustClaimAssessments(t, pool, AssessmentClaim{
 		Worker: "assessment-worker", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 1, Limit: 1, ClaimedAt: time.UnixMilli(3000), LeaseUntil: time.UnixMilli(4000),
+		EvaluatorVersion: 1, ProcessingLimit: 1, ClaimedAt: time.UnixMilli(3000), LeaseUntil: time.UnixMilli(4000),
 	})
 	claimed := requireAssessmentWork(t, work, job.ID, 1)
 	if claimed.JDHash != updated.JDHash || claimed.JDHash == job.JDHash {
@@ -421,7 +526,7 @@ func TestJDChangeRestartsFailedAssessmentWithTheLatestInputs(t *testing.T) {
 	assertBatchResult(t, mustQueueAssessments(t, pool, job.ID), 1, 0, "")
 	work := mustClaimAssessments(t, pool, AssessmentClaim{
 		Worker: "assessment-worker-1", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 1, Limit: 1, ClaimedAt: time.UnixMilli(1500), LeaseUntil: time.UnixMilli(2500),
+		EvaluatorVersion: 1, ProcessingLimit: 1, ClaimedAt: time.UnixMilli(1500), LeaseUntil: time.UnixMilli(2500),
 	})
 	claimed := requireAssessmentWork(t, work, job.ID, 1)
 	retryAt := time.UnixMilli(3000)
@@ -441,7 +546,7 @@ func TestJDChangeRestartsFailedAssessmentWithTheLatestInputs(t *testing.T) {
 
 	retried := mustClaimAssessments(t, pool, AssessmentClaim{
 		Worker: "assessment-worker-2", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 1, Limit: 1, ClaimedAt: retryAt, LeaseUntil: time.UnixMilli(4000),
+		EvaluatorVersion: 1, ProcessingLimit: 1, ClaimedAt: retryAt, LeaseUntil: time.UnixMilli(4000),
 	})
 	newAttempt := requireAssessmentWork(t, retried, job.ID, 2)
 	if newAttempt.AttemptNo != 2 || newAttempt.JDHash != updated.JDHash {
@@ -475,7 +580,7 @@ func TestContactedJobPreservesConclusionsAndRejectsLateOrRepeatedWork(t *testing
 	}
 	assessmentWork := mustClaimAssessments(t, pool, AssessmentClaim{
 		Worker: "assessment-worker", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 1, Limit: 1, ClaimedAt: time.UnixMilli(1500), LeaseUntil: time.UnixMilli(2500),
+		EvaluatorVersion: 1, ProcessingLimit: 1, ClaimedAt: time.UnixMilli(1500), LeaseUntil: time.UnixMilli(2500),
 	})
 	assessmentAttempt := requireAssessmentWork(t, assessmentWork, job.ID, 1)
 	assertBatchResult(t, mustFinishAssessments(t, pool, AssessmentOutcome{
@@ -679,7 +784,7 @@ func TestManualRetriesAcceptFailuresButNeverPossiblyContactedWork(t *testing.T) 
 	assertBatchResult(t, mustQueueAssessments(t, pool, assessmentJob.ID), 1, 0, "")
 	assessmentWork := mustClaimAssessments(t, pool, AssessmentClaim{
 		Worker: "assessment-worker", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 1, Limit: 1, ClaimedAt: time.UnixMilli(2000), LeaseUntil: time.UnixMilli(3000),
+		EvaluatorVersion: 1, ProcessingLimit: 1, ClaimedAt: time.UnixMilli(2000), LeaseUntil: time.UnixMilli(3000),
 	})
 	assessmentAttempt := requireAssessmentWork(t, assessmentWork, assessmentJob.ID, 1)
 	assertBatchResult(t, mustFinishAssessments(t, pool, AssessmentOutcome{
@@ -732,7 +837,7 @@ func TestInvalidBusinessCombinationsAreRejectedWithoutMutation(t *testing.T) {
 	}
 	if _, err := pool.ClaimAssessments(t.Context(), AssessmentClaim{
 		Worker: "assessment-worker", ResumeVersionID: 1, PolicyVersionID: 1,
-		EvaluatorVersion: 1, Limit: 1,
+		EvaluatorVersion: 1, ProcessingLimit: 1,
 		ClaimedAt: time.UnixMilli(3000), LeaseUntil: time.UnixMilli(3000),
 	}); err == nil {
 		t.Fatal("non-future assessment lease succeeded")
@@ -1273,7 +1378,7 @@ func TestJobDetailUsesTheLatestHumanReviewAsCurrentJudgmentAndSupervision(t *tes
 	assertBatchResult(t, mustQueueAssessments(t, pool, job.ID), 1, 0, "")
 	work := mustClaimAssessments(t, pool, AssessmentClaim{
 		Worker: "assessment-worker", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 7, Limit: 1, ClaimedAt: time.UnixMilli(1500), LeaseUntil: time.UnixMilli(2500),
+		EvaluatorVersion: 7, ProcessingLimit: 1, ClaimedAt: time.UnixMilli(1500), LeaseUntil: time.UnixMilli(2500),
 	})
 	assertBatchResult(t, mustFinishAssessments(t, pool, AssessmentOutcome{
 		JobID: job.ID, AttemptNo: work[0].AttemptNo, Status: AssessmentStatusUnsuitable,
@@ -1363,7 +1468,7 @@ func TestReviewAllowsEveryAIStateWithoutStartingAnotherAssessment(t *testing.T) 
 				assertBatchResult(t, mustQueueAssessments(t, pool, job.ID), 1, 0, "")
 				work := mustClaimAssessments(t, pool, AssessmentClaim{
 					Worker: fmt.Sprintf("assessment-worker-%d", index), ResumeVersionID: resumeID,
-					PolicyVersionID: policyID, EvaluatorVersion: 1, Limit: 1,
+					PolicyVersionID: policyID, EvaluatorVersion: 1, ProcessingLimit: 1,
 					ClaimedAt:  time.UnixMilli(int64(2000 + index*1000)),
 					LeaseUntil: time.UnixMilli(int64(2500 + index*1000)),
 				})

@@ -299,8 +299,8 @@ func attemptAttrs(traceID string, attempt Attempt, event string, itemIndex, batc
 }
 
 func validateAttempts(attempts []Attempt) error {
-	if len(attempts) == 0 || len(attempts) > 5 {
-		return fmt.Errorf("external request requires between one and five attempts")
+	if len(attempts) == 0 {
+		return fmt.Errorf("external request requires at least one attempt")
 	}
 	for index, attempt := range attempts {
 		if err := validateAttempt(attempt); err != nil {

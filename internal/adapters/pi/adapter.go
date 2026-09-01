@@ -49,20 +49,26 @@ func NewWithConfig(config Config, confirmer Confirmer) *Adapter {
 func (a *Adapter) Submit(ctx context.Context, request assessment.AssessmentRequest) error {
 	childContext, finish, err := a.begin(ctx)
 	if err != nil {
-		return err
+		return submissionError(assessment.SubmissionErrorInvalidProtocol, err)
 	}
 	defer finish()
 	if a.confirmer == nil {
-		return fmt.Errorf("submit assessment through Pi: confirmation handler is required")
+		return submissionError(
+			assessment.SubmissionErrorInvalidProtocol,
+			fmt.Errorf("submit assessment through Pi: confirmation handler is required"),
+		)
 	}
 	extensionPath, err := writeConfirmationExtension()
 	if err != nil {
-		return err
+		return submissionError(assessment.SubmissionErrorTransient, err)
 	}
 	defer func() { _ = os.Remove(extensionPath) }()
 	token, err := newCallbackToken()
 	if err != nil {
-		return fmt.Errorf("create Pi confirmation token: %w", err)
+		return submissionError(
+			assessment.SubmissionErrorTransient,
+			fmt.Errorf("create Pi confirmation token: %w", err),
+		)
 	}
 	callback, err := startConfirmationServer(
 		childContext,
@@ -72,7 +78,7 @@ func (a *Adapter) Submit(ctx context.Context, request assessment.AssessmentReque
 		a.confirmer,
 	)
 	if err != nil {
-		return err
+		return submissionError(assessment.SubmissionErrorTransient, err)
 	}
 	defer callback.close()
 	return a.runRPC(childContext, request, extensionPath, callback, token)
@@ -133,47 +139,57 @@ func (a *Adapter) runRPC(
 	command := exec.CommandContext(ctx, a.config.Executable, arguments...) //nolint:gosec // Test configuration must inject a local fake Pi executable.
 	stdin, err := command.StdinPipe()
 	if err != nil {
-		return fmt.Errorf("open Pi RPC input: %w", err)
+		return submissionError(assessment.SubmissionErrorTransient, fmt.Errorf("open Pi RPC input: %w", err))
 	}
 	stdout, err := command.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("open Pi RPC output: %w", err)
+		return submissionError(assessment.SubmissionErrorTransient, fmt.Errorf("open Pi RPC output: %w", err))
 	}
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	command.Env = callbackEnvironment(os.Environ(), callback.url(), token)
 	if err := command.Start(); err != nil {
-		return fmt.Errorf("start Pi RPC: %w", err)
+		return submissionError(assessment.SubmissionErrorTransient, fmt.Errorf("start Pi RPC: %w", err))
 	}
 	prompt, err := assessmentPrompt(request)
 	if err != nil {
 		_ = command.Process.Kill()
 		_ = command.Wait()
-		return err
+		return submissionError(assessment.SubmissionErrorInvalidProtocol, err)
 	}
 	if err := json.NewEncoder(stdin).Encode(map[string]any{
 		"id": "assessment-submit", "type": "prompt", "message": prompt,
 	}); err != nil {
 		_ = command.Process.Kill()
 		_ = command.Wait()
-		return fmt.Errorf("send Pi assessment prompt: %w", err)
+		return submissionError(assessment.SubmissionErrorTransient, fmt.Errorf("send Pi assessment prompt: %w", err))
 	}
 	accepted, scanErr := scanRPC(stdout)
 	_ = stdin.Close()
 	waitErr := command.Wait()
 	if scanErr != nil {
-		return scanErr
+		return submissionError(assessment.SubmissionErrorInvalidProtocol, scanErr)
 	}
 	if waitErr != nil {
-		return fmt.Errorf("pi RPC exited: %w: %s", waitErr, strings.TrimSpace(stderr.String()))
+		return submissionError(
+			assessment.SubmissionErrorTransient,
+			fmt.Errorf("pi RPC exited: %w: %s", waitErr, strings.TrimSpace(stderr.String())),
+		)
 	}
 	if !accepted {
-		return fmt.Errorf("pi RPC did not accept the assessment prompt: %s", strings.TrimSpace(stderr.String()))
+		return submissionError(
+			assessment.SubmissionErrorInvalidProtocol,
+			fmt.Errorf("pi RPC did not accept the assessment prompt: %s", strings.TrimSpace(stderr.String())),
+		)
 	}
 	if err := callback.result(); err != nil {
-		return err
+		return submissionError(assessment.SubmissionErrorInvalidProtocol, err)
 	}
 	return nil
+}
+
+func submissionError(category assessment.SubmissionErrorCategory, err error) error {
+	return &assessment.SubmissionError{Category: category, Err: err}
 }
 
 func scanRPC(stdout io.Reader) (bool, error) {

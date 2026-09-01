@@ -21,7 +21,10 @@ type Pool struct {
 	now     func() time.Time
 }
 
-const unattendedAttemptLimit int64 = 3
+const (
+	unattendedAttemptLimit           int64 = 3
+	assessmentRetriesExhaustedReason       = "自动重试已达上限，请手工重试"
+)
 
 type PlatformStatus string
 
@@ -196,7 +199,7 @@ type AssessmentClaim struct {
 	ResumeVersionID  int64
 	PolicyVersionID  int64
 	EvaluatorVersion int64
-	Limit            int
+	ProcessingLimit  int
 	ClaimedAt        time.Time
 	LeaseUntil       time.Time
 }
@@ -1017,7 +1020,7 @@ func (p *Pool) ClaimAssessments(ctx context.Context, claim AssessmentClaim) ([]A
 		UpdatedAt:        claim.ClaimedAt.UnixMilli(),
 		ClaimedAt:        sql.NullInt64{Int64: claim.ClaimedAt.UnixMilli(), Valid: true},
 		FailureLimit:     unattendedAttemptLimit,
-		ClaimLimit:       int64(claim.Limit),
+		ProcessingLimit:  int64(claim.ProcessingLimit),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("claim assessments: %w", err)
@@ -1046,10 +1049,18 @@ func expireAssessmentLeases(ctx context.Context, queries *sqlitedb.Queries, now 
 	if err != nil {
 		return fmt.Errorf("expire assessment leases: %w", err)
 	}
-	if _, err := queries.StopAssessmentRetriesAtLimit(ctx, unattendedAttemptLimit); err != nil {
+	if err := stopExhaustedAssessmentRetries(ctx, queries); err != nil {
 		return fmt.Errorf("stop exhausted assessment retries: %w", err)
 	}
 	return nil
+}
+
+func stopExhaustedAssessmentRetries(ctx context.Context, queries *sqlitedb.Queries) error {
+	_, err := queries.StopAssessmentRetriesAtLimit(ctx, sqlitedb.StopAssessmentRetriesAtLimitParams{
+		Reason:       nullableText(assessmentRetriesExhaustedReason),
+		FailureLimit: unattendedAttemptLimit,
+	})
+	return err
 }
 
 func validateAssessmentClaim(claim AssessmentClaim) error {
@@ -1059,8 +1070,8 @@ func validateAssessmentClaim(claim AssessmentClaim) error {
 	if claim.ResumeVersionID <= 0 || claim.PolicyVersionID <= 0 || claim.EvaluatorVersion <= 0 {
 		return fmt.Errorf("claim assessments: resume, policy and evaluator versions must be positive")
 	}
-	if claim.Limit <= 0 {
-		return fmt.Errorf("claim assessments: limit must be positive")
+	if claim.ProcessingLimit <= 0 {
+		return fmt.Errorf("claim assessments: processing limit must be positive")
 	}
 	if claim.ClaimedAt.IsZero() || !claim.LeaseUntil.After(claim.ClaimedAt) {
 		return fmt.Errorf("claim assessments: a future lease deadline is required")
@@ -1115,7 +1126,7 @@ func (p *Pool) FinishAssessments(ctx context.Context, outcomes []AssessmentOutco
 		}
 		return BatchActionResult{}, fmt.Errorf("finish assessment for job %d: %w", outcome.JobID, err)
 	}
-	if _, err := queries.StopAssessmentRetriesAtLimit(ctx, unattendedAttemptLimit); err != nil {
+	if err := stopExhaustedAssessmentRetries(ctx, queries); err != nil {
 		return BatchActionResult{}, fmt.Errorf("stop exhausted assessment retries: %w", err)
 	}
 	if err := transaction.Commit(); err != nil {

@@ -18,3 +18,10 @@ SELECT
   outreach_time_windows_json
 FROM automation_settings
 WHERE id = 1;
+
+-- name: ConfigureAssessment :execrows
+UPDATE automation_settings
+SET automatic_assessment_enabled = sqlc.arg(automatic_assessment_enabled),
+    assessment_processing_limit = sqlc.arg(assessment_processing_limit),
+    updated_at = sqlc.arg(updated_at)
+WHERE id = 1;

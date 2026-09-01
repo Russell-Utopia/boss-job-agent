@@ -10,6 +10,28 @@ import (
 	"database/sql"
 )
 
+const configureAssessment = `-- name: ConfigureAssessment :execrows
+UPDATE automation_settings
+SET automatic_assessment_enabled = ?1,
+    assessment_processing_limit = ?2,
+    updated_at = ?3
+WHERE id = 1
+`
+
+type ConfigureAssessmentParams struct {
+	AutomaticAssessmentEnabled int64
+	AssessmentProcessingLimit  int64
+	UpdatedAt                  int64
+}
+
+func (q *Queries) ConfigureAssessment(ctx context.Context, arg ConfigureAssessmentParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, configureAssessment, arg.AutomaticAssessmentEnabled, arg.AssessmentProcessingLimit, arg.UpdatedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const ensureSafeDefaults = `-- name: EnsureSafeDefaults :exec
 INSERT OR IGNORE INTO automation_settings (
   id,

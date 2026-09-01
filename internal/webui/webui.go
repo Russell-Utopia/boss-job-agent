@@ -170,6 +170,7 @@ func New(dependencies Dependencies) http.Handler {
 	mux.HandleFunc("POST /jobs/{jobID}/assessment", h.assessmentCommandPage(h.dependencies.Jobs.QueueAssessments, "queued"))
 	mux.HandleFunc("POST /jobs/{jobID}/assessment/retry", h.assessmentCommandPage(h.dependencies.Jobs.RetryAssessmentFailures, "retried"))
 	mux.HandleFunc("GET /assessments", h.renderPage("assessments", "岗位鉴定", h.assessmentsState))
+	mux.HandleFunc("POST /assessments/settings", h.configureAssessmentPage)
 	mux.HandleFunc("GET /outreach", h.renderPage("outreach", "打招呼", h.outreachState))
 	mux.HandleFunc("GET /resume", h.renderPage("resume", "在线简历", h.resumeState))
 	mux.HandleFunc("POST /resume/refresh", h.refreshResumePage)
@@ -347,6 +348,30 @@ func (h *handler) assessmentsState(ctx context.Context) (startupState, error) {
 		Automation:   settings,
 		RunlogHealth: h.dependencies.Runlog.Health(),
 	}, nil
+}
+
+func (h *handler) configureAssessmentPage(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "鉴定设置内容无效", http.StatusBadRequest)
+		return
+	}
+	processingLimit, err := strconv.Atoi(r.PostFormValue("assessmentProcessingLimit"))
+	if err != nil {
+		http.Error(w, "AI 同时鉴定数格式无效", http.StatusBadRequest)
+		return
+	}
+	enabled := r.PostFormValue("automaticAssessmentEnabled") == "on"
+	if err := h.dependencies.Settings.ConfigureAssessment(r.Context(), enabled, processingLimit); err != nil {
+		var rejection businessRejection
+		if errors.As(err, &rejection) {
+			http.Error(w, rejection.RejectionReason(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "保存鉴定设置失败，请稍后重试", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/assessments", http.StatusSeeOther)
 }
 
 func (h *handler) outreachState(ctx context.Context) (startupState, error) {

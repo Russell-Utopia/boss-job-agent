@@ -277,7 +277,8 @@ WHERE assessment_status = 'processing'
 
 -- name: StopAssessmentRetriesAtLimit :execrows
 UPDATE platform_jobs
-SET assessment_retry_at = NULL
+SET assessment_retry_at = NULL,
+    assessment_reason = sqlc.arg(reason)
 WHERE assessment_status = 'failed'
   AND assessment_consecutive_failure_count >= sqlc.arg(failure_limit)
   AND assessment_retry_at IS NOT NULL;
@@ -330,7 +331,14 @@ WHERE id IN (
         CASE candidate.assessment_status WHEN 'pending' THEN 0 ELSE 1 END,
         candidate.first_seen_at,
         candidate.id
-    LIMIT sqlc.arg(claim_limit)
+    LIMIT max(
+        CAST(sqlc.arg(processing_limit) AS INTEGER) - (
+            SELECT count(*)
+            FROM platform_jobs AS processing_job
+            WHERE processing_job.assessment_status = 'processing'
+        ),
+        0
+    )
 )
 RETURNING
     id,

@@ -145,7 +145,7 @@ func mustCompleteWebAssessment(
 	}
 	work, err := runtime.pool.ClaimAssessments(t.Context(), jobpool.AssessmentClaim{
 		Worker: "assessment-worker", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: evaluatorVersion, Limit: 1,
+		EvaluatorVersion: evaluatorVersion, ProcessingLimit: 1,
 		ClaimedAt: time.UnixMilli(1500), LeaseUntil: time.UnixMilli(2500),
 	})
 	if err != nil || len(work) != 1 {
@@ -202,7 +202,7 @@ func openTestWebWithLogPath(t *testing.T, databasePath, logPath string) *testWeb
 	logs := runlog.Open(logPath)
 	resumeReader := &webResumeReader{content: webResumeContent("Go 后端工程师")}
 	resumeVersions := onlineresume.New(db, resumeReader, logs, func() time.Time { return now })
-	assessmentService := assessment.New(db, resumeVersions, pool, nil, logs, func() time.Time { return now })
+	assessmentService := assessment.New(db, resumeVersions, pool, settings, nil, logs, func() time.Time { return now })
 	if err := assessmentService.EnsureDefaultPolicy(t.Context(), now); err != nil {
 		_ = db.Close()
 		t.Fatalf("ensure default policy: %v", err)
@@ -303,6 +303,65 @@ func TestFirstUseWebProvidesFourStableEntriesAndSafeState(t *testing.T) {
 	if runtime.resume.calls != 0 {
 		t.Errorf("page reads triggered %d BOSS online resume calls, want 0", runtime.resume.calls)
 	}
+}
+
+func TestAssessmentPageConfiguresAutomaticAdmissionAndAnUncappedPositiveLimit(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+	client := server.Client()
+
+	assertPageContains(t, client, server.URL+"/assessments", []string{
+		`action="/assessments/settings"`,
+		`name="automaticAssessmentEnabled"`,
+		`name="assessmentProcessingLimit"`,
+		`min="1"`,
+		`value="5"`,
+		"保存鉴定设置",
+	})
+	response := postFormResponse(t, client, server.URL+"/assessments/settings", url.Values{
+		"automaticAssessmentEnabled": {"on"},
+		"assessmentProcessingLimit":  {"37"},
+	})
+	body := readResponseBody(t, response)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("configure assessment status = %d, want redirected 200; body=%s", response.StatusCode, body)
+	}
+	assertTextContains(t, body, []string{`checked`, `value="37"`, "已开启"})
+
+	var enabled int
+	var limit int
+	if err := runtime.db.QueryRowContext(t.Context(), `
+		SELECT automatic_assessment_enabled, assessment_processing_limit
+		FROM automation_settings WHERE id = 1
+	`).Scan(&enabled, &limit); err != nil {
+		t.Fatalf("read configured assessment settings: %v", err)
+	}
+	if enabled != 1 || limit != 37 {
+		t.Errorf("stored assessment settings = enabled %d, limit %d; want 1 and 37", enabled, limit)
+	}
+}
+
+func TestAssessmentPageRejectsANonPositiveProcessingLimit(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestWeb(t, ":memory:")
+	t.Cleanup(func() { closeTestWeb(t, runtime) })
+	server := httptest.NewServer(runtime.Handler)
+	t.Cleanup(server.Close)
+
+	response := postFormResponse(t, server.Client(), server.URL+"/assessments/settings", url.Values{
+		"automaticAssessmentEnabled": {"on"},
+		"assessmentProcessingLimit":  {"0"},
+	})
+	body := readResponseBody(t, response)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("configure invalid assessment limit status = %d, want 400; body=%s", response.StatusCode, body)
+	}
+	assertTextContains(t, body, []string{"AI 同时鉴定数必须是正整数"})
 }
 
 func TestOnlineResumePageRunsTheCompleteControlledRefreshFlow(t *testing.T) {
@@ -484,7 +543,7 @@ func TestJobDetailQueuesAndRetriesAssessmentWithSeparateCommands(t *testing.T) {
 	resumeID, policyID := seedWebAssessmentInputs(t, runtime.db, 2, 2)
 	work, err := runtime.pool.ClaimAssessments(t.Context(), jobpool.AssessmentClaim{
 		Worker: "assessment-worker", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 1, Limit: 1, ClaimedAt: time.UnixMilli(2000), LeaseUntil: time.UnixMilli(3000),
+		EvaluatorVersion: 1, ProcessingLimit: 1, ClaimedAt: time.UnixMilli(2000), LeaseUntil: time.UnixMilli(3000),
 	})
 	if err != nil || len(work) != 1 {
 		t.Fatalf("claim queued assessment: work=%#v err=%v", work, err)
@@ -529,7 +588,7 @@ func TestJobDetailDisablesAssessmentFailureRetryAfterTheJobCloses(t *testing.T) 
 	resumeID, policyID := seedWebAssessmentInputs(t, runtime.db, 2, 2)
 	work, err := runtime.pool.ClaimAssessments(t.Context(), jobpool.AssessmentClaim{
 		Worker: "assessment-worker", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 1, Limit: 1, ClaimedAt: time.UnixMilli(2_000), LeaseUntil: time.UnixMilli(3_000),
+		EvaluatorVersion: 1, ProcessingLimit: 1, ClaimedAt: time.UnixMilli(2_000), LeaseUntil: time.UnixMilli(3_000),
 	})
 	if err != nil || len(work) != 1 {
 		t.Fatalf("claim assessment: work=%#v err=%v", work, err)

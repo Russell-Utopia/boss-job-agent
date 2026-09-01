@@ -8,7 +8,7 @@ export default function (pi) {
     parameters: Type.Object({
       // Go validates every item independently so one malformed peer cannot
       // prevent valid results in the same tool call from reaching Confirm.
-      results: Type.Array(Type.Unknown(), { minItems: 1, maxItems: 5 }),
+      results: Type.Array(Type.Unknown(), { minItems: 1 }),
     }),
     async execute(_toolCallId, params, signal) {
       const response = await fetch(process.env.BOSS_JOB_AGENT_CONFIRM_URL, {

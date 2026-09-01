@@ -10,6 +10,7 @@ import (
 	"time"
 
 	bossadapter "github.com/Russell-Utopia/boss-job-agent/internal/adapters/boss"
+	piadapter "github.com/Russell-Utopia/boss-job-agent/internal/adapters/pi"
 	"github.com/Russell-Utopia/boss-job-agent/internal/assessment"
 	"github.com/Russell-Utopia/boss-job-agent/internal/automationsettings"
 	"github.com/Russell-Utopia/boss-job-agent/internal/discovery"
@@ -22,10 +23,11 @@ import (
 )
 
 type assembled struct {
-	database  *sql.DB
-	handler   http.Handler
-	logs      *runlog.Log
-	discovery *discovery.Service
+	database   *sql.DB
+	handler    http.Handler
+	logs       *runlog.Log
+	discovery  *discovery.Service
+	assessment *assessment.Service
 }
 
 func assemble(ctx context.Context, config Config) (*assembled, error) {
@@ -39,11 +41,22 @@ func assemble(ctx context.Context, config Config) (*assembled, error) {
 	settings := automationsettings.New(database, pool)
 	now := config.Now()
 	resumeVersions := onlineresume.New(database, bossadapter.NewDefaultOnlineResume(), logs, config.Now)
-	assessmentService := assessment.New(
+	var assessmentService *assessment.Service
+	assessmentAdapter := piadapter.New(func(
+		ctx context.Context,
+		batch assessment.ConfirmationBatch,
+	) (assessment.ConfirmationReceipt, error) {
+		if assessmentService == nil {
+			return assessment.ConfirmationReceipt{}, errors.New("assessment service is not assembled")
+		}
+		return assessmentService.Confirm(ctx, batch)
+	})
+	assessmentService = assessment.New(
 		database,
 		resumeVersions,
 		pool,
-		nil,
+		settings,
+		assessmentAdapter,
 		logs,
 		config.Now,
 	)
@@ -65,8 +78,9 @@ func assemble(ctx context.Context, config Config) (*assembled, error) {
 	_ = outreach.New()
 
 	return &assembled{
-		database:  database,
-		discovery: discoveryService,
+		database:   database,
+		discovery:  discoveryService,
+		assessment: assessmentService,
 		handler: webui.New(webui.Dependencies{
 			Resume:     resumeVersions,
 			Discovery:  discoveryService,
@@ -112,7 +126,7 @@ func (a *assembled) close() error {
 
 func (a *assembled) startBackground(ctx context.Context, recheckInterval time.Duration) func() {
 	var group sync.WaitGroup
-	group.Add(2)
+	group.Add(3)
 	go func() {
 		defer group.Done()
 		a.logs.RunRechecks(ctx, recheckInterval)
@@ -120,6 +134,10 @@ func (a *assembled) startBackground(ctx context.Context, recheckInterval time.Du
 	go func() {
 		defer group.Done()
 		a.discovery.Run(ctx)
+	}()
+	go func() {
+		defer group.Done()
+		a.assessment.Run(ctx)
 	}()
 	return group.Wait
 }

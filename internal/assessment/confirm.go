@@ -117,8 +117,8 @@ type ConfirmationItemReceipt struct {
 
 // Confirm is the only business entry point for Pi assessment conclusions.
 func (s *Service) Confirm(ctx context.Context, batch ConfirmationBatch) (ConfirmationReceipt, error) {
-	if len(batch.Results) == 0 || len(batch.Results) > assessmentBatchLimit {
-		return ConfirmationReceipt{}, fmt.Errorf("confirm assessments: one to %d results are required", assessmentBatchLimit)
+	if len(batch.Results) == 0 {
+		return ConfirmationReceipt{}, fmt.Errorf("confirm assessments: at least one result is required")
 	}
 	receipt := ConfirmationReceipt{Results: make([]ConfirmationItemReceipt, 0, len(batch.Results))}
 	expected := make(map[ConfirmationAttempt]struct{}, len(batch.ExpectedAttempts))

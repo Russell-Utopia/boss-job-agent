@@ -101,6 +101,36 @@ func (s *Settings) Get(ctx context.Context) (View, error) {
 	}, nil
 }
 
+// ConfigureAssessment controls admission of new assessment work and the
+// global number of platform jobs that may be processing at once.
+func (s *Settings) ConfigureAssessment(ctx context.Context, enabled bool, processingLimit int) error {
+	if processingLimit <= 0 {
+		return &Rejection{
+			Code:   "assessment_processing_limit_invalid",
+			Reason: "AI 同时鉴定数必须是正整数",
+		}
+	}
+	updated, err := s.queries.ConfigureAssessment(ctx, sqlitedb.ConfigureAssessmentParams{
+		AutomaticAssessmentEnabled: boolInt64(enabled),
+		AssessmentProcessingLimit:  int64(processingLimit),
+		UpdatedAt:                  time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return fmt.Errorf("configure assessment automation: %w", err)
+	}
+	if updated != 1 {
+		return fmt.Errorf("configure assessment automation: safe settings are not initialized")
+	}
+	return nil
+}
+
+func boolInt64(value bool) int64 {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 // GetDiscoveryHints keeps missing downstream settings from blocking job
 // discovery while still reporting other storage failures.
 func (s *Settings) GetDiscoveryHints(ctx context.Context) (View, error) {

@@ -271,12 +271,23 @@
         <h2>{{.State.ActivePolicy.Name}}</h2>
         <ol class="rules">{{range .State.ActivePolicy.Rules}}<li>{{.}}</li>{{end}}</ol>
       </article>
-      <article class="card compact">
+      <article class="card">
+        <p class="eyebrow">自动化设置</p>
+        <h2>安排新的 AI 鉴定</h2>
         <dl>
           <div><dt>自动岗位鉴定</dt><dd>{{enabledText .State.Automation.AutomaticAssessmentEnabled}}</dd></div>
           <div><dt>同时鉴定数</dt><dd>{{.State.Automation.AssessmentProcessingLimit}}</dd></div>
         </dl>
-        <p class="muted">首次启动不会连接 Pi，也不会消耗模型调用。</p>
+        <form method="post" action="/assessments/settings" class="assessment-settings-form">
+          <label class="assessment-toggle">
+            <input type="checkbox" name="automaticAssessmentEnabled" {{if .State.Automation.AutomaticAssessmentEnabled}}checked{{end}}>
+            新出现且没有有效 AI 结论的岗位自动进入待鉴定
+          </label>
+          <label for="assessment-processing-limit">AI 同时鉴定数</label>
+          <input id="assessment-processing-limit" type="number" name="assessmentProcessingLimit" min="1" required value="{{.State.Automation.AssessmentProcessingLimit}}">
+          <button type="submit">保存鉴定设置</button>
+        </form>
+        <p class="muted">开关只控制新的自动入队；关闭后，已有待鉴定、鉴定中和自动重试仍会继续。调低上限不会取消已经开始的岗位。</p>
       </article>
     </section>
     {{end}}

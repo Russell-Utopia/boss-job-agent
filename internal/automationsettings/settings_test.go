@@ -73,6 +73,60 @@ func TestSafeDefaultInitializationPreservesSavedAutomationSettings(t *testing.T)
 	}
 }
 
+func TestConfigureAssessmentPersistsTheSwitchAndAnyPositiveProcessingLimit(t *testing.T) {
+	t.Parallel()
+
+	settings, _ := openTestSettings(t)
+	if err := settings.EnsureSafeDefaults(t.Context(), time.UnixMilli(1000)); err != nil {
+		t.Fatalf("ensure safe defaults: %v", err)
+	}
+
+	if err := settings.ConfigureAssessment(t.Context(), true, 37); err != nil {
+		t.Fatalf("configure assessment: %v", err)
+	}
+	view, err := settings.Get(t.Context())
+	if err != nil {
+		t.Fatalf("get configured assessment settings: %v", err)
+	}
+	if !view.AutomaticAssessmentEnabled || view.AssessmentProcessingLimit != 37 {
+		t.Errorf("configured assessment settings = %#v, want enabled with limit 37", view)
+	}
+
+	if err := settings.ConfigureAssessment(t.Context(), false, 1); err != nil {
+		t.Fatalf("lower assessment processing limit: %v", err)
+	}
+	view, err = settings.Get(t.Context())
+	if err != nil {
+		t.Fatalf("get lowered assessment settings: %v", err)
+	}
+	if view.AutomaticAssessmentEnabled || view.AssessmentProcessingLimit != 1 {
+		t.Errorf("lowered assessment settings = %#v, want disabled with limit 1", view)
+	}
+}
+
+func TestConfigureAssessmentRejectsANonPositiveLimitWithoutChangingSavedSettings(t *testing.T) {
+	t.Parallel()
+
+	settings, _ := openTestSettings(t)
+	if err := settings.EnsureSafeDefaults(t.Context(), time.UnixMilli(1000)); err != nil {
+		t.Fatalf("ensure safe defaults: %v", err)
+	}
+
+	err := settings.ConfigureAssessment(t.Context(), true, 0)
+	var rejection *Rejection
+	if !errors.As(err, &rejection) {
+		t.Fatalf("configure invalid assessment limit error = %v, want settings rejection", err)
+	}
+	if rejection.Code != "assessment_processing_limit_invalid" {
+		t.Errorf("configure invalid assessment limit code = %q", rejection.Code)
+	}
+	view, getErr := settings.Get(t.Context())
+	if getErr != nil {
+		t.Fatalf("get settings after invalid configure: %v", getErr)
+	}
+	assertSafeDefaults(t, view)
+}
+
 func assertSafeDefaults(t *testing.T, view View) {
 	t.Helper()
 	if view.AutomaticAssessmentEnabled {

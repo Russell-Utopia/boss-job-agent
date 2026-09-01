@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Russell-Utopia/boss-job-agent/internal/assessment/internal/sqlitedb"
+	"github.com/Russell-Utopia/boss-job-agent/internal/automationsettings"
 	"github.com/Russell-Utopia/boss-job-agent/internal/jobpool"
 	"github.com/Russell-Utopia/boss-job-agent/internal/onlineresume"
 	"github.com/Russell-Utopia/boss-job-agent/internal/runlog"
@@ -20,9 +22,11 @@ type Service struct {
 	queries        *sqlitedb.Queries
 	resumeVersions *onlineresume.Versions
 	pool           *jobpool.Pool
+	settings       *automationsettings.Settings
 	submitter      AssessmentSubmitter
 	logs           *runlog.Log
 	now            func() time.Time
+	cycleMu        sync.Mutex
 }
 
 type Policy struct {
@@ -36,6 +40,7 @@ func New(
 	db *sql.DB,
 	resumeVersions *onlineresume.Versions,
 	pool *jobpool.Pool,
+	settings *automationsettings.Settings,
 	submitter AssessmentSubmitter,
 	logs *runlog.Log,
 	now func() time.Time,
@@ -44,6 +49,7 @@ func New(
 		queries:        sqlitedb.New(db),
 		resumeVersions: resumeVersions,
 		pool:           pool,
+		settings:       settings,
 		submitter:      submitter,
 		logs:           logs,
 		now:            now,

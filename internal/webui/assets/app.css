@@ -159,6 +159,12 @@ dl div:last-child { border-bottom: 0; }
 dt { color: #64736d; }
 dd { margin: 0; font-weight: 720; text-align: right; }
 .rules { margin: 18px 0 0; padding-left: 22px; color: #3e4c46; line-height: 1.7; }
+.assessment-settings-form { margin-top: 20px; display: grid; gap: 10px; }
+.assessment-settings-form > label { color: #4c5b55; font-weight: 700; }
+.assessment-toggle { display: flex; align-items: flex-start; gap: 9px; line-height: 1.5; }
+.assessment-toggle input { margin-top: 5px; }
+.assessment-settings-form input[type="number"] { width: 100%; padding: 11px 12px; border: 1px solid #cad6d0; border-radius: 10px; font: inherit; }
+.assessment-settings-form button { margin-top: 4px; justify-self: start; }
 .button-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
 .inline-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
 .inline-actions form { margin: 0; }

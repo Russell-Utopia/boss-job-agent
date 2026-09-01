@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/Russell-Utopia/boss-job-agent/internal/automationsettings"
 	"github.com/Russell-Utopia/boss-job-agent/internal/jobpool"
 	"github.com/Russell-Utopia/boss-job-agent/internal/onlineresume"
 	"github.com/Russell-Utopia/boss-job-agent/internal/runlog"
@@ -36,6 +38,18 @@ func (s *controlledAssessmentSubmitter) Submit(_ context.Context, request Assess
 
 func (s *controlledAssessmentSubmitter) Close(context.Context) error { return nil }
 
+type cancelingAssessmentSubmitter struct {
+	started chan struct{}
+}
+
+func (s *cancelingAssessmentSubmitter) Submit(ctx context.Context, _ AssessmentRequest) error {
+	close(s.started)
+	<-ctx.Done()
+	return &SubmissionError{Category: SubmissionErrorTransient, Err: ctx.Err()}
+}
+
+func (s *cancelingAssessmentSubmitter) Close(context.Context) error { return nil }
+
 type controlledResumeReader struct {
 	content onlineresume.ResumeContent
 }
@@ -51,7 +65,7 @@ func openTestService(t *testing.T) (*Service, *sql.DB) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return New(db, nil, nil, nil, nil, time.Now), db
+	return New(db, nil, nil, nil, nil, nil, time.Now), db
 }
 
 func TestDefaultPolicyIsReadyForTheFirstAssessment(t *testing.T) {
@@ -114,11 +128,16 @@ func TestDefaultPolicyInitializationPreservesTheActiveSavedPolicy(t *testing.T) 
 }
 
 type assessmentRunFixture struct {
-	service       *Service
-	submitter     *controlledAssessmentSubmitter
-	job           jobpool.JobView
-	resumeContent onlineresume.ResumeContent
-	resumeVersion int
+	service        *Service
+	submitter      *controlledAssessmentSubmitter
+	settings       *automationsettings.Settings
+	pool           *jobpool.Pool
+	db             *sql.DB
+	resumeVersions *onlineresume.Versions
+	resumeReader   *controlledResumeReader
+	job            jobpool.JobView
+	resumeContent  onlineresume.ResumeContent
+	resumeVersion  int
 }
 
 func prepareQueuedAssessmentJob(t *testing.T, pool *jobpool.Pool) jobpool.JobView {
@@ -158,9 +177,10 @@ func newAssessmentRunFixture(t *testing.T) assessmentRunFixture {
 		Educations:         []string{"计算机本科"},
 		Skills:             []string{"Go", "SQLite"},
 	}
+	resumeReader := &controlledResumeReader{content: resumeContent}
 	resumeVersions := onlineresume.New(
 		db,
-		&controlledResumeReader{content: resumeContent},
+		resumeReader,
 		logs,
 		func() time.Time { return time.UnixMilli(1_000) },
 	)
@@ -169,6 +189,10 @@ func newAssessmentRunFixture(t *testing.T) assessmentRunFixture {
 		t.Fatalf("refresh online resume: %v", err)
 	}
 	pool := jobpool.New(db)
+	settings := automationsettings.New(db, pool)
+	if err := settings.EnsureSafeDefaults(t.Context(), time.UnixMilli(1_000)); err != nil {
+		t.Fatalf("ensure safe automation settings: %v", err)
+	}
 	job := prepareQueuedAssessmentJob(t, pool)
 	before, err := pool.GetJobDetail(t.Context(), job.ID)
 	if err != nil {
@@ -179,7 +203,7 @@ func newAssessmentRunFixture(t *testing.T) assessmentRunFixture {
 	}
 
 	submitter := &controlledAssessmentSubmitter{requests: make(chan AssessmentRequest, 1)}
-	service := New(db, resumeVersions, pool, submitter, logs, func() time.Time { return now })
+	service := New(db, resumeVersions, pool, settings, submitter, logs, func() time.Time { return now })
 	if err := service.EnsureDefaultPolicy(t.Context(), time.UnixMilli(1_000)); err != nil {
 		t.Fatalf("ensure default policy: %v", err)
 	}
@@ -194,7 +218,8 @@ func newAssessmentRunFixture(t *testing.T) assessmentRunFixture {
 		return nil
 	}
 	return assessmentRunFixture{
-		service: service, submitter: submitter, job: job,
+		service: service, submitter: submitter, settings: settings, pool: pool, db: db,
+		resumeVersions: resumeVersions, resumeReader: resumeReader, job: job,
 		resumeContent: resumeContent, resumeVersion: refreshed.Current.Version,
 	}
 }
@@ -245,6 +270,279 @@ func TestServiceSubmitsPendingAssessmentWithTheCompleteCurrentInputsOutsideTheCl
 	assertCompleteAssessmentRequest(t, fixture, request)
 }
 
+func TestFailedPiSubmissionFinishesClaimedJobsAndSchedulesAutomaticRetry(t *testing.T) {
+	t.Parallel()
+
+	fixture := newAssessmentRunFixture(t)
+	fixture.submitter.requests = nil
+	fixture.submitter.err = &SubmissionError{
+		Category: SubmissionErrorTransient,
+		Err:      errors.New("controlled Pi failure"),
+	}
+
+	if err := fixture.service.runSchedulingCycle(t.Context(), time.UnixMilli(2_000)); err != nil {
+		t.Fatalf("handle failed Pi submission: %v", err)
+	}
+	job, err := fixture.pool.GetJob(t.Context(), fixture.job.ID)
+	if err != nil {
+		t.Fatalf("get failed assessment job: %v", err)
+	}
+	if job.AssessmentStatus != jobpool.AssessmentStatusFailed || job.AssessmentLeaseOwner != "" || job.AssessmentLeaseUntil != nil {
+		t.Errorf("job after failed Pi submission = %#v, want failed with released lease", job)
+	}
+	var failureCount int
+	var retryAt sql.NullInt64
+	if err := fixture.db.QueryRowContext(t.Context(), `
+		SELECT assessment_consecutive_failure_count, assessment_retry_at
+		FROM platform_jobs WHERE id = ?
+	`, fixture.job.ID).Scan(&failureCount, &retryAt); err != nil {
+		t.Fatalf("read failed assessment retry state: %v", err)
+	}
+	if failureCount != 1 || !retryAt.Valid || retryAt.Int64 <= 2_000 {
+		t.Errorf("failed assessment retry state = count %d, retry %#v; want one failure and future retry", failureCount, retryAt)
+	}
+}
+
+func TestInvalidPiProtocolFailureRequiresManualRetry(t *testing.T) {
+	t.Parallel()
+
+	fixture := newAssessmentRunFixture(t)
+	fixture.submitter.requests = nil
+	fixture.submitter.err = &SubmissionError{
+		Category: SubmissionErrorInvalidProtocol,
+		Err:      errors.New("controlled invalid Pi protocol"),
+	}
+
+	if err := fixture.service.runSchedulingCycle(t.Context(), time.UnixMilli(2_000)); err != nil {
+		t.Fatalf("handle invalid Pi protocol: %v", err)
+	}
+	var status string
+	var retryAt sql.NullInt64
+	if err := fixture.db.QueryRowContext(t.Context(), `
+		SELECT assessment_status, assessment_retry_at
+		FROM platform_jobs WHERE id = ?
+	`, fixture.job.ID).Scan(&status, &retryAt); err != nil {
+		t.Fatalf("read invalid protocol failure: %v", err)
+	}
+	if status != string(jobpool.AssessmentStatusFailed) || retryAt.Valid {
+		t.Errorf("invalid protocol state = status %q, retry %#v; want failed without automatic retry", status, retryAt)
+	}
+}
+
+func TestCanceledPiSubmissionStillFinishesTheClaimWithABoundedCleanupContext(t *testing.T) {
+	t.Parallel()
+
+	fixture := newAssessmentRunFixture(t)
+	submitter := &cancelingAssessmentSubmitter{started: make(chan struct{})}
+	fixture.service.submitter = submitter
+	runContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cycleResult := make(chan error, 1)
+	go func() {
+		cycleResult <- fixture.service.runSchedulingCycle(runContext, time.UnixMilli(2_000))
+	}()
+	<-submitter.started
+	cancel()
+	if err := <-cycleResult; err != nil {
+		t.Fatalf("finish canceled Pi submission: %v", err)
+	}
+
+	job, err := fixture.pool.GetJob(t.Context(), fixture.job.ID)
+	if err != nil {
+		t.Fatalf("get assessment after canceled submission: %v", err)
+	}
+	if job.AssessmentStatus != jobpool.AssessmentStatusFailed || job.AssessmentLeaseOwner != "" {
+		t.Errorf("job after canceled submission = %#v, want failed with released lease", job)
+	}
+}
+
+func TestPendingAssessmentUsesTheResumeAndPolicyCurrentWhenItIsActuallyClaimed(t *testing.T) {
+	t.Parallel()
+
+	fixture := newAssessmentRunFixture(t)
+	if err := fixture.settings.ConfigureAssessment(t.Context(), false, 1); err != nil {
+		t.Fatalf("configure initial assessment limit: %v", err)
+	}
+	firstRequest := runAssessmentOnce(t, fixture)
+	if firstRequest.ResumeVersion != 1 || firstRequest.Policy.Version != 1 {
+		t.Fatalf("first assessment inputs = resume v%d, policy v%d; want v1 and v1", firstRequest.ResumeVersion, firstRequest.Policy.Version)
+	}
+	secondJob := preparePendingAssessmentWithNewCurrentInputs(t, fixture)
+
+	secondRequest := runAssessmentOnce(t, fixture)
+	if secondRequest.ResumeVersion != 2 || secondRequest.Policy.Version != 2 || len(secondRequest.Jobs) != 1 || secondRequest.Jobs[0].JobID != secondJob.ID {
+		t.Errorf("second assessment request = %#v, want pending job with resume v2 and policy v2", secondRequest)
+	}
+	assertRecordedAssessmentInputVersions(t, fixture, secondJob)
+}
+
+func preparePendingAssessmentWithNewCurrentInputs(
+	t *testing.T,
+	fixture assessmentRunFixture,
+) jobpool.JobView {
+	t.Helper()
+	secondJob, err := fixture.pool.Observe(t.Context(), 2, jobpool.Observation{
+		PlatformJobID: "boss-pending-current-input", CanonicalURL: "https://www.zhipin.com/job_detail/boss-pending-current-input.html",
+		JobTitle: "Go 后端工程师", CompanyName: "另一科技", City: "福州", Salary: "25-35K",
+		Responsibilities: "负责新服务", Requirements: "熟悉 Go",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(2_100),
+	})
+	if err != nil {
+		t.Fatalf("observe second assessment job: %v", err)
+	}
+	queued, err := fixture.pool.QueueAssessments(t.Context(), []int64{secondJob.ID})
+	if err != nil || queued.Succeeded != 1 {
+		t.Fatalf("queue second assessment: result=%#v err=%v", queued, err)
+	}
+	activateSecondAssessmentInputs(t, fixture)
+	return secondJob
+}
+
+func activateSecondAssessmentInputs(t *testing.T, fixture assessmentRunFixture) {
+	t.Helper()
+	fixture.resumeReader.content.Skills = append(fixture.resumeReader.content.Skills, "Kafka")
+	refreshed, err := fixture.resumeVersions.RefreshFromBoss(t.Context())
+	if err != nil || refreshed.Current.Version != 2 {
+		t.Fatalf("refresh resume before pending claim: result=%#v err=%v", refreshed, err)
+	}
+	if _, err := fixture.db.ExecContext(t.Context(), `UPDATE assessment_policy_versions SET is_active = 0`); err != nil {
+		t.Fatalf("deactivate first policy: %v", err)
+	}
+	if _, err := fixture.db.ExecContext(t.Context(), `
+		INSERT INTO assessment_policy_versions (
+			version_no, rules_json, is_active, change_note, created_at
+		) VALUES (2, '{"rules":["采用新策略"]}', 1, '用户采用', 2200)
+	`); err != nil {
+		t.Fatalf("save second policy: %v", err)
+	}
+	if err := fixture.settings.ConfigureAssessment(t.Context(), false, 2); err != nil {
+		t.Fatalf("increase assessment processing limit: %v", err)
+	}
+}
+
+func assertRecordedAssessmentInputVersions(
+	t *testing.T,
+	fixture assessmentRunFixture,
+	secondJob jobpool.JobView,
+) {
+	t.Helper()
+	firstDetail, err := fixture.pool.GetJobDetail(t.Context(), fixture.job.ID)
+	if err != nil {
+		t.Fatalf("get first processing assessment: %v", err)
+	}
+	secondDetail, err := fixture.pool.GetJobDetail(t.Context(), secondJob.ID)
+	if err != nil {
+		t.Fatalf("get second processing assessment: %v", err)
+	}
+	if firstDetail.AssessmentInputs.ResumeVersion != 1 || firstDetail.AssessmentInputs.PolicyVersion != 1 {
+		t.Errorf("first processing inputs changed = %#v, want resume v1 and policy v1", firstDetail.AssessmentInputs)
+	}
+	if secondDetail.AssessmentInputs.ResumeVersion != 2 || secondDetail.AssessmentInputs.PolicyVersion != 2 {
+		t.Errorf("second claimed inputs = %#v, want resume v2 and policy v2", secondDetail.AssessmentInputs)
+	}
+}
+
+func TestSchedulingUsesAutomaticAdmissionAndTheCurrentGlobalProcessingLimit(t *testing.T) {
+	t.Parallel()
+
+	fixture := newAssessmentRunFixture(t)
+	if err := fixture.settings.ConfigureAssessment(t.Context(), true, 7); err != nil {
+		t.Fatalf("enable automatic assessment: %v", err)
+	}
+	automaticJobs := observeAutomaticAssessmentJobs(t, fixture, 7)
+
+	request := runAssessmentOnce(t, fixture)
+	if len(request.Jobs) != 7 {
+		t.Fatalf("submitted assessment jobs = %d, want current processing limit 7 without a default cap of 5", len(request.Jobs))
+	}
+	jobIDs := assessmentJobIDs(fixture.job, automaticJobs)
+	processing, pending := countAssessmentStates(t, fixture.pool, jobIDs)
+	if processing != 7 || pending != 1 {
+		t.Errorf("scheduled assessment states = processing %d, pending %d; want 7 and 1", processing, pending)
+	}
+
+	if err := fixture.settings.ConfigureAssessment(t.Context(), false, 1); err != nil {
+		t.Fatalf("lower and disable automatic assessment: %v", err)
+	}
+	if err := fixture.service.runSchedulingCycle(t.Context(), time.UnixMilli(3_000)); err != nil {
+		t.Fatalf("run after lowering assessment limit: %v", err)
+	}
+	assertNoAssessmentRequest(t, fixture.submitter)
+	assertNoJobReturnedToNotQueued(t, fixture.pool, jobIDs)
+}
+
+func observeAutomaticAssessmentJobs(
+	t *testing.T,
+	fixture assessmentRunFixture,
+	count int,
+) []jobpool.JobView {
+	t.Helper()
+	jobs := make([]jobpool.JobView, count)
+	for index := range jobs {
+		job, err := fixture.pool.Observe(t.Context(), int64(index+2), jobpool.Observation{
+			PlatformJobID: fmt.Sprintf("boss-automatic-%d", index+1),
+			CanonicalURL:  fmt.Sprintf("https://www.zhipin.com/job_detail/boss-automatic-%d.html", index+1),
+			JobTitle:      fmt.Sprintf("Go 自动鉴定工程师 %d", index+1), CompanyName: "示例科技",
+			City: "福州", Salary: "20-30K", Responsibilities: "负责 Go 服务",
+			Requirements: "熟悉 Go", PlatformStatus: jobpool.PlatformStatusOpen,
+			ObservedAt: time.UnixMilli(int64(1_600 + index)),
+		})
+		if err != nil {
+			t.Fatalf("observe automatic assessment job %d: %v", index+1, err)
+		}
+		jobs[index] = job
+	}
+	return jobs
+}
+
+func assessmentJobIDs(firstJob jobpool.JobView, remainingJobs []jobpool.JobView) []int64 {
+	jobIDs := []int64{firstJob.ID}
+	for _, job := range remainingJobs {
+		jobIDs = append(jobIDs, job.ID)
+	}
+	return jobIDs
+}
+
+func countAssessmentStates(t *testing.T, pool *jobpool.Pool, jobIDs []int64) (int, int) {
+	t.Helper()
+	processing, pending := 0, 0
+	for _, jobID := range jobIDs {
+		job, err := pool.GetJob(t.Context(), jobID)
+		if err != nil {
+			t.Fatalf("get scheduled job %d: %v", jobID, err)
+		}
+		switch job.AssessmentStatus {
+		case jobpool.AssessmentStatusProcessing:
+			processing++
+		case jobpool.AssessmentStatusPending:
+			pending++
+		}
+	}
+	return processing, pending
+}
+
+func assertNoAssessmentRequest(t *testing.T, submitter *controlledAssessmentSubmitter) {
+	t.Helper()
+	select {
+	case unexpected := <-submitter.requests:
+		t.Errorf("submitted more work after lowering below active count: %#v", unexpected)
+	default:
+	}
+}
+
+func assertNoJobReturnedToNotQueued(t *testing.T, pool *jobpool.Pool, jobIDs []int64) {
+	t.Helper()
+	for _, jobID := range jobIDs {
+		job, err := pool.GetJob(t.Context(), jobID)
+		if err != nil {
+			t.Fatalf("get job after lowering limit %d: %v", jobID, err)
+		}
+		if job.AssessmentStatus == jobpool.AssessmentStatusNotQueued {
+			t.Errorf("job %d returned to not_queued after disabling automatic assessment", jobID)
+		}
+	}
+}
+
 func prepareClaimedAssessmentJobs(
 	t *testing.T,
 	db *sql.DB,
@@ -278,7 +576,7 @@ func prepareClaimedAssessmentJobs(
 	}
 	work, err := pool.ClaimAssessments(t.Context(), jobpool.AssessmentClaim{
 		Worker: "assessment-worker", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: assessmentEvaluatorVersion, Limit: len(jobs),
+		EvaluatorVersion: assessmentEvaluatorVersion, ProcessingLimit: len(jobs),
 		ClaimedAt: time.UnixMilli(2_000), LeaseUntil: time.UnixMilli(12_000),
 	})
 	if err != nil || len(work) != len(jobs) {
@@ -314,7 +612,7 @@ func TestConfirmAcceptsThreeSuggestionsWithoutLettingInvalidOrStaleItemsHideThem
 	logs := runlog.Open(filepath.Join(t.TempDir(), "assessment-confirm.jsonl"))
 	t.Cleanup(func() { _ = logs.Close() })
 	pool := jobpool.New(db)
-	service := New(db, nil, pool, nil, logs, func() time.Time { return time.UnixMilli(3_000) })
+	service := New(db, nil, pool, nil, nil, logs, func() time.Time { return time.UnixMilli(3_000) })
 	jobs := prepareClaimedAssessmentJobs(t, db, pool, 5)
 
 	receipt, err := service.Confirm(t.Context(), ConfirmationBatch{Results: []AssessmentConfirmation{

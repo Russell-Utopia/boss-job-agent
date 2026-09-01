@@ -126,7 +126,14 @@ WHERE id IN (
         CASE candidate.assessment_status WHEN 'pending' THEN 0 ELSE 1 END,
         candidate.first_seen_at,
         candidate.id
-    LIMIT ?9
+    LIMIT max(
+        CAST(?9 AS INTEGER) - (
+            SELECT count(*)
+            FROM platform_jobs AS processing_job
+            WHERE processing_job.assessment_status = 'processing'
+        ),
+        0
+    )
 )
 RETURNING
     id,
@@ -154,7 +161,7 @@ type ClaimAssessmentsParams struct {
 	UpdatedAt        int64
 	ClaimedAt        sql.NullInt64
 	FailureLimit     int64
-	ClaimLimit       int64
+	ProcessingLimit  int64
 }
 
 type ClaimAssessmentsRow struct {
@@ -184,7 +191,7 @@ func (q *Queries) ClaimAssessments(ctx context.Context, arg ClaimAssessmentsPara
 		arg.UpdatedAt,
 		arg.ClaimedAt,
 		arg.FailureLimit,
-		arg.ClaimLimit,
+		arg.ProcessingLimit,
 	)
 	if err != nil {
 		return nil, err
@@ -1100,14 +1107,20 @@ func (q *Queries) ReviewPlatformJob(ctx context.Context, arg ReviewPlatformJobPa
 
 const stopAssessmentRetriesAtLimit = `-- name: StopAssessmentRetriesAtLimit :execrows
 UPDATE platform_jobs
-SET assessment_retry_at = NULL
+SET assessment_retry_at = NULL,
+    assessment_reason = ?1
 WHERE assessment_status = 'failed'
-  AND assessment_consecutive_failure_count >= ?1
+  AND assessment_consecutive_failure_count >= ?2
   AND assessment_retry_at IS NOT NULL
 `
 
-func (q *Queries) StopAssessmentRetriesAtLimit(ctx context.Context, failureLimit int64) (int64, error) {
-	result, err := q.db.ExecContext(ctx, stopAssessmentRetriesAtLimit, failureLimit)
+type StopAssessmentRetriesAtLimitParams struct {
+	Reason       sql.NullString
+	FailureLimit int64
+}
+
+func (q *Queries) StopAssessmentRetriesAtLimit(ctx context.Context, arg StopAssessmentRetriesAtLimitParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, stopAssessmentRetriesAtLimit, arg.Reason, arg.FailureLimit)
 	if err != nil {
 		return 0, err
 	}

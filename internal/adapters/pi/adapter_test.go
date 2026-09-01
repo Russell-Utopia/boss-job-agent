@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -132,6 +133,7 @@ printf '%s\n' '{"type":"agent_end"}'
 	if err == nil || !strings.Contains(err.Error(), "without calling confirm_assessment_results") {
 		t.Fatalf("ordinary model text result = %v, want missing confirmation error", err)
 	}
+	assertSubmissionErrorCategory(t, err, assessment.SubmissionErrorInvalidProtocol)
 }
 
 func TestAdapterRejectsTrailingJSONWithoutCallingTheConfirmer(t *testing.T) {
@@ -165,6 +167,40 @@ printf '%s\n' '{"type":"agent_end"}'
 	})
 	if err == nil || !strings.Contains(err.Error(), "without calling confirm_assessment_results") {
 		t.Fatalf("trailing JSON result = %v, want missing confirmation error", err)
+	}
+	assertSubmissionErrorCategory(t, err, assessment.SubmissionErrorInvalidProtocol)
+}
+
+func TestAdapterClassifiesProcessStartFailureAsTransient(t *testing.T) {
+	t.Parallel()
+
+	adapter := NewWithConfig(
+		Config{Executable: filepath.Join(t.TempDir(), "missing-pi")},
+		func(context.Context, assessment.ConfirmationBatch) (assessment.ConfirmationReceipt, error) {
+			return assessment.ConfirmationReceipt{}, nil
+		},
+	)
+	t.Cleanup(func() { _ = adapter.Close(context.Background()) })
+
+	err := adapter.Submit(t.Context(), assessment.AssessmentRequest{
+		TraceID: "0123456789abcdef0123456789abcdef",
+		Jobs:    []assessment.AssessmentJobInput{{JobID: 1, AttemptNo: 1}},
+	})
+	assertSubmissionErrorCategory(t, err, assessment.SubmissionErrorTransient)
+}
+
+func assertSubmissionErrorCategory(
+	t *testing.T,
+	err error,
+	want assessment.SubmissionErrorCategory,
+) {
+	t.Helper()
+	var submissionError *assessment.SubmissionError
+	if !errors.As(err, &submissionError) {
+		t.Fatalf("submission error = %v, want categorized error %q", err, want)
+	}
+	if submissionError.Category != want {
+		t.Errorf("submission error category = %q, want %q", submissionError.Category, want)
 	}
 }
 
@@ -236,13 +272,13 @@ func newConfirmationIntegrationFixture(t *testing.T) confirmationIntegrationFixt
 	}
 	work, err := pool.ClaimAssessments(t.Context(), jobpool.AssessmentClaim{
 		Worker: "assessment-worker", ResumeVersionID: resumeID, PolicyVersionID: policyID,
-		EvaluatorVersion: 1, Limit: 3, ClaimedAt: time.UnixMilli(2_000), LeaseUntil: time.UnixMilli(12_000),
+		EvaluatorVersion: 1, ProcessingLimit: 3, ClaimedAt: time.UnixMilli(2_000), LeaseUntil: time.UnixMilli(12_000),
 	})
 	if err != nil || len(work) != 3 {
 		t.Fatalf("claim assessments: work=%#v err=%v", work, err)
 	}
 	return confirmationIntegrationFixture{
-		service: assessment.New(db, nil, pool, nil, logs, func() time.Time { return time.UnixMilli(3_000) }),
+		service: assessment.New(db, nil, pool, nil, nil, logs, func() time.Time { return time.UnixMilli(3_000) }),
 		pool:    pool, jobs: jobs,
 	}
 }
@@ -303,6 +339,9 @@ func TestConfirmationExtensionDefersItemValidationToTheGoService(t *testing.T) {
 
 	if !strings.Contains(string(confirmationExtension), "Type.Array(Type.Unknown()") {
 		t.Fatal("confirmation extension validates item fields before Service.Confirm")
+	}
+	if strings.Contains(string(confirmationExtension), "maxItems") {
+		t.Fatal("confirmation extension caps the result batch instead of following the configured processing limit")
 	}
 }
 
