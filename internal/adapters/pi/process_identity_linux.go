@@ -54,7 +54,7 @@ func linuxProcessStartTime(pid int) (string, error) {
 
 func linuxProcessExecutable(pid int) (string, error) {
 	path := filepath.Join("/proc", strconv.Itoa(pid), "exe")
-	executable, err := os.Readlink(path) //nolint:gosec // PID is converted from an integer and procfs is the OS identity source.
+	executable, err := os.Readlink(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("%w: inspect PID %d", errProcessNotFound, pid)
