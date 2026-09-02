@@ -58,17 +58,16 @@ type AssessmentRequest struct {
 }
 
 type AssessmentJobInput struct {
-	JobID            int64  `json:"jobId"`
-	AttemptNo        int64  `json:"attemptNo"`
-	PlatformJobID    string `json:"platformJobId"`
-	CanonicalURL     string `json:"canonicalUrl"`
-	JobTitle         string `json:"jobTitle"`
-	CompanyName      string `json:"companyName"`
-	City             string `json:"city"`
-	Salary           string `json:"salary"`
-	Responsibilities string `json:"responsibilities"`
-	Requirements     string `json:"requirements"`
-	JDHash           string `json:"jdHash"`
+	JobID         int64  `json:"jobId"`
+	AttemptNo     int64  `json:"attemptNo"`
+	PlatformJobID string `json:"platformJobId"`
+	CanonicalURL  string `json:"canonicalUrl"`
+	JobTitle      string `json:"jobTitle"`
+	CompanyName   string `json:"companyName"`
+	City          string `json:"city"`
+	Salary        string `json:"salary"`
+	FullJD        string `json:"fullJD"`
+	JDHash        string `json:"jdHash"`
 }
 
 func (s *Service) runSchedulingCycle(ctx context.Context, now time.Time) error {
@@ -278,8 +277,7 @@ func assessmentInputs(work []jobpool.AssessmentWork) []AssessmentJobInput {
 		inputs = append(inputs, AssessmentJobInput{
 			JobID: item.JobID, AttemptNo: item.AttemptNo, PlatformJobID: item.PlatformJobID,
 			CanonicalURL: item.CanonicalURL, JobTitle: item.JobTitle, CompanyName: item.CompanyName,
-			City: item.City, Salary: item.Salary, Responsibilities: item.Responsibilities,
-			Requirements: item.Requirements, JDHash: item.JDHash,
+			City: item.City, Salary: item.Salary, FullJD: item.FullJD, JDHash: item.JDHash,
 		})
 	}
 	return inputs

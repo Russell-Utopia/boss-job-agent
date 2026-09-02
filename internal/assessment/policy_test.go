@@ -70,7 +70,7 @@ func policySampleJob(t *testing.T, pool *jobpool.Pool, id string) jobpool.JobVie
 	job, err := pool.Observe(t.Context(), 1, jobpool.Observation{
 		PlatformJobID: id, CanonicalURL: "https://www.zhipin.com/job_detail/" + id + ".html",
 		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1500),
 	})
 	if err != nil {

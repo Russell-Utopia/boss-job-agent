@@ -99,10 +99,11 @@ func (a *JobDiscovery) ReadJob(ctx context.Context, platformJobID string) (disco
 	}
 	observation, err := observationFromReliableSearchDetail(rawJob)
 	if err != nil {
-		return discovery.JobObservation{}, classifyDiscoveryError(newAdapterFailure(
-			adapterFailureInvalidResponse,
-			err,
-		))
+		// observationFromReliableSearchDetail already classifies its failures:
+		// an unreliable identity/status is invalid_response, an empty JD is a
+		// single-job retryable read failure. Preserve that classification
+		// instead of collapsing everything into invalid_response.
+		return discovery.JobObservation{}, classifyDiscoveryError(err)
 	}
 	return observation, nil
 }
@@ -171,10 +172,6 @@ type rawDiscoveryJob struct {
 	FullJD                 string `json:"fullJD"`
 }
 
-var requirementsHeading = regexp.MustCompile(
-	`(?m)^[\t ]*(?:任职要求|岗位要求|职位要求|任职资格)[\t ]*(?:[：:][\t ]*|\n)`,
-)
-
 func decodeReliableJobList(value string) (discovery.JobPage, map[string]rawListedJob, error) {
 	var rawPage rawJobList
 	if err := json.Unmarshal([]byte(value), &rawPage); err != nil {
@@ -205,31 +202,44 @@ func decodeReliableJobList(value string) (discovery.JobPage, map[string]rawListe
 func observationFromReliableSearchDetail(rawJob rawDiscoveryJob) (discovery.JobObservation, error) {
 	platformJobID := strings.TrimSpace(rawJob.PlatformJobID)
 	if platformJobID == "" || strings.TrimSpace(rawJob.DetailPlatformJobID) != platformJobID {
-		return discovery.JobObservation{}, errors.New("BOSS live detail does not confirm the listed platform job")
+		return discovery.JobObservation{}, newAdapterFailure(
+			adapterFailureInvalidResponse,
+			errors.New("BOSS live detail does not confirm the listed platform job"),
+		)
 	}
 	if strings.TrimSpace(rawJob.PlatformStatusEvidence) != "招聘中" {
-		return discovery.JobObservation{}, errors.New("BOSS live detail has no reliable open status")
+		return discovery.JobObservation{}, newAdapterFailure(
+			adapterFailureInvalidResponse,
+			errors.New("BOSS live detail has no reliable open status"),
+		)
 	}
 	salary, err := reliableDiscoverySalary(rawJob.Salary, rawJob.SalaryEvidence)
 	if err != nil {
-		return discovery.JobObservation{}, err
+		return discovery.JobObservation{}, newAdapterFailure(adapterFailureInvalidResponse, err)
 	}
-	responsibilities, requirements, err := splitReliableJD(rawJob.FullJD)
-	if err != nil {
-		return discovery.JobObservation{}, fmt.Errorf("BOSS live detail: %w", err)
+	// The full JD is handed straight to Pi and stored whole; no responsibilities/
+	// requirements split is imposed, so a legitimate prose-only JD is reliable.
+	// An empty JD, however, is a partial or anti-bot detail page: treat it as a
+	// single-job retryable read failure (like a timeout), never a run-failing
+	// invalid_response, so one unreadable job cannot sink the whole run.
+	fullJD := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(rawJob.FullJD, "\r\n", "\n"), "\r", "\n"))
+	if fullJD == "" {
+		return discovery.JobObservation{}, newAdapterFailure(
+			adapterFailureTransient,
+			errors.New("BOSS live detail returned an empty JD"),
+		)
 	}
 	// A matching live detail identity plus BOSS's explicit 招聘中 status is
 	// this adapter's reliable evidence that the job is open.
 	return discovery.JobObservation{
-		PlatformJobID:    platformJobID,
-		CanonicalURL:     strings.TrimSpace(rawJob.CanonicalURL),
-		JobTitle:         strings.TrimSpace(rawJob.JobTitle),
-		CompanyName:      strings.TrimSpace(rawJob.CompanyName),
-		City:             strings.TrimSpace(rawJob.City),
-		Salary:           salary,
-		Responsibilities: responsibilities,
-		Requirements:     requirements,
-		PlatformStatus:   discovery.PlatformStatusOpen,
+		PlatformJobID:  platformJobID,
+		CanonicalURL:   strings.TrimSpace(rawJob.CanonicalURL),
+		JobTitle:       strings.TrimSpace(rawJob.JobTitle),
+		CompanyName:    strings.TrimSpace(rawJob.CompanyName),
+		City:           strings.TrimSpace(rawJob.City),
+		Salary:         salary,
+		FullJD:         fullJD,
+		PlatformStatus: discovery.PlatformStatusOpen,
 	}, nil
 }
 
@@ -249,20 +259,6 @@ func reliableDiscoverySalary(value, evidence string) (string, error) {
 	default:
 		return "", errors.New("BOSS live detail has invalid salary evidence")
 	}
-}
-
-func splitReliableJD(value string) (string, string, error) {
-	fullJD := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n"))
-	boundary := requirementsHeading.FindStringIndex(fullJD)
-	if boundary == nil || boundary[0] == 0 {
-		return "", "", errors.New("complete JD has no reliable responsibilities and requirements boundary")
-	}
-	responsibilities := strings.TrimSpace(fullJD[:boundary[0]])
-	requirements := strings.TrimSpace(fullJD[boundary[1]:])
-	if responsibilities == "" || requirements == "" {
-		return "", "", errors.New("complete JD responsibilities or requirements are empty")
-	}
-	return responsibilities, requirements, nil
 }
 
 func validateSearchInput(searchRange discovery.SearchRange, pageNo int) error {
@@ -576,9 +572,12 @@ const readDiscoveryJobScript = `(async () => {
     salaryEvidence: salaryReadable ? "readable" : "unavailable",
     fullJD: normalized(info.postDescription || info.jobDescription).replace(/\r\n?/g, "\n")
   };
+  // fullJD is deliberately excluded: an empty JD is not an unreliable page but a
+  // single-job read failure, classified as retryable on the Go side so it cannot
+  // fail the whole run. The identity and basic fields below still gate the page.
   const required = [
     job.platformJobId, job.detailPlatformJobId, job.platformStatusEvidence,
-    job.canonicalUrl, job.jobTitle, job.companyName, job.city, job.fullJD
+    job.canonicalUrl, job.jobTitle, job.companyName, job.city
   ];
   if (required.some(value => !normalized(value))) {
     fail("BOSS_DISCOVERY_UNRELIABLE_PAGE:missing_job_field", "job_detail_validation");

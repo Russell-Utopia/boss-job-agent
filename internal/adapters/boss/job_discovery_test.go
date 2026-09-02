@@ -64,7 +64,7 @@ func TestJobDiscoveryListsStableIDsThenReadsOneReliableJob(t *testing.T) {
 	wantJob := discovery.JobObservation{
 		PlatformJobID: "boss-job-1", CanonicalURL: "https://www.zhipin.com/job_detail/boss-job-1.html",
 		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务开发\n任职要求：熟悉 Go 与 SQLite",
 		PlatformStatus: discovery.PlatformStatusOpen,
 	}
 	if !reflect.DeepEqual(job, wantJob) {
@@ -131,14 +131,41 @@ func TestJobDiscoveryPreservesUnavailableSalaryAndRejectsPrivateUseText(t *testi
 	}
 }
 
-func TestJobDiscoveryRejectsOneUnreliableJobWithoutInvalidatingTheList(t *testing.T) {
+func TestJobDiscoveryAcceptsProseOnlyJDWithoutResponsibilityRequirementBoundary(t *testing.T) {
 	t.Parallel()
 
+	// A legitimate prose JD with no 职责/要求 heading must be read whole, not
+	// rejected: the adapter no longer imposes a responsibilities/requirements
+	// split, so one such job can no longer fail the discovery run.
+	job, _, err := readDiscoveryFixtureJob(t, map[string]any{
+		"platformJobId": "boss-job-1", "detailPlatformJobId": "boss-job-1",
+		"platformStatusEvidence": "招聘中",
+		"canonicalUrl":           "https://www.zhipin.com/job_detail/boss-job-1.html",
+		"jobTitle":               "AI 原生全栈工程师", "companyName": "示例科技",
+		"city": "福州", "salary": "30-50K", "salaryEvidence": "readable",
+		"fullJD": "我们在找能独立把想法做成产品的工程师，端到端负责 AI 应用，熟悉 Go 或 TypeScript 优先。",
+	})
+	if err != nil {
+		t.Fatalf("read prose-only JD job: %v", err)
+	}
+	if job.FullJD != "我们在找能独立把想法做成产品的工程师，端到端负责 AI 应用，熟悉 Go 或 TypeScript 优先。" {
+		t.Errorf("prose-only JD = %q, want the whole JD preserved", job.FullJD)
+	}
+}
+
+func TestJobDiscoveryTreatsEmptyJDAsRetryableReadFailureWithoutInvalidatingTheList(t *testing.T) {
+	t.Parallel()
+
+	// An empty JD is a single-job read failure (partial or anti-bot page), not a
+	// list-integrity problem: it must be retryable (transient), decoupled from
+	// invalid_response, so it cannot fail the whole discovery run.
 	listJSON := mustEncodeDiscoveryFixture(t, reliableListedJobFixture())
 	jobJSON := mustEncodeDiscoveryFixture(t, map[string]any{
 		"platformJobId": "boss-job-1", "detailPlatformJobId": "boss-job-1",
-		"platformStatusEvidence": "招聘中", "jobTitle": "缺少可靠 JD 的岗位",
-		"salary": "20-30K", "salaryEvidence": "readable",
+		"platformStatusEvidence": "招聘中",
+		"canonicalUrl":           "https://www.zhipin.com/job_detail/boss-job-1.html",
+		"jobTitle":               "JD 尚未加载的岗位", "companyName": "示例科技", "city": "福州",
+		"salary": "20-30K", "salaryEvidence": "readable", "fullJD": "   \n  ",
 	})
 	fixture := &separatedJobDiscoveryFixture{t: t, evaluationResults: []string{listJSON, jobJSON}}
 	server := httptest.NewServer(fixture)
@@ -149,15 +176,15 @@ func TestJobDiscoveryRejectsOneUnreliableJobWithoutInvalidatingTheList(t *testin
 		Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职",
 	}, 1)
 	if err != nil || !reflect.DeepEqual(page.PlatformJobIDs, []string{"boss-job-1"}) {
-		t.Fatalf("list unreliable job page = %#v, err=%v", page, err)
+		t.Fatalf("list empty-JD job page = %#v, err=%v", page, err)
 	}
 	_, err = adapter.ReadJob(t.Context(), "boss-job-1")
 	var fetchErr *discovery.FetchError
 	if !errors.As(err, &fetchErr) {
 		t.Fatalf("read error = %v, want discovery.FetchError", err)
 	}
-	if fetchErr.Category != discovery.FetchErrorInvalidResponse {
-		t.Errorf("fetch error category = %q, want invalid_response", fetchErr.Category)
+	if fetchErr.Category != discovery.FetchErrorTransient {
+		t.Errorf("fetch error category = %q, want transient", fetchErr.Category)
 	}
 }
 
@@ -186,7 +213,7 @@ func TestJobDiscoveryClassifiesAndPreservesFirstFailedRequestEvidence(t *testing
 	}
 }
 
-func TestJobDiscoveryRejectsAmbiguousJDAndUnconfirmedLiveDetail(t *testing.T) {
+func TestJobDiscoveryRejectsUnconfirmedLiveDetail(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -196,15 +223,11 @@ func TestJobDiscoveryRejectsAmbiguousJDAndUnconfirmedLiveDetail(t *testing.T) {
 		platformStatus      string
 	}{
 		{
-			name: "JD has no reliable responsibility requirement boundary", fullJD: "负责 Go 服务开发",
-			detailPlatformJobID: "boss-job-1", platformStatus: "招聘中",
-		},
-		{
-			name: "live detail does not confirm the listed stable ID", fullJD: "负责 Go 服务开发\n任职要求：熟悉 Go",
+			name: "live detail does not confirm the listed stable ID", fullJD: "负责 Go 服务开发",
 			detailPlatformJobID: "another-job", platformStatus: "招聘中",
 		},
 		{
-			name: "live detail does not confirm the job is open", fullJD: "负责 Go 服务开发\n任职要求：熟悉 Go",
+			name: "live detail does not confirm the job is open", fullJD: "负责 Go 服务开发",
 			detailPlatformJobID: "boss-job-1", platformStatus: "已关闭",
 		},
 	}

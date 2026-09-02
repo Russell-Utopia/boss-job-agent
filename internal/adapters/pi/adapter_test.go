@@ -63,7 +63,7 @@ printf '%s\n' '{"type":"agent_end"}'
 			JobID: 41, AttemptNo: 3, PlatformJobID: "boss-job-41",
 			CanonicalURL: "https://www.zhipin.com/job_detail/boss-job-41.html",
 			JobTitle:     "Go 平台工程师", CompanyName: "示例科技", City: "福州", Salary: "25-35K",
-			Responsibilities: "负责 Go 平台服务", Requirements: "熟悉 Go 与 SQLite", JDHash: "jd-hash-41",
+			FullJD: "负责 Go 平台服务\n熟悉 Go 与 SQLite", JDHash: "jd-hash-41",
 		}},
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -88,7 +88,7 @@ printf '%s\n' '{"type":"agent_end"}'
 	for _, want := range []string{
 		`"resumeVersion":2`, `"workExperiences":["Go 后端工程师"]`,
 		`"version":4`, `"jobId":41`, `"attemptNo":3`,
-		`"responsibilities":"负责 Go 平台服务"`, `confirm_assessment_results`,
+		`"fullJD":"负责 Go 平台服务\n熟悉 Go 与 SQLite"`, `confirm_assessment_results`,
 	} {
 		if !strings.Contains(command.Message, want) {
 			t.Errorf("Pi prompt does not contain %q: %s", want, command.Message)
@@ -510,7 +510,7 @@ func newConfirmationIntegrationFixture(t *testing.T) confirmationIntegrationFixt
 				index+1,
 			),
 			JobTitle: "Go 工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-			Responsibilities: "负责 Go 服务", Requirements: "熟悉 Go",
+			FullJD:         "负责 Go 服务\n熟悉 Go",
 			PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(int64(1_000 + index)),
 		})
 		if err != nil {

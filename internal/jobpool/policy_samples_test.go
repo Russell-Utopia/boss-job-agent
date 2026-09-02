@@ -31,7 +31,7 @@ func TestListEffectiveHumanReviewsReturnsOnlyCurrentJDLabels(t *testing.T) {
 		t.Fatalf("save stale fixture review: %v", err)
 	}
 	changed := observedJob("policy-sample-stale")
-	changed.Responsibilities = "新的职责已经改变"
+	changed.FullJD = "新的职责已经改变"
 	changed.ObservedAt = time.UnixMilli(3_000)
 	if _, err := pool.Observe(t.Context(), 1, changed); err != nil {
 		t.Fatalf("change reviewed JD: %v", err)
@@ -44,7 +44,7 @@ func TestListEffectiveHumanReviewsReturnsOnlyCurrentJDLabels(t *testing.T) {
 	if len(samples) != 1 || samples[0].JobID != current.ID {
 		t.Fatalf("effective samples = %#v, want only current job %d", samples, current.ID)
 	}
-	if samples[0].Verdict != HumanVerdictSuitable || samples[0].Responsibilities != current.Responsibilities {
+	if samples[0].Verdict != HumanVerdictSuitable || samples[0].FullJD != current.FullJD {
 		t.Errorf("effective sample = %#v, want current JD and human verdict", samples[0])
 	}
 }

@@ -40,8 +40,7 @@ type JobObservation struct {
 	CompanyName          string         `json:"companyName"`
 	City                 string         `json:"city"`
 	Salary               string         `json:"salary"`
-	Responsibilities     string         `json:"responsibilities"`
-	Requirements         string         `json:"requirements"`
+	FullJD               string         `json:"fullJD"`
 	PlatformStatus       PlatformStatus `json:"platformStatus"`
 	PlatformClosedReason string         `json:"platformClosedReason,omitempty"`
 }
@@ -140,7 +139,7 @@ func validateObservation(observation JobObservation) error {
 	required := []string{
 		observation.PlatformJobID, observation.CanonicalURL, observation.JobTitle,
 		observation.CompanyName, observation.City,
-		observation.Responsibilities, observation.Requirements,
+		observation.FullJD,
 	}
 	for _, value := range required {
 		if strings.TrimSpace(value) == "" {
@@ -170,8 +169,7 @@ func toPoolObservation(observation JobObservation, observedAt time.Time) jobpool
 		CompanyName:          observation.CompanyName,
 		City:                 observation.City,
 		Salary:               observation.Salary,
-		Responsibilities:     observation.Responsibilities,
-		Requirements:         observation.Requirements,
+		FullJD:               observation.FullJD,
 		PlatformStatus:       jobpool.PlatformStatus(observation.PlatformStatus),
 		PlatformClosedReason: observation.PlatformClosedReason,
 		ObservedAt:           observedAt,

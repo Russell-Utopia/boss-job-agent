@@ -1339,7 +1339,7 @@ func TestInvalidObservationKeepsEarlierReliableJobsAndStopsAtItsOwnCheckpoint(t 
 	t.Parallel()
 
 	invalid := discoveredJob("boss-job-invalid")
-	invalid.Requirements = ""
+	invalid.City = ""
 	searchRange := SearchRange{
 		Role: "Go 后端工程师", City: "福州", Salary: "20-30K", EmploymentType: "全职",
 	}
@@ -1453,15 +1453,14 @@ func TestActiveDiscoveryKeepsV1WhenTheCurrentOnlineResumeBecomesV2(t *testing.T)
 
 func discoveredJob(platformJobID string) JobObservation {
 	return JobObservation{
-		PlatformJobID:    platformJobID,
-		CanonicalURL:     "https://www.zhipin.com/job_detail/" + platformJobID + ".html",
-		JobTitle:         "Go 后端工程师",
-		CompanyName:      "示例科技",
-		City:             "福州",
-		Salary:           "20-30K",
-		Responsibilities: "负责 Go 服务开发",
-		Requirements:     "熟悉 Go 与 SQLite",
-		PlatformStatus:   PlatformStatusOpen,
+		PlatformJobID:  platformJobID,
+		CanonicalURL:   "https://www.zhipin.com/job_detail/" + platformJobID + ".html",
+		JobTitle:       "Go 后端工程师",
+		CompanyName:    "示例科技",
+		City:           "福州",
+		Salary:         "20-30K",
+		FullJD:         "负责 Go 服务开发\n熟悉 Go 与 SQLite",
+		PlatformStatus: PlatformStatusOpen,
 	}
 }
 

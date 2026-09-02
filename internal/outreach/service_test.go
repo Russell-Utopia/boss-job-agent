@@ -355,7 +355,7 @@ func queueOutreachTestJob(t *testing.T, pool *jobpool.Pool, platformID, greeting
 	job, err := pool.Observe(t.Context(), 1, jobpool.Observation{
 		PlatformJobID: platformID, CanonicalURL: "https://www.zhipin.com/job_detail/" + platformID + ".html",
 		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务开发\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
 	})
 	if err != nil {
@@ -376,7 +376,7 @@ func eligibleOutreachTestJob(t *testing.T, pool *jobpool.Pool, platformID string
 	job, err := pool.Observe(t.Context(), 1, jobpool.Observation{
 		PlatformJobID: platformID, CanonicalURL: "https://www.zhipin.com/job_detail/" + platformID + ".html",
 		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务开发\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
 	})
 	if err != nil {

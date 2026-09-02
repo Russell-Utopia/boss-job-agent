@@ -267,7 +267,7 @@ func TestExpiredAssessmentLeaseCountsFailuresStopsAtTheLimitAndRejectsTheOldWork
 	assertBatchResult(t, late, 0, 1, "stale_assessment_attempt")
 
 	changed := observedJob("boss-job-1")
-	changed.Responsibilities = "负责 Go 服务与新队列状态机开发"
+	changed.FullJD = "负责 Go 服务与新队列状态机开发"
 	changed.ObservedAt = time.UnixMilli(8500)
 	updated := mustObserve(t, pool, 2, changed)
 	if updated.AssessmentStatus != AssessmentStatusPending || updated.AssessmentJDHash != "" {
@@ -347,14 +347,14 @@ func TestObserveNormalizesJudgmentContentAndKeepsPlatformStatusOutOfHash(t *test
 	pool := New(db)
 
 	first := observedJob("boss-job-1")
-	first.Responsibilities = "  负责 Go 服务开发\r\n  维护 SQLite  "
+	first.FullJD = "  负责 Go 服务开发\r\n  维护 SQLite  "
 	created, err := pool.Observe(t.Context(), 1, first)
 	if err != nil {
 		t.Fatalf("observe open platform job: %v", err)
 	}
 
 	closed := first
-	closed.Responsibilities = "负责   Go 服务开发\n\n维护 SQLite"
+	closed.FullJD = "负责   Go 服务开发\n\n维护 SQLite"
 	closed.PlatformStatus = PlatformStatusClosed
 	closed.PlatformClosedReason = "岗位已停止招聘"
 	closed.ObservedAt = first.ObservedAt.Add(time.Minute)
@@ -387,7 +387,7 @@ func TestUnreliableOrOlderObservationDoesNotOverwriteReliableJobFacts(t *testing
 
 	unreliable := open
 	unreliable.PlatformStatus = ""
-	unreliable.Responsibilities = "未确认的新职责"
+	unreliable.FullJD = "未确认的新职责"
 	unreliable.ObservedAt = time.UnixMilli(3000)
 	if _, err := pool.Observe(t.Context(), 2, unreliable); err == nil {
 		t.Fatal("unreliable observation succeeded, want rejection")
@@ -477,7 +477,7 @@ func TestJDChangeInvalidatesUncontactedAssessmentAndMakesHumanReviewStale(t *tes
 	}, job.ID), 1, 0, "")
 
 	changed := observation
-	changed.Responsibilities = "负责 Go 服务开发和分布式系统架构"
+	changed.FullJD = "负责 Go 服务开发和分布式系统架构"
 	changed.ObservedAt = time.UnixMilli(3000)
 	updated := mustObserve(t, pool, 2, changed)
 	assertInvalidatedJDChange(t, job, updated)
@@ -500,7 +500,7 @@ func TestJDChangeKeepsPendingAssessmentQueuedForTheLatestJD(t *testing.T) {
 	assertBatchResult(t, mustQueueAssessments(t, pool, job.ID), 1, 0, "")
 
 	changed := observedJob("boss-job-1")
-	changed.Responsibilities = "负责 Go 服务和队列状态机开发"
+	changed.FullJD = "负责 Go 服务和队列状态机开发"
 	changed.ObservedAt = time.UnixMilli(2000)
 	updated := mustObserve(t, pool, 2, changed)
 	if updated.AssessmentStatus != AssessmentStatusPending || updated.AssessmentJDHash != "" {
@@ -537,7 +537,7 @@ func TestJDChangeRestartsFailedAssessmentWithTheLatestInputs(t *testing.T) {
 	}), 1, 0, "")
 
 	changed := observedJob("boss-job-1")
-	changed.Requirements = "熟悉 Go、SQLite 与队列状态机"
+	changed.FullJD = "熟悉 Go、SQLite 与队列状态机"
 	changed.ObservedAt = time.UnixMilli(2500)
 	updated := mustObserve(t, pool, 2, changed)
 	if updated.AssessmentStatus != AssessmentStatusPending || updated.AssessmentJDHash != "" || updated.AssessmentReason != "" {
@@ -620,7 +620,7 @@ func TestContactedJobPreservesConclusionsAndRejectsLateOrRepeatedWork(t *testing
 	assertBatchResult(t, late, 0, 1, "stale_outreach_attempt")
 
 	changed := observation
-	changed.Requirements = "熟悉 Go、SQLite 和分布式系统"
+	changed.FullJD = "熟悉 Go、SQLite 和分布式系统"
 	changed.ObservedAt = time.UnixMilli(3000)
 	updated := mustObserve(t, pool, 2, changed)
 	assertContactedJDChange(t, job, updated)
@@ -862,16 +862,15 @@ func TestInvalidBusinessCombinationsAreRejectedWithoutMutation(t *testing.T) {
 
 func observedJob(platformJobID string) Observation {
 	return Observation{
-		PlatformJobID:    platformJobID,
-		CanonicalURL:     "https://www.zhipin.com/job_detail/" + platformJobID + ".html",
-		JobTitle:         "Go 后端工程师",
-		CompanyName:      "示例科技",
-		City:             "福州",
-		Salary:           "20-30K",
-		Responsibilities: "负责 Go 服务开发",
-		Requirements:     "熟悉 Go 与 SQLite",
-		PlatformStatus:   PlatformStatusOpen,
-		ObservedAt:       time.UnixMilli(1000),
+		PlatformJobID:  platformJobID,
+		CanonicalURL:   "https://www.zhipin.com/job_detail/" + platformJobID + ".html",
+		JobTitle:       "Go 后端工程师",
+		CompanyName:    "示例科技",
+		City:           "福州",
+		Salary:         "20-30K",
+		FullJD:         "负责 Go 服务开发\n熟悉 Go 与 SQLite",
+		PlatformStatus: PlatformStatusOpen,
+		ObservedAt:     time.UnixMilli(1000),
 	}
 }
 
@@ -1565,7 +1564,7 @@ func TestReviewRejectsWhenTheJDSinceShownHasChanged(t *testing.T) {
 	pool, _ := openTestPool(t)
 	original := mustObserve(t, pool, 1, observedJob("boss-job-stale-review-submit"))
 	changed := observedJob("boss-job-stale-review-submit")
-	changed.Requirements = "熟悉 Go、SQLite 与分布式事务"
+	changed.FullJD = "熟悉 Go、SQLite 与分布式事务"
 	changed.ObservedAt = time.UnixMilli(2000)
 	mustObserve(t, pool, 2, changed)
 

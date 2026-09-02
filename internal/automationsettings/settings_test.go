@@ -26,7 +26,7 @@ func mustObserveOutreachJob(t *testing.T, pool *jobpool.Pool, platformJobID, tit
 	job, err := pool.Observe(t.Context(), 1, jobpool.Observation{
 		PlatformJobID: platformJobID, CanonicalURL: "https://www.zhipin.com/job_detail/" + platformJobID + ".html",
 		JobTitle: title, CompanyName: company, City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务开发\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: observedAt,
 	})
 	if err != nil {
@@ -218,7 +218,7 @@ func TestQueueRealOutreachReturnsTheJobPoolBatchResult(t *testing.T) {
 	job, err := settings.pool.Observe(t.Context(), 1, jobpool.Observation{
 		PlatformJobID: "boss-job-1", CanonicalURL: "https://www.zhipin.com/job_detail/boss-job-1.html",
 		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务开发\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
 	})
 	if err != nil {
@@ -401,7 +401,7 @@ func TestQueueRealOutreachRequiresCurrentExplicitConfirmation(t *testing.T) {
 	job, err := settings.pool.Observe(t.Context(), 1, jobpool.Observation{
 		PlatformJobID: "boss-job-confirmation", CanonicalURL: "https://www.zhipin.com/job_detail/boss-job-confirmation.html",
 		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务开发\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
 	})
 	if err != nil {

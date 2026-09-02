@@ -84,8 +84,7 @@ type Observation struct {
 	CompanyName          string
 	City                 string
 	Salary               string
-	Responsibilities     string
-	Requirements         string
+	FullJD               string
 	PlatformStatus       PlatformStatus
 	PlatformClosedReason string
 	ObservedAt           time.Time
@@ -99,8 +98,7 @@ type JobView struct {
 	CompanyName           string
 	City                  string
 	Salary                string
-	Responsibilities      string
-	Requirements          string
+	FullJD                string
 	JDHash                string
 	PlatformStatus        PlatformStatus
 	PlatformClosedReason  string
@@ -180,19 +178,18 @@ type JobDetailView struct {
 // optimization. It contains the complete job input so the advisor never has
 // to reach into JobPool's database or reconstruct a partial example.
 type HumanReviewSample struct {
-	JobID            int64        `json:"jobId"`
-	PlatformJobID    string       `json:"platformJobId"`
-	CanonicalURL     string       `json:"canonicalUrl"`
-	JobTitle         string       `json:"jobTitle"`
-	CompanyName      string       `json:"companyName"`
-	City             string       `json:"city"`
-	Salary           string       `json:"salary"`
-	Responsibilities string       `json:"responsibilities"`
-	Requirements     string       `json:"requirements"`
-	JDHash           string       `json:"jdHash"`
-	Verdict          HumanVerdict `json:"verdict"`
-	ReviewedAt       time.Time    `json:"reviewedAt"`
-	Note             string       `json:"note"`
+	JobID         int64        `json:"jobId"`
+	PlatformJobID string       `json:"platformJobId"`
+	CanonicalURL  string       `json:"canonicalUrl"`
+	JobTitle      string       `json:"jobTitle"`
+	CompanyName   string       `json:"companyName"`
+	City          string       `json:"city"`
+	Salary        string       `json:"salary"`
+	FullJD        string       `json:"fullJD"`
+	JDHash        string       `json:"jdHash"`
+	Verdict       HumanVerdict `json:"verdict"`
+	ReviewedAt    time.Time    `json:"reviewedAt"`
+	Note          string       `json:"note"`
 }
 
 type ReviewDecision struct {
@@ -231,8 +228,7 @@ type AssessmentWork struct {
 	CompanyName      string
 	City             string
 	Salary           string
-	Responsibilities string
-	Requirements     string
+	FullJD           string
 	JDHash           string
 	ResumeVersionID  int64
 	PolicyVersionID  int64
@@ -259,20 +255,19 @@ type OutreachClaim struct {
 }
 
 type OutreachWork struct {
-	JobID            int64
-	PlatformJobID    string
-	CanonicalURL     string
-	JobTitle         string
-	CompanyName      string
-	City             string
-	Salary           string
-	Responsibilities string
-	Requirements     string
-	JDHash           string
-	GreetingText     string
-	AttemptNo        int64
-	Mode             OutreachMode
-	LeaseUntil       time.Time
+	JobID         int64
+	PlatformJobID string
+	CanonicalURL  string
+	JobTitle      string
+	CompanyName   string
+	City          string
+	Salary        string
+	FullJD        string
+	JDHash        string
+	GreetingText  string
+	AttemptNo     int64
+	Mode          OutreachMode
+	LeaseUntil    time.Time
 }
 
 type OutreachOutcome struct {
@@ -418,7 +413,7 @@ func (p *Pool) ListEffectiveHumanReviews(ctx context.Context) ([]HumanReviewSamp
 		samples = append(samples, HumanReviewSample{
 			JobID: job.ID, PlatformJobID: job.PlatformJobID, CanonicalURL: job.CanonicalURL,
 			JobTitle: job.JobTitle, CompanyName: job.CompanyName, City: job.City, Salary: job.Salary,
-			Responsibilities: job.Responsibilities, Requirements: job.Requirements, JDHash: job.JDHash,
+			FullJD: job.FullJD, JDHash: job.JDHash,
 			Verdict: HumanVerdict(row.HumanVerdict.String), ReviewedAt: time.UnixMilli(row.HumanReviewedAt.Int64),
 			Note: row.HumanReviewNote.String,
 		})
@@ -525,22 +520,20 @@ func currentJudgment(job JobView, review humanReviewClassification) CurrentJudgm
 }
 
 type judgmentContent struct {
-	JobTitle         string `json:"jobTitle"`
-	CompanyName      string `json:"companyName"`
-	City             string `json:"city"`
-	Salary           string `json:"salary"`
-	Responsibilities string `json:"responsibilities"`
-	Requirements     string `json:"requirements"`
+	JobTitle    string `json:"jobTitle"`
+	CompanyName string `json:"companyName"`
+	City        string `json:"city"`
+	Salary      string `json:"salary"`
+	FullJD      string `json:"fullJD"`
 }
 
 func encodeJudgmentContent(observation Observation) (string, string, error) {
 	content := judgmentContent{
-		JobTitle:         normalizeText(observation.JobTitle),
-		CompanyName:      normalizeText(observation.CompanyName),
-		City:             normalizeText(observation.City),
-		Salary:           normalizeText(observation.Salary),
-		Responsibilities: normalizeText(observation.Responsibilities),
-		Requirements:     normalizeText(observation.Requirements),
+		JobTitle:    normalizeText(observation.JobTitle),
+		CompanyName: normalizeText(observation.CompanyName),
+		City:        normalizeText(observation.City),
+		Salary:      normalizeText(observation.Salary),
+		FullJD:      normalizeText(observation.FullJD),
 	}
 	if err := validateObservationContent(observation, content); err != nil {
 		return "", "", err
@@ -563,7 +556,7 @@ func validateObservationContent(observation Observation, content judgmentContent
 	if hasEmptyText(content.JobTitle, content.CompanyName, content.City) {
 		return fmt.Errorf("observe platform job %q: basic job information is incomplete", observation.PlatformJobID)
 	}
-	if hasEmptyText(content.Responsibilities, content.Requirements) {
+	if hasEmptyText(content.FullJD) {
 		return fmt.Errorf("observe platform job %q: complete JD is required", observation.PlatformJobID)
 	}
 	if err := validatePlatformStatus(observation); err != nil {
@@ -605,6 +598,10 @@ func validatePlatformStatus(observation Observation) error {
 	return nil
 }
 
+// normalizeText collapses all runs of whitespace — including newlines — to a
+// single space. Applied to the whole JD, this keeps the jd_hash stable across
+// cosmetic layout differences (blank lines, CRLF, indentation) that ADR-0012
+// requires the hash to ignore, without dropping any of the JD's words.
 func normalizeText(value string) string {
 	return strings.Join(strings.Fields(value), " ")
 }
@@ -633,8 +630,7 @@ func newJobView(
 		CompanyName:          companyName.String,
 		City:                 city.String,
 		Salary:               salary.String,
-		Responsibilities:     content.Responsibilities,
-		Requirements:         content.Requirements,
+		FullJD:               content.FullJD,
 		JDHash:               jdHash,
 		PlatformStatus:       PlatformStatus(platformStatus),
 		PlatformClosedReason: closedReason.String,
@@ -1208,8 +1204,7 @@ func assessmentWorkFromRow(row sqlitedb.ClaimAssessmentsRow) (AssessmentWork, er
 	return AssessmentWork{
 		JobID: row.ID, PlatformJobID: row.PlatformJobID, CanonicalURL: row.CanonicalUrl,
 		JobTitle: row.JobTitle, CompanyName: row.CompanyName.String, City: row.CityText.String,
-		Salary: row.SalaryText.String, Responsibilities: content.Responsibilities,
-		Requirements: content.Requirements, JDHash: row.JdHash,
+		Salary: row.SalaryText.String, FullJD: content.FullJD, JDHash: row.JdHash,
 		ResumeVersionID:  row.AssessmentResumeVersionID.Int64,
 		PolicyVersionID:  row.AssessmentPolicyVersionID.Int64,
 		EvaluatorVersion: row.EvaluatorVersion.Int64, AttemptNo: row.AssessmentAttemptNo,
@@ -1412,8 +1407,7 @@ func outreachWorkFromRow(row sqlitedb.ClaimOutreachWorkRow, previous OutreachSta
 	return OutreachWork{
 		JobID: row.ID, PlatformJobID: row.PlatformJobID, CanonicalURL: row.CanonicalUrl,
 		JobTitle: row.JobTitle, CompanyName: row.CompanyName.String, City: row.CityText.String,
-		Salary: row.SalaryText.String, Responsibilities: content.Responsibilities,
-		Requirements: content.Requirements, JDHash: row.JdHash,
+		Salary: row.SalaryText.String, FullJD: content.FullJD, JDHash: row.JdHash,
 		GreetingText: row.OutreachGreetingText.String, AttemptNo: row.OutreachAttemptNo,
 		Mode: mode, LeaseUntil: time.UnixMilli(row.LeaseUntil.Int64),
 	}, nil

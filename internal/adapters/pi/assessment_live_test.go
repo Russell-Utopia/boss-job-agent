@@ -50,7 +50,7 @@ func TestAssessmentLiveUsesTheConfirmationTool(t *testing.T) {
 			JobID: 1, AttemptNo: 1, PlatformJobID: "synthetic-live-job",
 			CanonicalURL: "https://example.invalid/synthetic-live-job", JobTitle: "Go 后端工程师",
 			CompanyName: "合成测试公司", City: "福州", Salary: "20-30K",
-			Responsibilities: "使用 Go 开发后端服务", Requirements: "熟悉 Go 与 SQLite",
+			FullJD: "使用 Go 开发后端服务\n熟悉 Go 与 SQLite",
 			JDHash: "synthetic-live-jd-hash",
 		}},
 	}

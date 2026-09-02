@@ -88,15 +88,14 @@ func (d *webJobDiscovery) ReadJob(_ context.Context, platformJobID string) (disc
 
 func webDiscoveredJob(platformJobID, title, company string) discovery.JobObservation {
 	return discovery.JobObservation{
-		PlatformJobID:    platformJobID,
-		CanonicalURL:     "https://www.zhipin.com/job_detail/" + platformJobID + ".html",
-		JobTitle:         title,
-		CompanyName:      company,
-		City:             "福州",
-		Salary:           "20-30K",
-		Responsibilities: "负责 Go 服务开发",
-		Requirements:     "熟悉 Go 与 SQLite",
-		PlatformStatus:   discovery.PlatformStatusOpen,
+		PlatformJobID:  platformJobID,
+		CanonicalURL:   "https://www.zhipin.com/job_detail/" + platformJobID + ".html",
+		JobTitle:       title,
+		CompanyName:    company,
+		City:           "福州",
+		Salary:         "20-30K",
+		FullJD:         "负责 Go 服务开发\n熟悉 Go 与 SQLite",
+		PlatformStatus: discovery.PlatformStatusOpen,
 	}
 }
 
@@ -465,7 +464,7 @@ func seedOutreachSettingsPageFixtures(t *testing.T, runtime *testWeb) int64 {
 		PlatformJobID: "boss-job-automatic-settings",
 		CanonicalURL:  "https://www.zhipin.com/job_detail/boss-job-automatic-settings.html",
 		JobTitle:      "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务开发\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
 	})
 	if err := runtime.pool.Review(t.Context(), []jobpool.ReviewDecision{{
@@ -483,7 +482,7 @@ func seedOutreachSettingsPageFixtures(t *testing.T, runtime *testWeb) int64 {
 		PlatformJobID: "boss-job-automatic-settings-preview",
 		CanonicalURL:  "https://www.zhipin.com/job_detail/boss-job-automatic-settings-preview.html",
 		JobTitle:      "Go 应用工程师", CompanyName: "预览科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 应用开发", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 应用开发\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
 	})
 	if err := runtime.pool.Review(t.Context(), []jobpool.ReviewDecision{{
@@ -676,16 +675,15 @@ func TestJobsWorkbenchRestoresFiltersPaginatesAndShowsWorkflowProgress(t *testin
 	t.Cleanup(func() { closeTestWeb(t, runtime) })
 	for index := 0; index < 12; index++ {
 		if _, err := runtime.pool.Observe(t.Context(), 1, jobpool.Observation{
-			PlatformJobID:    fmt.Sprintf("workbench-job-%d", index),
-			CanonicalURL:     fmt.Sprintf("https://www.zhipin.com/job_detail/workbench-job-%d.html", index),
-			JobTitle:         fmt.Sprintf("目标岗位-%d", index),
-			CompanyName:      "目标公司",
-			City:             "福州",
-			Salary:           "20-30K",
-			Responsibilities: "负责 Go 服务开发",
-			Requirements:     "熟悉 Go 与 SQLite",
-			PlatformStatus:   jobpool.PlatformStatusOpen,
-			ObservedAt:       time.UnixMilli(int64(1000 + index)),
+			PlatformJobID:  fmt.Sprintf("workbench-job-%d", index),
+			CanonicalURL:   fmt.Sprintf("https://www.zhipin.com/job_detail/workbench-job-%d.html", index),
+			JobTitle:       fmt.Sprintf("目标岗位-%d", index),
+			CompanyName:    "目标公司",
+			City:           "福州",
+			Salary:         "20-30K",
+			FullJD:         "负责 Go 服务开发\n熟悉 Go 与 SQLite",
+			PlatformStatus: jobpool.PlatformStatusOpen,
+			ObservedAt:     time.UnixMilli(int64(1000 + index)),
 		}); err != nil {
 			t.Fatalf("observe workbench job %d: %v", index, err)
 		}
@@ -697,8 +695,7 @@ func TestJobsWorkbenchRestoresFiltersPaginatesAndShowsWorkflowProgress(t *testin
 		CompanyName:          "目标公司",
 		City:                 "福州",
 		Salary:               "20-30K",
-		Responsibilities:     "负责 Go 服务开发",
-		Requirements:         "熟悉 Go 与 SQLite",
+		FullJD:               "负责 Go 服务开发\n熟悉 Go 与 SQLite",
 		PlatformStatus:       jobpool.PlatformStatusClosed,
 		PlatformClosedReason: "岗位已关闭",
 		ObservedAt:           time.UnixMilli(2000),
@@ -742,13 +739,13 @@ func TestJobsWorkbenchBatchReviewRechecksEachJobAndReturnsSkippedReason(t *testi
 	first := mustObserveWebJob(t, runtime.pool, jobpool.Observation{
 		PlatformJobID: "workbench-review-1", CanonicalURL: "https://www.zhipin.com/job_detail/workbench-review-1.html",
 		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
 	})
 	second := mustObserveWebJob(t, runtime.pool, jobpool.Observation{
 		PlatformJobID: "workbench-review-2", CanonicalURL: "https://www.zhipin.com/job_detail/workbench-review-2.html",
 		JobTitle: "Go 平台工程师", CompanyName: "另一科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责平台服务", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责平台服务\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1001),
 	})
 
@@ -790,13 +787,13 @@ func TestJobsWorkbenchShowsThreeActionsAndLocalDisabledReasons(t *testing.T) {
 	openJob := mustObserveWebJob(t, runtime.pool, jobpool.Observation{
 		PlatformJobID: "workbench-actions-open", CanonicalURL: "https://www.zhipin.com/job_detail/workbench-actions-open.html",
 		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
 	})
 	mustObserveWebJob(t, runtime.pool, jobpool.Observation{
 		PlatformJobID: "workbench-actions-closed", CanonicalURL: "https://www.zhipin.com/job_detail/workbench-actions-closed.html",
 		JobTitle: "Go 平台工程师", CompanyName: "另一科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责平台服务", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责平台服务\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusClosed, PlatformClosedReason: "岗位已关闭", ObservedAt: time.UnixMilli(1001),
 	})
 	if err := runtime.pool.Review(t.Context(), []jobpool.ReviewDecision{{
@@ -830,9 +827,8 @@ func TestJobDetailShowsCompleteAssessmentInputsAndReviewDoesNotStartAnotherAsses
 	job := mustObserveWebJob(t, runtime.pool, jobpool.Observation{
 		PlatformJobID: "boss-job-review", CanonicalURL: "https://www.zhipin.com/job_detail/boss-job-review.html",
 		JobTitle: "Go 平台工程师", CompanyName: "示例科技", City: "福州", Salary: "25-35K",
-		Responsibilities: "负责高并发 Go 服务\n维护关键链路",
-		Requirements:     "熟悉 Go、SQLite\n有可观测性经验",
-		PlatformStatus:   jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
+		FullJD:         "负责高并发 Go 服务\n维护关键链路\n熟悉 Go、SQLite\n有可观测性经验",
+		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
 	})
 	mustCompleteWebAssessment(
 		t, runtime, job, 3, 4, 9, jobpool.AssessmentStatusUnsuitable,
@@ -879,7 +875,7 @@ func TestJobDetailQueuesAndRetriesAssessmentWithSeparateCommands(t *testing.T) {
 		PlatformJobID: "boss-job-assessment-command",
 		CanonicalURL:  "https://www.zhipin.com/job_detail/boss-job-assessment-command.html",
 		JobTitle:      "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
 	})
 	server := httptest.NewServer(runtime.Handler)
@@ -940,7 +936,7 @@ func TestJobDetailDisablesAssessmentFailureRetryAfterTheJobCloses(t *testing.T) 
 		PlatformJobID: "boss-job-closed-assessment-retry",
 		CanonicalURL:  "https://www.zhipin.com/job_detail/boss-job-closed-assessment-retry.html",
 		JobTitle:      "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1_000),
 	}
 	job := mustObserveWebJob(t, runtime.pool, observation)
@@ -1003,12 +999,12 @@ func TestJobReviewPageRejectsAReviewBasedOnAStaleJD(t *testing.T) {
 	originalObservation := jobpool.Observation{
 		PlatformJobID: "boss-job-stale-web-review", CanonicalURL: "https://www.zhipin.com/job_detail/stale.html",
 		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务开发\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
 	}
 	original := mustObserveWebJob(t, runtime.pool, originalObservation)
 	changed := originalObservation
-	changed.Requirements = "熟悉 Go、SQLite 与分布式事务"
+	changed.FullJD = "熟悉 Go、SQLite 与分布式事务"
 	changed.ObservedAt = time.UnixMilli(2000)
 	if _, err := runtime.pool.Observe(t.Context(), 2, changed); err != nil {
 		t.Fatalf("observe changed JD: %v", err)
@@ -1231,7 +1227,7 @@ func TestRealOutreachCommandReturnsPerJobBatchResult(t *testing.T) {
 	job, err := runtime.pool.Observe(t.Context(), 1, jobpool.Observation{
 		PlatformJobID: "boss-job-1", CanonicalURL: "https://www.zhipin.com/job_detail/boss-job-1.html",
 		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务开发\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
 	})
 	if err != nil {
@@ -1283,7 +1279,7 @@ func TestOutreachPageDisplaysEligibleBatchAndQueuesConfirmedSelection(t *testing
 	job, err := runtime.pool.Observe(t.Context(), 1, jobpool.Observation{
 		PlatformJobID: "boss-job-page", CanonicalURL: "https://www.zhipin.com/job_detail/boss-job-page.html",
 		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务开发\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1000),
 	})
 	if err != nil {
@@ -1423,7 +1419,7 @@ func seedPolicyWebSamples(t *testing.T, pool *jobpool.Pool) jobpool.JobView {
 	if _, err := pool.Observe(t.Context(), 1, jobpool.Observation{
 		PlatformJobID: "web-policy-1", CanonicalURL: "https://www.zhipin.com/job_detail/web-policy-1.html",
 		JobTitle: "Go 后端工程师", CompanyName: "示例科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务", Requirements: "熟悉 Go", PlatformStatus: jobpool.PlatformStatusOpen,
+		FullJD: "负责 Go 服务\n熟悉 Go", PlatformStatus: jobpool.PlatformStatusOpen,
 		ObservedAt: time.UnixMilli(2000),
 	}); err != nil {
 		t.Fatalf("observe first policy job: %v", err)
@@ -1431,7 +1427,7 @@ func seedPolicyWebSamples(t *testing.T, pool *jobpool.Pool) jobpool.JobView {
 	first := mustObserveWebJob(t, pool, jobpool.Observation{
 		PlatformJobID: "web-policy-2", CanonicalURL: "https://www.zhipin.com/job_detail/web-policy-2.html",
 		JobTitle: "Go 平台工程师", CompanyName: "另一科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责平台服务", Requirements: "熟悉 Go", PlatformStatus: jobpool.PlatformStatusOpen,
+		FullJD: "负责平台服务\n熟悉 Go", PlatformStatus: jobpool.PlatformStatusOpen,
 		ObservedAt: time.UnixMilli(2001),
 	})
 	firstDetail, err := pool.GetJobDetail(t.Context(), 1)
@@ -1679,7 +1675,7 @@ func completeWebDiscovery(t *testing.T, runtime *testWeb, runID int64) {
 			PlatformJobID: observation.PlatformJobID, CanonicalURL: observation.CanonicalURL,
 			JobTitle: observation.JobTitle, CompanyName: observation.CompanyName,
 			City: observation.City, Salary: observation.Salary,
-			Responsibilities: observation.Responsibilities, Requirements: observation.Requirements,
+			FullJD:         observation.FullJD,
 			PlatformStatus: jobpool.PlatformStatus(observation.PlatformStatus),
 			ObservedAt:     time.UnixMilli(2000),
 		}); err != nil {

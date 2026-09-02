@@ -260,7 +260,7 @@ func offlineJobObservation() discovery.JobObservation {
 		PlatformJobID: "offline-job-1",
 		CanonicalURL:  "https://www.zhipin.com/job_detail/offline-job-1.html",
 		JobTitle:      "Go 后端工程师", CompanyName: "受控科技", City: "福州", Salary: "20-30K",
-		Responsibilities: "负责 Go 服务开发", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 服务开发\n熟悉 Go 与 SQLite",
 		PlatformStatus: discovery.PlatformStatusOpen,
 	}
 }
@@ -558,8 +558,7 @@ func observeOfflineJobWithRun(t *testing.T, runtime *offlineAcceptanceRuntime, r
 	job, err := runtime.pool.Observe(t.Context(), runID, jobpool.Observation{
 		PlatformJobID: observation.PlatformJobID, CanonicalURL: observation.CanonicalURL,
 		JobTitle: observation.JobTitle, CompanyName: observation.CompanyName, City: observation.City,
-		Salary: observation.Salary, Responsibilities: observation.Responsibilities,
-		Requirements: observation.Requirements, PlatformStatus: jobpool.PlatformStatusOpen,
+		Salary: observation.Salary, FullJD: observation.FullJD, PlatformStatus: jobpool.PlatformStatusOpen,
 		ObservedAt: time.UnixMilli(1000),
 	})
 	if err != nil {

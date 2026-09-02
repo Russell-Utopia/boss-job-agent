@@ -37,8 +37,8 @@ func TestPolicyLiveGeneratesAndValidatesOneCompleteRequest(t *testing.T) {
 		},
 		Policy: assessment.Policy{Version: 1, Name: "live 策略", Rules: []string{"只依据完整输入"}},
 		Samples: []jobpool.HumanReviewSample{
-			{JobID: 1, PlatformJobID: "live-go", CanonicalURL: "https://example.invalid/live-go", JobTitle: "Go 后端工程师", CompanyName: "合成测试公司", City: "福州", Salary: "20-30K", Responsibilities: "使用 Go 开发服务", Requirements: "熟悉 Go", JDHash: "live-go-jd", Verdict: jobpool.HumanVerdictSuitable},
-			{JobID: 2, PlatformJobID: "live-java", CanonicalURL: "https://example.invalid/live-java", JobTitle: "Java 工程师", CompanyName: "合成测试公司", City: "福州", Salary: "20-30K", Responsibilities: "维护 Java 服务", Requirements: "熟悉 Java", JDHash: "live-java-jd", Verdict: jobpool.HumanVerdictUnsuitable},
+			{JobID: 1, PlatformJobID: "live-go", CanonicalURL: "https://example.invalid/live-go", JobTitle: "Go 后端工程师", CompanyName: "合成测试公司", City: "福州", Salary: "20-30K", FullJD: "使用 Go 开发服务\n熟悉 Go", JDHash: "live-go-jd", Verdict: jobpool.HumanVerdictSuitable},
+			{JobID: 2, PlatformJobID: "live-java", CanonicalURL: "https://example.invalid/live-java", JobTitle: "Java 工程师", CompanyName: "合成测试公司", City: "福州", Salary: "20-30K", FullJD: "维护 Java 服务\n熟悉 Java", JDHash: "live-java-jd", Verdict: jobpool.HumanVerdictUnsuitable},
 		},
 	}
 	assertCompletePolicyLiveRequest(t, request)
@@ -98,7 +98,7 @@ func assertCompletePolicyLiveRequest(t *testing.T, request assessment.PolicyGene
 		t.Fatal("live policy request does not contain a complete current policy and sample set")
 	}
 	for _, sample := range request.Samples {
-		if sample.JobID <= 0 || sample.PlatformJobID == "" || sample.CanonicalURL == "" || sample.JobTitle == "" || sample.CompanyName == "" || sample.City == "" || sample.Salary == "" || sample.Responsibilities == "" || sample.Requirements == "" || sample.JDHash == "" || !validPolicyLiveVerdict(sample.Verdict) {
+		if sample.JobID <= 0 || sample.PlatformJobID == "" || sample.CanonicalURL == "" || sample.JobTitle == "" || sample.CompanyName == "" || sample.City == "" || sample.Salary == "" || sample.FullJD == "" || sample.JDHash == "" || !validPolicyLiveVerdict(sample.Verdict) {
 			t.Fatalf("live policy request contains incomplete sample: %#v", sample)
 		}
 	}
@@ -144,7 +144,7 @@ func TestPolicyLiveServicePersistsOneTraceForGeneration(t *testing.T) {
 	job, err := pool.Observe(t.Context(), 1, jobpool.Observation{
 		PlatformJobID: "live-trace-job", CanonicalURL: "https://example.invalid/live-trace-job",
 		JobTitle: "Go 后端工程师", CompanyName: "合成测试公司", City: "福州", Salary: "20-30K",
-		Responsibilities: "使用 Go 开发服务", Requirements: "熟悉 Go", PlatformStatus: jobpool.PlatformStatusOpen,
+		FullJD: "使用 Go 开发服务\n熟悉 Go", PlatformStatus: jobpool.PlatformStatusOpen,
 		ObservedAt: time.UnixMilli(1100),
 	})
 	if err != nil {

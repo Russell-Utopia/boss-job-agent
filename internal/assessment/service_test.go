@@ -145,7 +145,7 @@ func prepareQueuedAssessmentJob(t *testing.T, pool *jobpool.Pool) jobpool.JobVie
 	job, err := pool.Observe(t.Context(), 1, jobpool.Observation{
 		PlatformJobID: "boss-job-7", CanonicalURL: "https://www.zhipin.com/job_detail/boss-job-7.html",
 		JobTitle: "Go 平台工程师", CompanyName: "示例科技", City: "福州", Salary: "25-35K",
-		Responsibilities: "负责 Go 平台服务", Requirements: "熟悉 Go 与 SQLite",
+		FullJD:         "负责 Go 平台服务\n熟悉 Go 与 SQLite",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(1_500),
 	})
 	if err != nil {
@@ -254,7 +254,7 @@ func assertCompleteAssessmentRequest(t *testing.T, fixture assessmentRunFixture,
 		JobID: fixture.job.ID, AttemptNo: 1, PlatformJobID: fixture.job.PlatformJobID,
 		CanonicalURL: fixture.job.CanonicalURL, JobTitle: fixture.job.JobTitle,
 		CompanyName: fixture.job.CompanyName, City: fixture.job.City, Salary: fixture.job.Salary,
-		Responsibilities: fixture.job.Responsibilities, Requirements: fixture.job.Requirements,
+		FullJD: fixture.job.FullJD,
 		JDHash: fixture.job.JDHash,
 	}
 	if !reflect.DeepEqual(input, expectedInput) {
@@ -384,7 +384,7 @@ func preparePendingAssessmentWithNewCurrentInputs(
 	secondJob, err := fixture.pool.Observe(t.Context(), 2, jobpool.Observation{
 		PlatformJobID: "boss-pending-current-input", CanonicalURL: "https://www.zhipin.com/job_detail/boss-pending-current-input.html",
 		JobTitle: "Go 后端工程师", CompanyName: "另一科技", City: "福州", Salary: "25-35K",
-		Responsibilities: "负责新服务", Requirements: "熟悉 Go",
+		FullJD:         "负责新服务\n熟悉 Go",
 		PlatformStatus: jobpool.PlatformStatusOpen, ObservedAt: time.UnixMilli(2_100),
 	})
 	if err != nil {
@@ -483,8 +483,7 @@ func observeAutomaticAssessmentJobs(
 			PlatformJobID: fmt.Sprintf("boss-automatic-%d", index+1),
 			CanonicalURL:  fmt.Sprintf("https://www.zhipin.com/job_detail/boss-automatic-%d.html", index+1),
 			JobTitle:      fmt.Sprintf("Go 自动鉴定工程师 %d", index+1), CompanyName: "示例科技",
-			City: "福州", Salary: "20-30K", Responsibilities: "负责 Go 服务",
-			Requirements: "熟悉 Go", PlatformStatus: jobpool.PlatformStatusOpen,
+			City: "福州", Salary: "20-30K", FullJD: "负责 Go 服务\n熟悉 Go", PlatformStatus: jobpool.PlatformStatusOpen,
 			ObservedAt: time.UnixMilli(int64(1_600 + index)),
 		})
 		if err != nil {
@@ -557,8 +556,7 @@ func prepareClaimedAssessmentJobs(
 			PlatformJobID: fmt.Sprintf("confirm-job-%d", index+1),
 			CanonicalURL:  fmt.Sprintf("https://www.zhipin.com/job_detail/confirm-job-%d.html", index+1),
 			JobTitle:      fmt.Sprintf("Go 工程师 %d", index+1), CompanyName: "示例科技",
-			City: "福州", Salary: "20-30K", Responsibilities: "负责 Go 服务",
-			Requirements: "熟悉 Go", PlatformStatus: jobpool.PlatformStatusOpen,
+			City: "福州", Salary: "20-30K", FullJD: "负责 Go 服务\n熟悉 Go", PlatformStatus: jobpool.PlatformStatusOpen,
 			ObservedAt: time.UnixMilli(int64(1_000 + index)),
 		})
 		if err != nil {
