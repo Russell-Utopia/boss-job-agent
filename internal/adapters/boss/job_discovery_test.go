@@ -30,7 +30,7 @@ func TestJobDiscoveryListsStableIDsThenReadsOneReliableJob(t *testing.T) {
 	jobJSON := mustEncodeDiscoveryFixture(t, map[string]any{
 		"platformJobId":          "boss-job-1",
 		"detailPlatformJobId":    "boss-job-1",
-		"platformStatusEvidence": "招聘中",
+		"platformStatusEvidence": "open",
 		"canonicalUrl":           "https://www.zhipin.com/job_detail/boss-job-1.html",
 		"jobTitle":               "Go 后端工程师",
 		"companyName":            "示例科技",
@@ -106,7 +106,7 @@ func TestJobDiscoveryPreservesUnavailableSalaryAndRejectsPrivateUseText(t *testi
 			t.Parallel()
 			job, script, err := readDiscoveryFixtureJob(t, map[string]any{
 				"platformJobId": "boss-job-1", "detailPlatformJobId": "boss-job-1",
-				"platformStatusEvidence": "招聘中",
+				"platformStatusEvidence": "open",
 				"canonicalUrl":           "https://www.zhipin.com/job_detail/boss-job-1.html",
 				"jobTitle":               "Go 后端工程师", "companyName": "示例科技", "city": "福州",
 				"salary": test.salary, "salaryEvidence": test.salaryEvidence,
@@ -139,7 +139,7 @@ func TestJobDiscoveryAcceptsProseOnlyJDWithoutResponsibilityRequirementBoundary(
 	// split, so one such job can no longer fail the discovery run.
 	job, _, err := readDiscoveryFixtureJob(t, map[string]any{
 		"platformJobId": "boss-job-1", "detailPlatformJobId": "boss-job-1",
-		"platformStatusEvidence": "招聘中",
+		"platformStatusEvidence": "open",
 		"canonicalUrl":           "https://www.zhipin.com/job_detail/boss-job-1.html",
 		"jobTitle":               "AI 原生全栈工程师", "companyName": "示例科技",
 		"city": "福州", "salary": "30-50K", "salaryEvidence": "readable",
@@ -162,7 +162,7 @@ func TestJobDiscoveryTreatsEmptyJDAsRetryableReadFailureWithoutInvalidatingTheLi
 	listJSON := mustEncodeDiscoveryFixture(t, reliableListedJobFixture())
 	jobJSON := mustEncodeDiscoveryFixture(t, map[string]any{
 		"platformJobId": "boss-job-1", "detailPlatformJobId": "boss-job-1",
-		"platformStatusEvidence": "招聘中",
+		"platformStatusEvidence": "open",
 		"canonicalUrl":           "https://www.zhipin.com/job_detail/boss-job-1.html",
 		"jobTitle":               "JD 尚未加载的岗位", "companyName": "示例科技", "city": "福州",
 		"salary": "20-30K", "salaryEvidence": "readable", "fullJD": "   \n  ",
@@ -185,6 +185,79 @@ func TestJobDiscoveryTreatsEmptyJDAsRetryableReadFailureWithoutInvalidatingTheLi
 	}
 	if fetchErr.Category != discovery.FetchErrorTransient {
 		t.Errorf("fetch error category = %q, want transient", fetchErr.Category)
+	}
+}
+
+func TestJobDiscoveryRecordsClosedJobAsObservationInsteadOfFailingTheRun(t *testing.T) {
+	t.Parallel()
+
+	// Issue #45: a single not-open job must not sink the whole run. BOSS's
+	// reliable open/closed signal is the structured invalidStatus boolean,
+	// surfaced by the detail script as "open"/"closed". A "closed" job is a
+	// first-class PlatformStatusClosed observation (run continues), never a
+	// run-failing invalid_response.
+	job, _, err := readDiscoveryFixtureJob(t, map[string]any{
+		"platformJobId": "boss-job-1", "detailPlatformJobId": "boss-job-1",
+		"platformStatusEvidence": "closed", "platformStatusText": "岗位已关闭",
+		"canonicalUrl": "https://www.zhipin.com/job_detail/boss-job-1.html",
+		"jobTitle":     "Go 后端工程师", "companyName": "示例科技", "city": "福州",
+		"salary": "20-30K", "salaryEvidence": "readable",
+		"fullJD": "负责 Go 服务开发\n任职要求：熟悉 Go 与 SQLite",
+	})
+	if err != nil {
+		t.Fatalf("read closed job: %v", err)
+	}
+	if job.PlatformStatus != discovery.PlatformStatusClosed {
+		t.Errorf("closed job status = %q, want closed", job.PlatformStatus)
+	}
+	if strings.TrimSpace(job.PlatformClosedReason) == "" {
+		t.Error("closed job must carry a reliable closed reason")
+	}
+}
+
+func TestJobDiscoveryTreatsOpenJobAsOpenRegardlessOfDisplayStringWording(t *testing.T) {
+	t.Parallel()
+
+	// Issue #45: the decision no longer depends on the display string
+	// jobStatusDesc (BOSS obfuscates/rewords it). An "open" invalidStatus
+	// signal is open even when the display text is odd or absent.
+	job, _, err := readDiscoveryFixtureJob(t, map[string]any{
+		"platformJobId": "boss-job-1", "detailPlatformJobId": "boss-job-1",
+		"platformStatusEvidence": "open", "platformStatusText": "",
+		"canonicalUrl": "https://www.zhipin.com/job_detail/boss-job-1.html",
+		"jobTitle":     "Go 后端工程师", "companyName": "示例科技", "city": "福州",
+		"salary": "20-30K", "salaryEvidence": "readable",
+		"fullJD": "负责 Go 服务开发\n任职要求：熟悉 Go 与 SQLite",
+	})
+	if err != nil {
+		t.Fatalf("read open job: %v", err)
+	}
+	if job.PlatformStatus != discovery.PlatformStatusOpen {
+		t.Errorf("open job status = %q, want open", job.PlatformStatus)
+	}
+	if job.PlatformClosedReason != "" {
+		t.Errorf("open job must not carry a closed reason, got %q", job.PlatformClosedReason)
+	}
+}
+
+func TestJobDiscoveryTreatsAbsentStatusSignalAsRetryableReadFailure(t *testing.T) {
+	t.Parallel()
+
+	// Issue #45: when BOSS omits the reliable invalidStatus boolean (detail
+	// script emits "unknown"), we cannot decide open/closed. That is a single
+	// job retryable read failure (transient), never a silent all-closed run and
+	// never a run-failing invalid_response.
+	_, _, err := readDiscoveryFixtureJob(t, map[string]any{
+		"platformJobId": "boss-job-1", "detailPlatformJobId": "boss-job-1",
+		"platformStatusEvidence": "unknown", "platformStatusText": "",
+		"canonicalUrl": "https://www.zhipin.com/job_detail/boss-job-1.html",
+		"jobTitle":     "Go 后端工程师", "companyName": "示例科技", "city": "福州",
+		"salary": "20-30K", "salaryEvidence": "readable",
+		"fullJD": "负责 Go 服务开发\n任职要求：熟悉 Go 与 SQLite",
+	})
+	var fetchErr *discovery.FetchError
+	if !errors.As(err, &fetchErr) || fetchErr.Category != discovery.FetchErrorTransient {
+		t.Fatalf("absent status signal error = %v, want transient", err)
 	}
 }
 
@@ -224,11 +297,7 @@ func TestJobDiscoveryRejectsUnconfirmedLiveDetail(t *testing.T) {
 	}{
 		{
 			name: "live detail does not confirm the listed stable ID", fullJD: "负责 Go 服务开发",
-			detailPlatformJobID: "another-job", platformStatus: "招聘中",
-		},
-		{
-			name: "live detail does not confirm the job is open", fullJD: "负责 Go 服务开发",
-			detailPlatformJobID: "boss-job-1", platformStatus: "已关闭",
+			detailPlatformJobID: "another-job", platformStatus: "open",
 		},
 	}
 	for _, test := range tests {

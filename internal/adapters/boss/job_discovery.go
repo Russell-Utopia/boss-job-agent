@@ -163,6 +163,7 @@ type rawDiscoveryJob struct {
 	PlatformJobID          string `json:"platformJobId"`
 	DetailPlatformJobID    string `json:"detailPlatformJobId"`
 	PlatformStatusEvidence string `json:"platformStatusEvidence"`
+	PlatformStatusText     string `json:"platformStatusText,omitempty"`
 	CanonicalURL           string `json:"canonicalUrl"`
 	JobTitle               string `json:"jobTitle"`
 	CompanyName            string `json:"companyName"`
@@ -207,11 +208,9 @@ func observationFromReliableSearchDetail(rawJob rawDiscoveryJob) (discovery.JobO
 			errors.New("BOSS live detail does not confirm the listed platform job"),
 		)
 	}
-	if strings.TrimSpace(rawJob.PlatformStatusEvidence) != "招聘中" {
-		return discovery.JobObservation{}, newAdapterFailure(
-			adapterFailureInvalidResponse,
-			errors.New("BOSS live detail has no reliable open status"),
-		)
+	platformStatus, closedReason, err := reliablePlatformStatus(rawJob)
+	if err != nil {
+		return discovery.JobObservation{}, err
 	}
 	salary, err := reliableDiscoverySalary(rawJob.Salary, rawJob.SalaryEvidence)
 	if err != nil {
@@ -229,18 +228,51 @@ func observationFromReliableSearchDetail(rawJob rawDiscoveryJob) (discovery.JobO
 			errors.New("BOSS live detail returned an empty JD"),
 		)
 	}
-	// A matching live detail identity plus BOSS's explicit 招聘中 status is
-	// this adapter's reliable evidence that the job is open.
+	// A matching live detail identity plus BOSS's structured invalidStatus signal
+	// is this adapter's reliable evidence of whether the job is open or closed.
 	return discovery.JobObservation{
-		PlatformJobID:  platformJobID,
-		CanonicalURL:   strings.TrimSpace(rawJob.CanonicalURL),
-		JobTitle:       strings.TrimSpace(rawJob.JobTitle),
-		CompanyName:    strings.TrimSpace(rawJob.CompanyName),
-		City:           strings.TrimSpace(rawJob.City),
-		Salary:         salary,
-		FullJD:         fullJD,
-		PlatformStatus: discovery.PlatformStatusOpen,
+		PlatformJobID:        platformJobID,
+		CanonicalURL:         strings.TrimSpace(rawJob.CanonicalURL),
+		JobTitle:             strings.TrimSpace(rawJob.JobTitle),
+		CompanyName:          strings.TrimSpace(rawJob.CompanyName),
+		City:                 strings.TrimSpace(rawJob.City),
+		Salary:               salary,
+		FullJD:               fullJD,
+		PlatformStatus:       platformStatus,
+		PlatformClosedReason: closedReason,
 	}, nil
+}
+
+// reliablePlatformStatus derives open/closed from BOSS's structured
+// invalidStatus boolean, which the detail script surfaces as "open"/"closed"/
+// "unknown". The display string jobStatusDesc is deliberately NOT the decision
+// signal: BOSS obfuscates it with private-use glyphs or rewords it, so a literal
+// match rejects legitimate open jobs (issue #45). jobStatusDesc is kept only as
+// a human-readable closed reason. A closed job is a first-class observation, so
+// one not-open job no longer fails the whole run. An absent boolean ("unknown")
+// is a single-job retryable read failure (like an empty JD), never a
+// run-failing invalid_response and never a silent all-closed run.
+func reliablePlatformStatus(rawJob rawDiscoveryJob) (discovery.PlatformStatus, string, error) {
+	switch strings.TrimSpace(rawJob.PlatformStatusEvidence) {
+	case "open":
+		return discovery.PlatformStatusOpen, "", nil
+	case "closed":
+		reason := strings.TrimSpace(rawJob.PlatformStatusText)
+		if reason == "" || containsPrivateUseCharacters(reason) {
+			reason = "BOSS 标记该岗位不在招聘中"
+		}
+		return discovery.PlatformStatusClosed, reason, nil
+	case "unknown":
+		return "", "", newAdapterFailure(
+			adapterFailureTransient,
+			errors.New("BOSS live detail has no reliable invalidStatus signal"),
+		)
+	default:
+		return "", "", newAdapterFailure(
+			adapterFailureInvalidProtocol,
+			errors.New("BOSS live detail returned an unrecognized platform status signal"),
+		)
+	}
 }
 
 func reliableDiscoverySalary(value, evidence string) (string, error) {
@@ -560,10 +592,18 @@ const readDiscoveryJobScript = `(async () => {
   }
   const renderedSalary = normalized(info.salaryDesc || input.salary);
   const salaryReadable = renderedSalary !== "" && !hasPrivateUseCharacters(renderedSalary);
+  // The reliable open/closed signal is BOSS's structured invalidStatus boolean,
+  // not the display string jobStatusDesc (BOSS obfuscates/rewords the latter).
+  // A non-boolean invalidStatus means the reliable signal is absent -> "unknown",
+  // which the Go side treats as a single-job retryable read failure.
+  const platformStatusEvidence = typeof info.invalidStatus === "boolean"
+    ? (info.invalidStatus ? "closed" : "open")
+    : "unknown";
   const job = {
     platformJobId: input.platformJobId,
     detailPlatformJobId,
-    platformStatusEvidence: normalized(info.jobStatusDesc),
+    platformStatusEvidence,
+    platformStatusText: normalized(info.jobStatusDesc),
     canonicalUrl: "https://www.zhipin.com/job_detail/" + input.platformJobId + ".html",
     jobTitle: normalized(info.jobName || input.jobTitle),
     companyName: normalized(info.brandName || input.companyName),
